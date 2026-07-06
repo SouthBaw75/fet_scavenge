@@ -16,8 +16,7 @@ export default function HuntPage() {
   const router = useRouter();
   const supabase = createClient();
 
-  const [teamId] = useState(() => getStoredTeamId());
-  const [state, setState] = useState<LoadState>(teamId ? "loading" : "no-team");
+  const [state, setState] = useState<LoadState>("loading");
   const [team, setTeam] = useState<Team | null>(null);
   const [items, setItems] = useState<PublicHuntItem[]>([]);
   const [answeredIds, setAnsweredIds] = useState<Set<string>>(new Set());
@@ -25,10 +24,18 @@ export default function HuntPage() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!teamId) return;
+    // localStorage is only readable on the client, so the session lookup has
+    // to happen here rather than in a state initializer (which would make the
+    // server-rendered HTML disagree with the client and break hydration).
+    const teamId = getStoredTeamId();
+    if (!teamId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- syncing from localStorage, an external system
+      setState("no-team");
+      return;
+    }
     let cancelled = false;
 
-    async function load() {
+    async function load(teamId: string) {
       const { data: teamRow, error: teamError } = await supabase
         .from("teams")
         .select(
@@ -89,12 +96,12 @@ export default function HuntPage() {
       setState("ready");
     }
 
-    load();
+    load(teamId);
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teamId]);
+  }, []);
 
   const currentItem = items.find((item) => !answeredIds.has(item.id));
 
@@ -223,7 +230,12 @@ export default function HuntPage() {
 
           {currentItem.type === "qr" && (
             <div className="mt-6">
-              <QrScannerView onScan={(value) => submitAnswer(value)} />
+              {/* key forces a fresh scanner per item so consecutive QR stops
+                  never reuse a stale scanner instance */}
+              <QrScannerView
+                key={currentItem.id}
+                onScan={(value) => submitAnswer(value)}
+              />
             </div>
           )}
         </div>

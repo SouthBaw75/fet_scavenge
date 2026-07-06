@@ -9,15 +9,22 @@ export function QrScannerView({
   onScan: (value: string) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Keep the latest callback in a ref so the scanner (created once) never
+  // fires a stale closure from an earlier render.
+  const onScanRef = useRef(onScan);
   const [cameraError, setCameraError] = useState(false);
   const [manualValue, setManualValue] = useState("");
+
+  useEffect(() => {
+    onScanRef.current = onScan;
+  }, [onScan]);
 
   useEffect(() => {
     if (!videoRef.current) return;
 
     const scanner = new QrScanner(
       videoRef.current,
-      (result) => onScan(result.data),
+      (result) => onScanRef.current(result.data),
       { highlightScanRegion: true, highlightCodeOutline: true },
     );
 
@@ -27,7 +34,6 @@ export function QrScannerView({
       scanner.stop();
       scanner.destroy();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (

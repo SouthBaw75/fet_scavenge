@@ -50,7 +50,7 @@ create table hunt_items (
 create table teams (
   id uuid primary key default gen_random_uuid(),
   hunt_id uuid not null references hunts(id) on delete cascade,
-  employee_id uuid references employees(id),
+  employee_id uuid references employees(id) on delete set null,
   team_name text not null,
   created_at timestamptz not null default now(),
   started_at timestamptz,
@@ -176,10 +176,14 @@ begin
     raise exception 'invalid hunt item';
   end if;
 
-  v_is_correct := case
-    when v_type = 'qr' then p_answer = v_qr
-    else lower(trim(p_answer)) = lower(trim(v_correct))
-  end;
+  -- coalesce: a misconfigured item (null correct_answer / qr_value) grades
+  -- as incorrect instead of erroring, so teams are never blocked mid-hunt.
+  v_is_correct := coalesce(
+    case
+      when v_type = 'qr' then p_answer = v_qr
+      else lower(trim(p_answer)) = lower(trim(v_correct))
+    end,
+    false);
 
   insert into team_progress (team_id, hunt_item_id, answer_given, is_correct)
   values (p_team_id, p_hunt_item_id, p_answer, v_is_correct)

@@ -102,16 +102,20 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
     const swapWith = items[index + direction];
     if (!swapWith) return;
 
-    await Promise.all([
-      supabase
-        .from("hunt_items")
-        .update({ order_index: swapWith.order_index })
-        .eq("id", item.id),
-      supabase
-        .from("hunt_items")
-        .update({ order_index: item.order_index })
-        .eq("id", swapWith.id),
-    ]);
+    // (hunt_id, order_index) is unique, so a direct swap would collide.
+    // Park the moving item on a temporary index, then do the swap in order.
+    await supabase
+      .from("hunt_items")
+      .update({ order_index: -1 })
+      .eq("id", item.id);
+    await supabase
+      .from("hunt_items")
+      .update({ order_index: item.order_index })
+      .eq("id", swapWith.id);
+    await supabase
+      .from("hunt_items")
+      .update({ order_index: swapWith.order_index })
+      .eq("id", item.id);
     await refresh();
   }
 

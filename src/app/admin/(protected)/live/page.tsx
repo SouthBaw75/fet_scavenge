@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { HuntTimer } from "@/components/HuntTimer";
+import { durationSecondsBetween, formatDurationSeconds } from "@/lib/time";
 import type { Hunt, Team } from "@/lib/types/hunt";
 
 export default function AdminLivePage() {
@@ -172,12 +173,12 @@ export default function AdminLivePage() {
                     )}
                     {team.started_at && team.finished_at && (
                       <span>
-                        {Math.round(
-                          (new Date(team.finished_at).getTime() -
-                            new Date(team.started_at).getTime()) /
-                            1000,
+                        {formatDurationSeconds(
+                          durationSecondsBetween(
+                            team.started_at,
+                            team.finished_at,
+                          ),
                         )}
-                        s
                       </span>
                     )}
                   </td>

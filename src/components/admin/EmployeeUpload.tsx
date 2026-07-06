@@ -17,6 +17,7 @@ export function EmployeeUpload() {
   const supabase = createClient();
   const [rows, setRows] = useState<ParsedRow[]>([]);
   const [fileName, setFileName] = useState<string | null>(null);
+  const [replaceExisting, setReplaceExisting] = useState(true);
   const [status, setStatus] = useState<"idle" | "uploading" | "done" | "error">(
     "idle",
   );
@@ -53,6 +54,18 @@ export function EmployeeUpload() {
     if (rows.length === 0) return;
     setStatus("uploading");
     setMessage(null);
+
+    if (replaceExisting) {
+      const { error } = await supabase
+        .from("employees")
+        .delete()
+        .not("id", "is", null);
+      if (error) {
+        setStatus("error");
+        setMessage(error.message);
+        return;
+      }
+    }
 
     const chunkSize = 500;
     for (let i = 0; i < rows.length; i += chunkSize) {
@@ -93,10 +106,18 @@ export function EmployeeUpload() {
       />
 
       {fileName && rows.length > 0 && (
-        <div className="mt-4 flex items-center gap-4">
+        <div className="mt-4 flex flex-wrap items-center gap-4">
           <p className="text-sm text-brand-navy/70">
             {fileName}: {rows.length} employees ready to upload.
           </p>
+          <label className="flex items-center gap-2 text-sm text-brand-navy/70">
+            <input
+              type="checkbox"
+              checked={replaceExisting}
+              onChange={(e) => setReplaceExisting(e.target.checked)}
+            />
+            Replace existing list
+          </label>
           <button
             onClick={upload}
             disabled={status === "uploading"}

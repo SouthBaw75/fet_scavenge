@@ -3,9 +3,9 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { storeTeamId } from "@/lib/team-session";
+import { getStoredTeamId, storeTeamId } from "@/lib/team-session";
 import { SiteHeader } from "@/components/SiteHeader";
-import type { Employee, Hunt } from "@/lib/types/hunt";
+import type { Employee, Hunt, Team } from "@/lib/types/hunt";
 
 type Step = "loading" | "no-hunt" | "find-employee" | "name-team" | "creating";
 
@@ -15,6 +15,7 @@ export default function RegisterPage() {
 
   const [step, setStep] = useState<Step>("loading");
   const [hunt, setHunt] = useState<Hunt | null>(null);
+  const [resumeTeam, setResumeTeam] = useState<Team | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Employee[]>([]);
   const [searching, setSearching] = useState(false);
@@ -38,6 +39,23 @@ export default function RegisterPage() {
       if (error || !data) {
         setStep("no-hunt");
         return;
+      }
+
+      // If this device already registered a team for this hunt, offer to
+      // resume it instead of silently creating a duplicate with a fresh timer.
+      const storedTeamId = getStoredTeamId();
+      if (storedTeamId) {
+        const { data: existingTeam } = await supabase
+          .from("teams")
+          .select(
+            "id, hunt_id, employee_id, team_name, created_at, started_at, finished_at",
+          )
+          .eq("id", storedTeamId)
+          .eq("hunt_id", data.id)
+          .maybeSingle();
+
+        if (cancelled) return;
+        if (existingTeam) setResumeTeam(existingTeam as Team);
       }
 
       setHunt(data as Hunt);
@@ -128,6 +146,25 @@ export default function RegisterPage() {
             <p className="mt-2 text-brand-navy/70">
               Check with an FET team member to find out when the scavenger
               hunt kicks off.
+            </p>
+          </div>
+        )}
+
+        {step === "find-employee" && resumeTeam && (
+          <div className="w-full rounded-2xl border border-brand-cyan/40 bg-brand-cyan/10 p-4 text-center">
+            <p className="font-semibold text-brand-navy">
+              Welcome back, {resumeTeam.team_name}!
+            </p>
+            <button
+              onClick={() =>
+                router.push(resumeTeam.finished_at ? "/hunt/complete" : "/hunt")
+              }
+              className="mt-3 w-full rounded-full bg-brand-navy px-6 py-2.5 font-semibold text-white transition-colors hover:bg-brand-navy-light"
+            >
+              {resumeTeam.finished_at ? "See Your Results" : "Continue Your Hunt"}
+            </button>
+            <p className="mt-2 text-xs text-brand-navy/50">
+              Or register a new team below.
             </p>
           </div>
         )}
