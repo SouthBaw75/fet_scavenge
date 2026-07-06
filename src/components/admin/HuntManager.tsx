@@ -188,7 +188,15 @@ export function HuntManager({
               </label>
             </div>
 
-            <div className="mt-3 border-t border-brand-navy/10 pt-3">
+            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-brand-navy/10 pt-3">
+              <a
+                href={`/admin/print-portal?hunt=${hunt.id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-full border border-brand-navy/20 px-4 py-1.5 text-xs font-semibold text-brand-navy transition-colors hover:bg-brand-navy/5"
+              >
+                🎫 Print join poster
+              </a>
               <button
                 onClick={() => resetHunt(hunt)}
                 disabled={resettingId === hunt.id}
