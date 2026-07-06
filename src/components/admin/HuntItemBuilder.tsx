@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { optimizeImage } from "@/lib/optimize-image";
 import { QrImage } from "./QrImage";
 import type { HuntItem, HuntItemType } from "@/lib/types/hunt";
 
@@ -22,7 +23,9 @@ const EMPTY_FORM = {
   points: 1,
 };
 
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB — plenty for a phone photo, keeps hunt pages fast
+// Cap on the ORIGINAL file the admin picks. It gets downscaled + re-encoded to
+// WebP before upload, so the stored/served file is far smaller than this.
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 
 // Generates a unique, hard-to-guess value to encode in a printed QR code.
 function generateQrValue() {
@@ -85,18 +88,23 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
       setImageError("Please choose an image file.");
       return;
     }
+    // Guard the original upload size (phone photos can be huge); the file is
+    // then downscaled/re-encoded below so what we actually store is tiny.
     if (file.size > MAX_IMAGE_BYTES) {
-      setImageError("That image is too large (5MB max).");
+      setImageError("That image is too large (25MB max).");
       return;
     }
 
     setUploadingImage(true);
-    const ext = file.name.split(".").pop() || "jpg";
+
+    // Optimize for the web: cap dimensions and re-encode to WebP so families
+    // download a small, fast-loading image instead of the full-res photo.
+    const { blob, ext, contentType } = await optimizeImage(file);
     const path = `${huntId}/${crypto.randomUUID()}.${ext}`;
 
     const { error } = await supabase.storage
       .from("question-images")
-      .upload(path, file, { upsert: false });
+      .upload(path, blob, { upsert: false, contentType });
 
     if (error) {
       setImageError(error.message);
@@ -334,7 +342,7 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
               />
               {uploadingImage && (
                 <p className="mt-1 text-xs font-medium text-brand-navy/60">
-                  Uploading...
+                  Optimizing &amp; uploading...
                 </p>
               )}
               {imageError && (
