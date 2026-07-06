@@ -6,6 +6,29 @@ import { HuntTimer } from "@/components/HuntTimer";
 import { durationSecondsBetween, formatDurationSeconds } from "@/lib/time";
 import type { Hunt, Team } from "@/lib/types/hunt";
 
+interface RankedRow {
+  team: Team;
+  tier: 0 | 1 | 2;
+  rank: number | null;
+}
+
+// Pre-computes each row's rank (restarts per tier; teams still waiting to
+// start get no rank). Kept outside the component so the counters are local
+// to this call, not component render state.
+function rankTeamRows(sortedTeams: Team[]): RankedRow[] {
+  let rank = 0;
+  let lastTier = -1;
+  return sortedTeams.map((team) => {
+    const tier: 0 | 1 | 2 = team.finished_at ? 0 : team.started_at ? 1 : 2;
+    if (tier !== lastTier) {
+      rank = 0;
+      lastTier = tier;
+    }
+    if (tier !== 2) rank += 1;
+    return { team, tier, rank: tier === 2 ? null : rank };
+  });
+}
+
 export default function AdminLivePage() {
   const supabase = createClient();
   const [hunts, setHunts] = useState<Hunt[]>([]);
@@ -112,6 +135,36 @@ export default function AdminLivePage() {
   ).length;
   const finishedCount = teams.filter((t) => t.finished_at).length;
 
+  // Live leaderboard: finished teams first (fastest time wins), then teams
+  // currently hunting (most items answered wins, ties broken by who's been
+  // going the longest — i.e. slower), then teams still waiting to start.
+  // This way every registered team shows up somewhere, not just the ones
+  // who've begun.
+  const rankedTeams = [...teams].sort((a, b) => {
+    const tier = (t: Team) => (t.finished_at ? 0 : t.started_at ? 1 : 2);
+    const tierDiff = tier(a) - tier(b);
+    if (tierDiff !== 0) return tierDiff;
+
+    if (a.finished_at && b.finished_at) {
+      return (
+        durationSecondsBetween(a.started_at!, a.finished_at) -
+        durationSecondsBetween(b.started_at!, b.finished_at)
+      );
+    }
+    if (a.started_at && b.started_at) {
+      const answeredDiff =
+        (progressCounts[b.id] ?? 0) - (progressCounts[a.id] ?? 0);
+      if (answeredDiff !== 0) return answeredDiff;
+      return (
+        new Date(a.started_at).getTime() - new Date(b.started_at).getTime()
+      );
+    }
+    return (
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+  });
+  const rankedRows = rankTeamRows(rankedTeams);
+
   return (
     <div className="flex flex-col gap-6">
       <div className="animate-slide-up flex flex-wrap items-end justify-between gap-4">
@@ -145,6 +198,70 @@ export default function AdminLivePage() {
           ))}
         </select>
       </div>
+
+      {teams.length > 0 && (
+        <div className="animate-slide-up overflow-hidden rounded-2xl border border-brand-navy/10 bg-white shadow-sm">
+          <div className="border-b border-brand-navy/10 px-5 py-3">
+            <h2 className="font-display text-lg font-semibold text-brand-navy">
+              Live Leaderboard
+            </h2>
+            <p className="text-xs text-brand-navy/50">
+              Finished teams rank by time; teams still hunting rank by
+              progress; everyone registered shows up, even before they start.
+            </p>
+          </div>
+          <ul className="divide-y divide-brand-navy/5">
+            {rankedRows.map(({ team, tier, rank }) => {
+              const answered = progressCounts[team.id] ?? 0;
+
+              return (
+                <li
+                  key={team.id}
+                  className="flex items-center justify-between gap-3 px-5 py-3"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="w-6 shrink-0 text-center font-display text-sm font-bold text-brand-navy/40">
+                      {rank ?? "–"}
+                    </span>
+                    <span className="truncate font-medium text-brand-navy">
+                      {team.team_name}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-3 text-sm">
+                    {tier === 2 && (
+                      <span className="rounded-full bg-brand-navy/5 px-3 py-1 text-xs font-semibold text-brand-navy/50">
+                        Waiting to start
+                      </span>
+                    )}
+                    {tier === 1 && (
+                      <>
+                        <span className="text-xs text-brand-navy/60">
+                          {answered} / {itemCount} answered
+                        </span>
+                        <HuntTimer startedAt={team.started_at!} />
+                      </>
+                    )}
+                    {tier === 0 && (
+                      <span className="font-mono font-semibold text-brand-green">
+                        {formatDurationSeconds(
+                          durationSecondsBetween(
+                            team.started_at!,
+                            team.finished_at!,
+                          ),
+                        )}
+                      </span>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
+      <h2 className="font-display text-lg font-semibold text-brand-navy">
+        Team Details
+      </h2>
 
       <div className="stagger-children grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {teams.map((team) => {
