@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { SiteHeader } from "@/components/SiteHeader";
 import { FloatingTriangles } from "@/components/FloatingTriangles";
+import { Fetch } from "@/components/Fetch";
 
 export default function Home() {
   return (
@@ -21,6 +22,14 @@ export default function Home() {
               🎉
             </span>
           </span>
+
+          {/* FETch says hi */}
+          <Fetch
+            pose="wave"
+            width={260}
+            priority
+            className="animate-bounce-soft drop-shadow-xl"
+          />
 
           {/* Headline */}
           <h1 className="font-display text-5xl font-bold leading-[1.05] tracking-tight text-white sm:text-7xl">

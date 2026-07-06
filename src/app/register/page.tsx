@@ -9,7 +9,18 @@ import { FloatingTriangles } from "@/components/FloatingTriangles";
 import { playTap, playSuccess } from "@/lib/sound";
 import { burstConfetti } from "@/lib/celebrate";
 import { randomTeamName } from "@/lib/fun-names";
+import { Fetch } from "@/components/Fetch";
 import type { Employee, Hunt, Team } from "@/lib/types/hunt";
+
+// Roster names are stored "LAST, FIRST" (as provided). Pull out a friendly,
+// title-cased first name for the greeting, tolerant of a plain "First Last".
+function friendlyFirstName(fullName: string): string {
+  const first = fullName.includes(",")
+    ? (fullName.split(",")[1] ?? "").trim().split(/\s+/)[0]
+    : fullName.trim().split(/\s+/)[0];
+  if (!first) return "your";
+  return first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+}
 
 type Step = "loading" | "no-hunt" | "find-employee" | "name-team" | "creating";
 
@@ -146,10 +157,7 @@ export default function RegisterPage() {
         <div className="relative z-10 mx-auto flex w-full max-w-md flex-col items-center gap-6">
           {step === "loading" && (
             <div className="flex flex-col items-center gap-4 text-center">
-              <span
-                className="brand-triangle animate-bounce-soft"
-                aria-hidden="true"
-              />
+              <Fetch pose="thinking" width={180} className="animate-bounce-soft" />
               <p className="font-display text-lg text-white/70">
                 Warming up the hunt...
               </p>
@@ -158,9 +166,7 @@ export default function RegisterPage() {
 
           {step === "no-hunt" && (
             <div className="animate-pop-in w-full rounded-3xl bg-white p-8 text-center shadow-xl">
-              <span className="text-5xl" aria-hidden="true">
-                ⏳
-              </span>
+              <Fetch pose="confused" width={200} className="mx-auto" />
               <h1 className="mt-4 font-display text-3xl font-bold text-brand-navy">
                 No hunt is active... yet!
               </h1>
@@ -173,9 +179,7 @@ export default function RegisterPage() {
 
           {step === "find-employee" && resumeTeam && (
             <div className="animate-slide-up w-full rounded-3xl border-2 border-brand-cyan/60 bg-white p-6 text-center shadow-xl">
-              <span className="text-4xl" aria-hidden="true">
-                👋
-              </span>
+              <Fetch pose="wink-wave" width={170} className="mx-auto" />
               <p className="mt-2 font-display text-2xl font-bold text-brand-navy">
                 Welcome back, {resumeTeam.team_name}!
               </p>
@@ -268,11 +272,9 @@ export default function RegisterPage() {
 
           {(step === "name-team" || step === "creating") && employee && (
             <div className="animate-pop-in w-full rounded-3xl bg-white p-6 text-center shadow-xl sm:p-8">
-              <span className="animate-wiggle inline-block text-5xl" aria-hidden="true">
-                🎉
-              </span>
+              <Fetch pose="thumbs-up" width={180} className="mx-auto" />
               <h1 className="mt-2 font-display text-3xl font-bold text-brand-navy">
-                Welcome, {employee.full_name.split(" ")[0]}&apos;s family!
+                Welcome, {friendlyFirstName(employee.full_name)}&apos;s family!
               </h1>
               <p className="mt-2 text-brand-navy/70">
                 Give your team an epic name for the hunt.

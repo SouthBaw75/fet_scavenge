@@ -10,6 +10,7 @@ import { HuntTimer } from "@/components/HuntTimer";
 import { QrScannerView } from "@/components/QrScanner";
 import { playTap, playSubmit } from "@/lib/sound";
 import { burstConfetti } from "@/lib/celebrate";
+import { Fetch } from "@/components/Fetch";
 import type { Hunt, PublicHuntItem, Team } from "@/lib/types/hunt";
 
 type LoadState = "loading" | "no-team" | "ready" | "complete";
@@ -157,9 +158,7 @@ export default function HuntPage() {
       <div className="flex flex-1 flex-col">
         <SiteHeader />
         <main className="flex flex-1 flex-col items-center justify-center gap-3">
-          <span className="animate-bounce-soft text-5xl" aria-hidden>
-            🗺️
-          </span>
+          <Fetch pose="thinking" width={190} className="animate-bounce-soft" />
           <p className="font-display text-lg font-semibold text-brand-navy/70">
             Loading your hunt...
           </p>
@@ -173,9 +172,7 @@ export default function HuntPage() {
       <div className="flex flex-1 flex-col">
         <SiteHeader />
         <main className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
-          <span className="animate-wiggle text-5xl" aria-hidden>
-            🔍
-          </span>
+          <Fetch pose="confused" width={200} />
           <h1 className="font-display text-3xl font-bold text-brand-navy">
             We couldn&apos;t find your team
           </h1>
@@ -198,9 +195,7 @@ export default function HuntPage() {
       <div className="flex flex-1 flex-col">
         <SiteHeader />
         <main className="flex flex-1 flex-col items-center justify-center gap-3">
-          <span className="animate-bounce-soft text-5xl" aria-hidden>
-            🗺️
-          </span>
+          <Fetch pose="thinking" width={190} className="animate-bounce-soft" />
           <p className="font-display text-lg font-semibold text-brand-navy/70">
             Loading your hunt...
           </p>
@@ -249,9 +244,11 @@ export default function HuntPage() {
 
         {reveal ? (
           <div className="animate-pop-in rounded-3xl border-2 border-brand-green/40 bg-white p-6 text-center shadow-xl shadow-brand-navy/5">
-            <span className="animate-bounce-soft inline-block text-5xl" aria-hidden>
-              🎉
-            </span>
+            <Fetch
+              pose="celebrate"
+              width={190}
+              className="mx-auto animate-bounce-soft"
+            />
             <h2 className="mt-2 font-display text-2xl font-bold text-brand-green">
               You found it!
             </h2>

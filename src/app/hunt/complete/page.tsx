@@ -8,6 +8,7 @@ import { SiteHeader } from "@/components/SiteHeader";
 import { FloatingTriangles } from "@/components/FloatingTriangles";
 import { playFanfare } from "@/lib/sound";
 import { finishConfetti } from "@/lib/celebrate";
+import { Fetch } from "@/components/Fetch";
 import type { Hunt, Team } from "@/lib/types/hunt";
 
 function formatDuration(ms: number) {
@@ -102,9 +103,7 @@ export default function HuntCompletePage() {
       <div className="flex flex-1 flex-col">
         <SiteHeader />
         <main className="flex flex-1 flex-col items-center justify-center gap-3">
-          <span className="animate-bounce-soft text-5xl" aria-hidden>
-            🏁
-          </span>
+          <Fetch pose="thinking" width={190} className="animate-bounce-soft" />
           <p className="font-display text-lg font-semibold text-brand-navy/70">
             Tallying your results...
           </p>
@@ -126,9 +125,12 @@ export default function HuntCompletePage() {
         <section className="relative overflow-hidden bg-brand-navy px-6 pb-14 pt-12 text-center">
           <FloatingTriangles />
           <div className="relative mx-auto flex w-full max-w-md flex-col items-center gap-4">
-            <span className="animate-bounce-soft text-6xl" aria-hidden>
-              🏆
-            </span>
+            <Fetch
+              pose="yay"
+              width={240}
+              priority
+              className="animate-bounce-soft drop-shadow-xl"
+            />
             <span className="rounded-full bg-brand-green/20 px-5 py-1.5 font-display text-sm font-bold tracking-widest text-brand-green">
               HUNT COMPLETE
             </span>
