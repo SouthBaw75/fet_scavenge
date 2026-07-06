@@ -134,7 +134,8 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
           ? form.reveal_message.trim()
           : null,
       image_url:
-        form.type === "multiple_choice" && form.image_url.trim()
+        (form.type === "multiple_choice" || form.type === "text") &&
+        form.image_url.trim()
           ? form.image_url.trim()
           : null,
       points: form.points,
@@ -296,54 +297,56 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
             className="rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
           />
 
+          {(form.type === "multiple_choice" || form.type === "text") && (
+            <div className="rounded-lg border border-brand-navy/15 bg-brand-navy/[0.02] p-3">
+              <label className="text-xs font-semibold text-brand-navy/70">
+                Photo (optional) — ask &quot;what is this?&quot; with a picture
+              </label>
+
+              {form.image_url && (
+                <div className="mt-2 flex items-start gap-3 rounded-lg bg-white p-2">
+                  {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage URL, no build-time optimization needed */}
+                  <img
+                    src={form.image_url}
+                    alt="Question preview"
+                    className="h-24 w-24 rounded-md object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, image_url: "" })}
+                    className="rounded-full px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-50"
+                  >
+                    Remove photo
+                  </button>
+                </div>
+              )}
+
+              <input
+                type="file"
+                accept="image/*"
+                disabled={uploadingImage}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) uploadImage(file);
+                  e.target.value = "";
+                }}
+                className="mt-2 block w-full text-xs text-brand-navy/70 file:mr-3 file:rounded-full file:border-0 file:bg-brand-cyan/10 file:px-4 file:py-2 file:text-xs file:font-semibold file:text-brand-navy hover:file:bg-brand-cyan/20"
+              />
+              {uploadingImage && (
+                <p className="mt-1 text-xs font-medium text-brand-navy/60">
+                  Uploading...
+                </p>
+              )}
+              {imageError && (
+                <p className="mt-1 text-xs font-medium text-red-600">
+                  {imageError}
+                </p>
+              )}
+            </div>
+          )}
+
           {form.type === "multiple_choice" && (
             <>
-              <div className="rounded-lg border border-brand-navy/15 bg-brand-navy/[0.02] p-3">
-                <label className="text-xs font-semibold text-brand-navy/70">
-                  Photo (optional) — ask &quot;what is this?&quot; with a picture
-                </label>
-
-                {form.image_url && (
-                  <div className="mt-2 flex items-start gap-3 rounded-lg bg-white p-2">
-                    {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage URL, no build-time optimization needed */}
-                    <img
-                      src={form.image_url}
-                      alt="Question preview"
-                      className="h-24 w-24 rounded-md object-cover"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setForm({ ...form, image_url: "" })}
-                      className="rounded-full px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-50"
-                    >
-                      Remove photo
-                    </button>
-                  </div>
-                )}
-
-                <input
-                  type="file"
-                  accept="image/*"
-                  disabled={uploadingImage}
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) uploadImage(file);
-                    e.target.value = "";
-                  }}
-                  className="mt-2 block w-full text-xs text-brand-navy/70 file:mr-3 file:rounded-full file:border-0 file:bg-brand-cyan/10 file:px-4 file:py-2 file:text-xs file:font-semibold file:text-brand-navy hover:file:bg-brand-cyan/20"
-                />
-                {uploadingImage && (
-                  <p className="mt-1 text-xs font-medium text-brand-navy/60">
-                    Uploading...
-                  </p>
-                )}
-                {imageError && (
-                  <p className="mt-1 text-xs font-medium text-red-600">
-                    {imageError}
-                  </p>
-                )}
-              </div>
-
               <input
                 value={form.choicesText}
                 onChange={(e) =>
