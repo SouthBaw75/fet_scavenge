@@ -1,0 +1,23 @@
+# Supabase
+
+`migrations/0001_initial_schema.sql` is the consolidated, verified schema
+for the scavenger hunt (tables, RLS, column grants, security-definer RPCs,
+and Realtime setup). It has already been applied to the hosted project.
+
+## Backend verification (done)
+
+The full family flow was exercised end-to-end against the RPCs:
+
+- anon can register a team, read questions (without answers), start the
+  timer, and submit answers
+- grading is correct (right/wrong, case- and whitespace-insensitive text
+  matching, exact QR matching)
+- `finished_at` is stamped only once every item is answered
+- `start_hunt` and the finish stamp are idempotent
+- anon cannot read `correct_answer` / `qr_value` (blocked by column grants)
+
+## Admin accounts
+
+There is no public admin signup. Create admin logins in the Supabase
+dashboard: **Authentication → Users → Add User**. Any authenticated user is
+treated as an admin in phase 1.
