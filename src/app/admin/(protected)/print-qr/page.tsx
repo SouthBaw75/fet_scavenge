@@ -14,6 +14,7 @@ function PrintQrContent() {
   const [hunt, setHunt] = useState<Hunt | null>(null);
   const [items, setItems] = useState<HuntItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showQuestion, setShowQuestion] = useState(true);
 
   useEffect(() => {
     if (!huntId) {
@@ -79,12 +80,22 @@ function PrintQrContent() {
             this page, then cut out and post each code at its station.
           </p>
         </div>
-        <button
-          onClick={() => window.print()}
-          className="btn-springy rounded-full bg-brand-navy px-6 py-2.5 font-semibold text-white"
-        >
-          🖨 Print
-        </button>
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-2 text-sm font-medium text-brand-navy/70">
+            <input
+              type="checkbox"
+              checked={showQuestion}
+              onChange={(e) => setShowQuestion(e.target.checked)}
+            />
+            Show question above each code
+          </label>
+          <button
+            onClick={() => window.print()}
+            className="btn-springy rounded-full bg-brand-navy px-6 py-2.5 font-semibold text-white"
+          >
+            🖨 Print
+          </button>
+        </div>
       </div>
 
       {/* Print grid — 2 cards per row, each card avoids breaking across pages */}
@@ -97,9 +108,11 @@ function PrintQrContent() {
             <p className="text-xs font-semibold uppercase tracking-wide text-brand-cyan">
               Stop {i + 1}
             </p>
-            <p className="mt-1 font-display text-lg font-bold text-brand-navy">
-              {item.prompt}
-            </p>
+            {showQuestion && (
+              <p className="mt-1 font-display text-lg font-bold text-brand-navy">
+                {item.prompt}
+              </p>
+            )}
             <div className="my-4">
               <QrImage value={item.qr_value ?? ""} size={220} />
             </div>
