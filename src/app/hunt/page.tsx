@@ -80,7 +80,9 @@ export default function HuntPage() {
             .maybeSingle(),
           supabase
             .from("public_hunt_items")
-            .select("id, hunt_id, order_index, type, prompt, choices, points")
+            .select(
+              "id, hunt_id, order_index, type, prompt, choices, points, reveal_message",
+            )
             .eq("hunt_id", currentTeam.hunt_id)
             .order("order_index"),
           supabase.rpc("get_team_status", { p_team_id: currentTeam.id }),
