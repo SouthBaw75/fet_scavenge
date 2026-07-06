@@ -29,6 +29,8 @@ export interface HuntItem {
   choices: string[] | null;
   correct_answer: string | null;
   qr_value: string | null;
+  /** Optional flavor/educational message shown to a team after they scan a QR stop. */
+  reveal_message: string | null;
   points: number;
 }
 

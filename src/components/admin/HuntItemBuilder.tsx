@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { QrImage } from "./QrImage";
 import type { HuntItem, HuntItemType } from "@/lib/types/hunt";
 
 const TYPE_BADGE_STYLES: Record<HuntItemType, string> = {
@@ -16,8 +17,15 @@ const EMPTY_FORM = {
   choicesText: "",
   correct_answer: "",
   qr_value: "",
+  reveal_message: "",
   points: 1,
 };
+
+// Generates a unique, hard-to-guess value to encode in a printed QR code.
+function generateQrValue() {
+  const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `FET-${rand}`;
+}
 
 export function HuntItemBuilder({ huntId }: { huntId: string }) {
   const supabase = createClient();
@@ -52,6 +60,7 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
       choicesText: (item.choices ?? []).join(", "),
       correct_answer: item.correct_answer ?? "",
       qr_value: item.qr_value ?? "",
+      reveal_message: item.reveal_message ?? "",
       points: item.points,
     });
   }
@@ -78,6 +87,10 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
           : null,
       correct_answer: form.type === "qr" ? null : form.correct_answer.trim(),
       qr_value: form.type === "qr" ? form.qr_value.trim() : null,
+      reveal_message:
+        form.type === "qr" && form.reveal_message.trim()
+          ? form.reveal_message.trim()
+          : null,
       points: form.points,
     };
 
@@ -125,9 +138,23 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
     await refresh();
   }
 
+  const qrCount = items.filter((i) => i.type === "qr").length;
+
   return (
     <div className="animate-slide-up rounded-2xl border border-brand-navy/10 bg-white p-6 shadow-sm transition-shadow hover:shadow-md">
-      <h2 className="text-lg font-semibold text-brand-navy">Hunt Items</h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold text-brand-navy">Hunt Items</h2>
+        {qrCount > 0 && (
+          <a
+            href={`/admin/print-qr?hunt=${huntId}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-full border border-brand-navy/20 px-4 py-2 text-sm font-semibold text-brand-navy transition-colors hover:bg-brand-navy/5"
+          >
+            🖨 Print QR codes ({qrCount})
+          </a>
+        )}
+      </div>
 
       <ul className="mt-4 flex flex-col gap-2">
         {items.map((item, i) => (
@@ -191,9 +218,18 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
         <div className="mt-3 flex flex-col gap-3">
           <select
             value={form.type}
-            onChange={(e) =>
-              setForm({ ...form, type: e.target.value as HuntItemType })
-            }
+            onChange={(e) => {
+              const type = e.target.value as HuntItemType;
+              // Give QR items a code up front so it's never blank.
+              setForm({
+                ...form,
+                type,
+                qr_value:
+                  type === "qr" && !form.qr_value
+                    ? generateQrValue()
+                    : form.qr_value,
+              });
+            }}
             className="rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
           >
             <option value="multiple_choice">Multiple Choice</option>
@@ -242,12 +278,57 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
           )}
 
           {form.type === "qr" && (
-            <input
-              value={form.qr_value}
-              onChange={(e) => setForm({ ...form, qr_value: e.target.value })}
-              placeholder="Value encoded in the physical QR code"
-              className="rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
-            />
+            <div className="rounded-lg border border-brand-navy/15 bg-brand-navy/[0.02] p-3">
+              <label className="text-xs font-semibold text-brand-navy/70">
+                QR code value (encoded in the printed code)
+              </label>
+              <div className="mt-1 flex flex-col gap-2 sm:flex-row">
+                <input
+                  value={form.qr_value}
+                  onChange={(e) =>
+                    setForm({ ...form, qr_value: e.target.value })
+                  }
+                  placeholder="e.g. FET-A1B2C3"
+                  className="h-10 flex-1 rounded-lg border border-brand-navy/20 px-3 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    setForm({ ...form, qr_value: generateQrValue() })
+                  }
+                  className="btn-springy h-10 shrink-0 rounded-full border border-brand-cyan/50 bg-brand-cyan/10 px-4 text-sm font-semibold text-brand-navy"
+                >
+                  Generate code
+                </button>
+              </div>
+
+              {form.qr_value.trim() && (
+                <div className="mt-3 flex items-center gap-3 rounded-lg bg-white p-3">
+                  <QrImage value={form.qr_value.trim()} size={96} />
+                  <p className="text-xs text-brand-navy/60">
+                    This is the QR families will scan at the stop. Print it from
+                    the{" "}
+                    <span className="font-semibold text-brand-navy">
+                      Print QR codes
+                    </span>{" "}
+                    button once you&apos;ve saved this item.
+                  </p>
+                </div>
+              )}
+
+              <label className="mt-3 block text-xs font-semibold text-brand-navy/70">
+                Message shown after scanning (optional)
+              </label>
+              <textarea
+                value={form.reveal_message}
+                onChange={(e) =>
+                  setForm({ ...form, reveal_message: e.target.value })
+                }
+                placeholder="e.g. Nice find! This CNC machine cuts valve components for oilfield equipment."
+                rows={2}
+                className="mt-1 w-full rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
+              />
+            </div>
           )}
 
           <input

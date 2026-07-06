@@ -26,6 +26,11 @@ export default function HuntPage() {
   const [answeredIds, setAnsweredIds] = useState<Set<string>>(new Set());
   const [textAnswer, setTextAnswer] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // When a scanned QR stop has a reveal message, hold it here and pause on a
+  // "You found it!" card until the team taps Continue.
+  const [reveal, setReveal] = useState<{ message: string; itemId: string } | null>(
+    null,
+  );
 
   useEffect(() => {
     // localStorage is only readable on the client, so the session lookup has
@@ -127,9 +132,22 @@ export default function HuntPage() {
     });
 
     burstConfetti();
-    setAnsweredIds((prev) => new Set(prev).add(currentItem.id));
     setTextAnswer("");
     setSubmitting(false);
+
+    // For a QR stop with a reveal message, pause on the message before
+    // advancing. Otherwise mark answered immediately (moves to the next stop).
+    if (currentItem.type === "qr" && currentItem.reveal_message) {
+      setReveal({ message: currentItem.reveal_message, itemId: currentItem.id });
+    } else {
+      setAnsweredIds((prev) => new Set(prev).add(currentItem.id));
+    }
+  }
+
+  function dismissReveal() {
+    if (!reveal) return;
+    setAnsweredIds((prev) => new Set(prev).add(reveal.itemId));
+    setReveal(null);
   }
 
   if (state === "loading") {
@@ -227,6 +245,25 @@ export default function HuntPage() {
           />
         </div>
 
+        {reveal ? (
+          <div className="animate-pop-in rounded-3xl border-2 border-brand-green/40 bg-white p-6 text-center shadow-xl shadow-brand-navy/5">
+            <span className="animate-bounce-soft inline-block text-5xl" aria-hidden>
+              🎉
+            </span>
+            <h2 className="mt-2 font-display text-2xl font-bold text-brand-green">
+              You found it!
+            </h2>
+            <p className="mt-3 text-lg leading-relaxed text-brand-navy">
+              {reveal.message}
+            </p>
+            <button
+              onClick={dismissReveal}
+              className="btn-springy mt-6 h-14 w-full rounded-full bg-brand-navy font-display text-lg font-bold text-white shadow-lg"
+            >
+              Next Stop →
+            </button>
+          </div>
+        ) : (
         <div
           key={currentItem.id}
           className="animate-pop-in rounded-3xl border-2 border-brand-navy/10 bg-white p-6 shadow-xl shadow-brand-navy/5"
@@ -305,6 +342,7 @@ export default function HuntPage() {
             </div>
           )}
         </div>
+        )}
       </main>
     </div>
   );

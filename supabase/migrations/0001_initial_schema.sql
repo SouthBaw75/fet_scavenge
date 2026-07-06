@@ -43,6 +43,9 @@ create table hunt_items (
   choices jsonb,
   correct_answer text,
   qr_value text,
+  -- Optional flavor/educational message shown after a QR stop is scanned.
+  -- Non-secret (it is not an answer), so it is exposed via the public view.
+  reveal_message text,
   points int not null default 1,
   unique (hunt_id, order_index)
 );
@@ -77,7 +80,7 @@ create index on team_progress (hunt_item_id);
 
 create view public_hunt_items
   with (security_invoker = true) as
-  select id, hunt_id, order_index, type, prompt, choices, points
+  select id, hunt_id, order_index, type, prompt, choices, points, reveal_message
   from hunt_items;
 
 -- ---------- Row Level Security ----------
@@ -122,7 +125,7 @@ create policy "public can read teams" on teams
 -- anon may read every hunt_items column EXCEPT correct_answer/qr_value.
 
 revoke all on hunt_items from anon;
-grant select (id, hunt_id, order_index, type, prompt, choices, points)
+grant select (id, hunt_id, order_index, type, prompt, choices, points, reveal_message)
   on hunt_items to anon;
 
 grant select on public_hunt_items to anon;

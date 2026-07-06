@@ -34,9 +34,11 @@ https://fet-scavenger-hunt.netlify.app
 
 ## Event-day notes
 
-- QR stops: generate printable QR codes from any QR generator — the encoded
-  text must **exactly match** the item's "Value encoded in the physical QR
-  code" field
+- QR stops: the app generates the codes for you. When you add a QR item it
+  auto-creates a unique code value (e.g. `FET-A1B2C3`) and shows a live
+  preview; you can also add an optional "message shown after scanning" that
+  families see when they find the code. Use the **Print QR codes** button on
+  the Hunt Items card to print a cut-and-post sheet of every QR stop.
 - Only one hunt can be Active at a time (activating one closes others)
 - A family that loses their page can reopen the site on the same phone —
   `/register` offers "Continue Your Hunt"
