@@ -66,7 +66,7 @@ export function HuntManager({
   }
 
   return (
-    <div className="rounded-2xl border border-brand-navy/10 bg-white p-6 shadow-sm">
+    <div className="rounded-2xl border border-brand-navy/10 bg-white p-6 shadow-sm transition-shadow hover:shadow-md">
       <h2 className="text-lg font-semibold text-brand-navy">Hunts</h2>
 
       <div className="mt-4 flex gap-2">
@@ -79,7 +79,7 @@ export function HuntManager({
         <button
           onClick={createHunt}
           disabled={!newName.trim() || creating}
-          className="rounded-lg bg-brand-navy px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+          className="btn-springy rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:opacity-40"
         >
           Create
         </button>
@@ -89,18 +89,23 @@ export function HuntManager({
         {hunts.map((hunt) => (
           <li
             key={hunt.id}
-            className={`rounded-lg border p-4 ${
+            className={`rounded-xl border p-4 transition-all ${
               selectedHuntId === hunt.id
-                ? "border-brand-cyan bg-brand-cyan/5"
-                : "border-brand-navy/10"
+                ? "border-brand-cyan bg-brand-cyan/5 shadow-sm ring-1 ring-brand-cyan/30"
+                : "border-brand-navy/10 hover:border-brand-cyan/40 hover:bg-brand-cyan/[0.03]"
             }`}
           >
             <div className="flex items-center justify-between">
               <button
                 onClick={() => onSelectHunt(hunt.id)}
-                className="text-left font-semibold text-brand-navy"
+                className="text-left font-semibold text-brand-navy transition-colors hover:text-brand-cyan"
               >
                 {hunt.name}
+                {hunt.status === "active" && (
+                  <span className="ml-2 inline-block rounded-full bg-brand-green/10 px-2 py-0.5 align-middle text-xs font-semibold text-brand-green">
+                    Live
+                  </span>
+                )}
               </button>
               <select
                 value={hunt.status}

@@ -39,23 +39,54 @@ export function QrScannerView({
   return (
     <div className="flex flex-col items-center gap-4">
       {!cameraError && (
-        <video
-          ref={videoRef}
-          className="aspect-square w-full max-w-xs rounded-xl bg-black object-cover"
-          muted
-          playsInline
-        />
+        <>
+          {/* Viewfinder frame with corner accents */}
+          <div className="relative w-full max-w-xs rounded-3xl border-4 border-brand-navy bg-brand-navy p-1.5 shadow-xl">
+            <video
+              ref={videoRef}
+              className="aspect-square w-full rounded-2xl bg-black object-cover"
+              muted
+              playsInline
+            />
+            <span
+              aria-hidden
+              className="pointer-events-none absolute left-3 top-3 h-8 w-8 rounded-tl-xl border-l-4 border-t-4 border-brand-cyan"
+            />
+            <span
+              aria-hidden
+              className="pointer-events-none absolute right-3 top-3 h-8 w-8 rounded-tr-xl border-r-4 border-t-4 border-brand-cyan"
+            />
+            <span
+              aria-hidden
+              className="pointer-events-none absolute bottom-3 left-3 h-8 w-8 rounded-bl-xl border-b-4 border-l-4 border-brand-green"
+            />
+            <span
+              aria-hidden
+              className="pointer-events-none absolute bottom-3 right-3 h-8 w-8 rounded-br-xl border-b-4 border-r-4 border-brand-green"
+            />
+          </div>
+          <p className="animate-pulse text-center font-display text-base font-bold text-brand-navy">
+            Point your camera at the QR code! 📸
+          </p>
+        </>
       )}
 
       {cameraError && (
-        <p className="text-center text-sm text-brand-navy/70">
-          Couldn&apos;t access the camera. Ask a volunteer for the code and
-          type it in below.
-        </p>
+        <div className="w-full max-w-xs rounded-3xl border-2 border-dashed border-brand-navy/20 bg-brand-navy/5 px-5 py-6 text-center">
+          <span className="text-4xl" aria-hidden>
+            🙈
+          </span>
+          <p className="mt-2 font-display text-base font-bold text-brand-navy">
+            Couldn&apos;t access the camera
+          </p>
+          <p className="mt-1 text-sm text-brand-navy/70">
+            Ask a volunteer for the code and type it in below.
+          </p>
+        </div>
       )}
 
       <details className="w-full max-w-xs" open={cameraError}>
-        <summary className="cursor-pointer text-center text-sm text-brand-navy/50 underline">
+        <summary className="cursor-pointer text-center text-sm font-semibold text-brand-navy/60 underline decoration-brand-cyan decoration-2 underline-offset-4">
           Trouble scanning? Enter the code manually
         </summary>
         <form
@@ -69,13 +100,13 @@ export function QrScannerView({
             value={manualValue}
             onChange={(e) => setManualValue(e.target.value)}
             placeholder="Enter code"
-            className="flex-1 rounded-lg border border-brand-navy/20 px-3 py-2 outline-none focus:border-brand-cyan focus:ring-2 focus:ring-brand-cyan/30"
+            className="h-12 min-w-0 flex-1 rounded-2xl border-2 border-brand-navy/15 px-4 text-base font-semibold text-brand-navy outline-none focus:border-brand-cyan focus:ring-4 focus:ring-brand-cyan/25"
           />
           <button
             type="submit"
-            className="rounded-lg bg-brand-navy px-4 py-2 font-semibold text-white"
+            className="btn-springy h-12 rounded-2xl bg-brand-navy px-5 font-display text-base font-bold text-white shadow-md"
           >
-            Submit
+            Go 🚀
           </button>
         </form>
       </details>

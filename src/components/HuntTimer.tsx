@@ -23,7 +23,10 @@ export function HuntTimer({ startedAt }: { startedAt: string }) {
   }, [startMs]);
 
   return (
-    <span className="font-mono text-lg font-semibold tabular-nums text-brand-navy">
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-navy px-4 py-1.5 font-mono text-lg font-bold tabular-nums text-white shadow-md">
+      <span aria-hidden className="text-sm">
+        ⏱
+      </span>
       {formatElapsed(elapsed)}
     </span>
   );

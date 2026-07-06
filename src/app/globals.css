@@ -16,6 +16,7 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-fredoka);
 
   --color-brand-navy: var(--brand-navy);
   --color-brand-navy-light: var(--brand-navy-light);
@@ -27,4 +28,196 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
+
+/* ============================================================
+   Fun-mode animation library
+   Big, bouncy, kid-friendly. Everything is disabled under
+   prefers-reduced-motion at the bottom of this file.
+   ============================================================ */
+
+@keyframes pop-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  70% {
+    transform: scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes slide-up-in {
+  0% {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes wiggle {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  25% {
+    transform: rotate(-6deg);
+  }
+  75% {
+    transform: rotate(6deg);
+  }
+}
+
+@keyframes float-drift {
+  0% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-18px) rotate(8deg);
+  }
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(48 204 216 / 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 12px rgb(48 204 216 / 0);
+  }
+}
+
+@keyframes bounce-soft {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}
+
+.animate-pop-in {
+  animation: pop-in 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.animate-slide-up {
+  animation: slide-up-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-wiggle {
+  animation: wiggle 0.4s ease-in-out;
+}
+
+.animate-float {
+  animation: float-drift 6s ease-in-out infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-out infinite;
+}
+
+.animate-bounce-soft {
+  animation: bounce-soft 2.4s ease-in-out infinite;
+}
+
+/* Staggered entrance for lists of choices */
+.stagger-children > * {
+  animation: slide-up-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.stagger-children > *:nth-child(1) {
+  animation-delay: 0.05s;
+}
+.stagger-children > *:nth-child(2) {
+  animation-delay: 0.12s;
+}
+.stagger-children > *:nth-child(3) {
+  animation-delay: 0.19s;
+}
+.stagger-children > *:nth-child(4) {
+  animation-delay: 0.26s;
+}
+.stagger-children > *:nth-child(5) {
+  animation-delay: 0.33s;
+}
+.stagger-children > *:nth-child(6) {
+  animation-delay: 0.4s;
+}
+
+/* Chunky, satisfying press for big buttons */
+.btn-springy {
+  transition:
+    transform 0.12s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.12s ease;
+}
+.btn-springy:hover {
+  transform: translateY(-2px) scale(1.02);
+}
+.btn-springy:active {
+  transform: translateY(1px) scale(0.96);
+}
+
+/* Animated brand gradient for hero text */
+.brand-gradient-text {
+  background: linear-gradient(
+    90deg,
+    var(--brand-cyan),
+    var(--brand-green),
+    var(--brand-cyan)
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 4s linear infinite;
+}
+
+/* Decorative floating brand triangle (pair with .animate-float) */
+.brand-triangle {
+  width: 0;
+  height: 0;
+  border-left: 14px solid transparent;
+  border-right: 14px solid transparent;
+  border-bottom: 24px solid var(--brand-cyan);
+  opacity: 0.85;
+}
+.brand-triangle.green {
+  border-bottom-color: var(--brand-green);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pop-in,
+  .animate-slide-up,
+  .animate-wiggle,
+  .animate-float,
+  .animate-pulse-glow,
+  .animate-bounce-soft,
+  .stagger-children > *,
+  .brand-gradient-text {
+    animation: none !important;
+  }
+  .btn-springy,
+  .btn-springy:hover,
+  .btn-springy:active {
+    transition: none;
+    transform: none;
+  }
 }

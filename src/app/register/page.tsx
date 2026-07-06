@@ -5,6 +5,10 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { getStoredTeamId, storeTeamId } from "@/lib/team-session";
 import { SiteHeader } from "@/components/SiteHeader";
+import { FloatingTriangles } from "@/components/FloatingTriangles";
+import { playTap, playSuccess } from "@/lib/sound";
+import { burstConfetti } from "@/lib/celebrate";
+import { randomTeamName } from "@/lib/fun-names";
 import type { Employee, Hunt, Team } from "@/lib/types/hunt";
 
 type Step = "loading" | "no-hunt" | "find-employee" | "name-team" | "creating";
@@ -101,6 +105,7 @@ export default function RegisterPage() {
   }, [trimmedQuery, step]);
 
   function pickEmployee(emp: Employee) {
+    playTap();
     setEmployee(emp);
     setStep("name-team");
   }
@@ -127,131 +132,205 @@ export default function RegisterPage() {
     }
 
     storeTeamId(data.id);
+    playSuccess();
+    burstConfetti();
     router.push("/hunt");
   }
 
   return (
-    <div className="flex flex-1 flex-col">
+    <div className="flex flex-1 flex-col bg-brand-navy">
       <SiteHeader />
-      <main className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-6 px-6 py-16">
-        {step === "loading" && (
-          <p className="text-brand-navy/60">Loading...</p>
-        )}
+      <main className="relative mx-auto flex w-full flex-1 flex-col items-center justify-center overflow-hidden px-5 py-12">
+        <FloatingTriangles />
 
-        {step === "no-hunt" && (
-          <div className="text-center">
-            <h1 className="text-2xl font-bold text-brand-navy">
-              No hunt is active yet
-            </h1>
-            <p className="mt-2 text-brand-navy/70">
-              Check with an FET team member to find out when the scavenger
-              hunt kicks off.
-            </p>
-          </div>
-        )}
+        <div className="relative z-10 mx-auto flex w-full max-w-md flex-col items-center gap-6">
+          {step === "loading" && (
+            <div className="flex flex-col items-center gap-4 text-center">
+              <span
+                className="brand-triangle animate-bounce-soft"
+                aria-hidden="true"
+              />
+              <p className="font-display text-lg text-white/70">
+                Warming up the hunt...
+              </p>
+            </div>
+          )}
 
-        {step === "find-employee" && resumeTeam && (
-          <div className="w-full rounded-2xl border border-brand-cyan/40 bg-brand-cyan/10 p-4 text-center">
-            <p className="font-semibold text-brand-navy">
-              Welcome back, {resumeTeam.team_name}!
-            </p>
-            <button
-              onClick={() =>
-                router.push(resumeTeam.finished_at ? "/hunt/complete" : "/hunt")
-              }
-              className="mt-3 w-full rounded-full bg-brand-navy px-6 py-2.5 font-semibold text-white transition-colors hover:bg-brand-navy-light"
-            >
-              {resumeTeam.finished_at ? "See Your Results" : "Continue Your Hunt"}
-            </button>
-            <p className="mt-2 text-xs text-brand-navy/50">
-              Or register a new team below.
-            </p>
-          </div>
-        )}
+          {step === "no-hunt" && (
+            <div className="animate-pop-in w-full rounded-3xl bg-white p-8 text-center shadow-xl">
+              <span className="text-5xl" aria-hidden="true">
+                ⏳
+              </span>
+              <h1 className="mt-4 font-display text-3xl font-bold text-brand-navy">
+                No hunt is active... yet!
+              </h1>
+              <p className="mt-3 text-brand-navy/70">
+                Check with an FET team member to find out when the scavenger
+                hunt kicks off. It&apos;s going to be awesome!
+              </p>
+            </div>
+          )}
 
-        {step === "find-employee" && (
-          <div className="w-full">
-            <h1 className="text-center text-2xl font-bold text-brand-navy">
-              Find your family
-            </h1>
-            <p className="mt-2 text-center text-brand-navy/70">
-              Search for the FET employee your family is here with.
-            </p>
-            <input
-              autoFocus
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Start typing a name..."
-              className="mt-6 w-full rounded-lg border border-brand-navy/20 px-4 py-3 text-lg outline-none focus:border-brand-cyan focus:ring-2 focus:ring-brand-cyan/30"
-            />
-            <ul className="mt-3 divide-y divide-brand-navy/10 overflow-hidden rounded-lg border border-brand-navy/10">
-              {searching && (
-                <li className="px-4 py-3 text-sm text-brand-navy/50">
-                  Searching...
-                </li>
-              )}
-              {!searching &&
-                visibleResults.map((emp) => (
-                  <li key={emp.id}>
-                    <button
-                      onClick={() => pickEmployee(emp)}
-                      className="w-full px-4 py-3 text-left transition-colors hover:bg-brand-cyan/10"
+          {step === "find-employee" && resumeTeam && (
+            <div className="animate-slide-up w-full rounded-3xl border-2 border-brand-cyan/60 bg-white p-6 text-center shadow-xl">
+              <span className="text-4xl" aria-hidden="true">
+                👋
+              </span>
+              <p className="mt-2 font-display text-2xl font-bold text-brand-navy">
+                Welcome back, {resumeTeam.team_name}!
+              </p>
+              <button
+                onClick={() =>
+                  router.push(
+                    resumeTeam.finished_at ? "/hunt/complete" : "/hunt",
+                  )
+                }
+                className="btn-springy mt-4 flex h-14 w-full items-center justify-center rounded-full bg-brand-cyan px-6 font-display text-lg font-bold text-brand-navy shadow-md"
+              >
+                {resumeTeam.finished_at
+                  ? "See Your Results 🏆"
+                  : "Continue Your Hunt 🔍"}
+              </button>
+              <p className="mt-3 text-xs font-medium text-brand-navy/50">
+                Or register a brand-new team below.
+              </p>
+            </div>
+          )}
+
+          {step === "find-employee" && (
+            <div className="animate-pop-in w-full rounded-3xl bg-white p-6 shadow-xl sm:p-8">
+              <div className="text-center">
+                <span className="text-4xl" aria-hidden="true">
+                  🔎
+                </span>
+                <h1 className="mt-2 font-display text-3xl font-bold text-brand-navy">
+                  Find Your Family
+                </h1>
+                <p className="mt-2 text-brand-navy/70">
+                  Search for the FET employee your family is here with.
+                </p>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Start typing a name..."
+                className="mt-6 h-14 w-full rounded-2xl border-2 border-brand-navy/15 bg-brand-cyan/5 px-4 text-lg outline-none transition-colors focus:border-brand-cyan focus:ring-4 focus:ring-brand-cyan/20"
+              />
+              <ul className="stagger-children mt-4 flex flex-col gap-2">
+                {searching && (
+                  <li className="flex items-center justify-center gap-2 rounded-2xl bg-brand-cyan/10 px-4 py-4 text-sm font-semibold text-brand-navy/60">
+                    <span
+                      className="animate-bounce-soft inline-block"
+                      aria-hidden="true"
                     >
-                      <span className="font-medium text-brand-navy">
-                        {emp.full_name}
-                      </span>
-                      {emp.department && (
-                        <span className="ml-2 text-sm text-brand-navy/50">
-                          {emp.department}
-                        </span>
-                      )}
-                    </button>
+                      🔍
+                    </span>
+                    Searching...
                   </li>
-                ))}
-              {!searching && trimmedQuery.length >= 2 && visibleResults.length === 0 && (
-                <li className="px-4 py-3 text-sm text-brand-navy/50">
-                  No matches yet — keep typing or check the spelling.
-                </li>
-              )}
-            </ul>
-          </div>
-        )}
+                )}
+                {!searching &&
+                  visibleResults.map((emp) => (
+                    <li key={emp.id}>
+                      <button
+                        onClick={() => pickEmployee(emp)}
+                        className="btn-springy flex min-h-14 w-full items-center justify-between gap-3 rounded-2xl border-2 border-brand-navy/10 bg-white px-4 py-3 text-left shadow-sm hover:border-brand-cyan hover:bg-brand-cyan/10"
+                      >
+                        <span>
+                          <span className="block font-display text-lg font-semibold text-brand-navy">
+                            {emp.full_name}
+                          </span>
+                          {emp.department && (
+                            <span className="block text-sm text-brand-navy/50">
+                              {emp.department}
+                            </span>
+                          )}
+                        </span>
+                        <span
+                          className="text-xl text-brand-green"
+                          aria-hidden="true"
+                        >
+                          →
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                {!searching &&
+                  trimmedQuery.length >= 2 &&
+                  visibleResults.length === 0 && (
+                    <li className="rounded-2xl bg-brand-navy/5 px-4 py-4 text-center text-sm font-medium text-brand-navy/60">
+                      🤔 No matches yet — keep typing or check the spelling.
+                    </li>
+                  )}
+              </ul>
+            </div>
+          )}
 
-        {(step === "name-team" || step === "creating") && employee && (
-          <div className="w-full text-center">
-            <h1 className="text-2xl font-bold text-brand-navy">
-              Welcome, {employee.full_name.split(" ")[0]}&apos;s family!
-            </h1>
-            <p className="mt-2 text-brand-navy/70">
-              Give your team a fun name for the hunt.
-            </p>
-            <input
-              autoFocus
-              value={teamName}
-              onChange={(e) => setTeamName(e.target.value)}
-              placeholder="e.g. The Torque Squad"
-              maxLength={40}
-              className="mt-6 w-full rounded-lg border border-brand-navy/20 px-4 py-3 text-center text-lg outline-none focus:border-brand-cyan focus:ring-2 focus:ring-brand-cyan/30"
-            />
-            {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
-            <button
-              onClick={createTeam}
-              disabled={!teamName.trim() || step === "creating"}
-              className="mt-6 w-full rounded-full bg-brand-navy px-8 py-3 text-lg font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:opacity-40"
-            >
-              {step === "creating" ? "Creating your team..." : "Start the Hunt"}
-            </button>
-            <button
-              onClick={() => {
-                setEmployee(null);
-                setStep("find-employee");
-              }}
-              className="mt-3 text-sm text-brand-navy/50 underline"
-            >
-              Not your family? Go back
-            </button>
-          </div>
-        )}
+          {(step === "name-team" || step === "creating") && employee && (
+            <div className="animate-pop-in w-full rounded-3xl bg-white p-6 text-center shadow-xl sm:p-8">
+              <span className="animate-wiggle inline-block text-5xl" aria-hidden="true">
+                🎉
+              </span>
+              <h1 className="mt-2 font-display text-3xl font-bold text-brand-navy">
+                Welcome, {employee.full_name.split(" ")[0]}&apos;s family!
+              </h1>
+              <p className="mt-2 text-brand-navy/70">
+                Give your team an epic name for the hunt.
+              </p>
+              <input
+                autoFocus
+                value={teamName}
+                onChange={(e) => setTeamName(e.target.value)}
+                placeholder="e.g. The Torque Squad"
+                maxLength={40}
+                className="mt-6 h-16 w-full rounded-2xl border-2 border-brand-navy/15 bg-brand-green/5 px-4 text-center font-display text-xl font-semibold text-brand-navy outline-none transition-colors focus:border-brand-green focus:ring-4 focus:ring-brand-green/20"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  playTap();
+                  setTeamName(randomTeamName());
+                }}
+                className="btn-springy mt-3 inline-flex h-12 items-center justify-center rounded-full border-2 border-brand-cyan/50 bg-brand-cyan/10 px-6 font-display font-semibold text-brand-navy"
+              >
+                🎲 Surprise me!
+              </button>
+              {error && (
+                <p className="mt-3 rounded-xl bg-red-50 px-4 py-2 text-sm font-medium text-red-600">
+                  {error}
+                </p>
+              )}
+              <button
+                onClick={createTeam}
+                disabled={!teamName.trim() || step === "creating"}
+                className="btn-springy animate-pulse-glow mt-6 flex h-16 w-full items-center justify-center rounded-full bg-brand-green px-8 font-display text-2xl font-bold text-white shadow-lg disabled:animate-none disabled:opacity-40"
+              >
+                {step === "creating" ? (
+                  <span className="inline-flex items-center gap-2">
+                    <span
+                      className="animate-bounce-soft inline-block"
+                      aria-hidden="true"
+                    >
+                      🚀
+                    </span>
+                    Creating your team...
+                  </span>
+                ) : (
+                  <>Let&apos;s Go! 🚀</>
+                )}
+              </button>
+              <button
+                onClick={() => {
+                  setEmployee(null);
+                  setStep("find-employee");
+                }}
+                className="mt-4 min-h-12 text-sm font-medium text-brand-navy/50 underline underline-offset-2"
+              >
+                Not your family? Go back
+              </button>
+            </div>
+          )}
+        </div>
       </main>
     </div>
   );

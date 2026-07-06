@@ -85,7 +85,7 @@ export function EmployeeUpload() {
   }
 
   return (
-    <div className="rounded-2xl border border-brand-navy/10 bg-white p-6 shadow-sm">
+    <div className="rounded-2xl border border-brand-navy/10 bg-white p-6 shadow-sm transition-shadow hover:shadow-md">
       <h2 className="text-lg font-semibold text-brand-navy">
         Upload Employee List
       </h2>
@@ -102,11 +102,11 @@ export function EmployeeUpload() {
           const file = e.target.files?.[0];
           if (file) handleFile(file);
         }}
-        className="mt-4 text-sm"
+        className="mt-4 text-sm file:mr-3 file:cursor-pointer file:rounded-full file:border-0 file:bg-brand-navy/5 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-brand-navy file:transition-colors hover:file:bg-brand-cyan/15"
       />
 
       {fileName && rows.length > 0 && (
-        <div className="mt-4 flex flex-wrap items-center gap-4">
+        <div className="animate-slide-up mt-4 flex flex-wrap items-center gap-4">
           <p className="text-sm text-brand-navy/70">
             {fileName}: {rows.length} employees ready to upload.
           </p>
@@ -121,7 +121,7 @@ export function EmployeeUpload() {
           <button
             onClick={upload}
             disabled={status === "uploading"}
-            className="rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:opacity-40"
+            className="btn-springy rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:opacity-40"
           >
             {status === "uploading" ? "Uploading..." : "Upload"}
           </button>
@@ -130,8 +130,10 @@ export function EmployeeUpload() {
 
       {message && (
         <p
-          className={`mt-3 text-sm ${
-            status === "error" ? "text-red-600" : "text-brand-green"
+          className={`animate-slide-up mt-3 rounded-lg px-3 py-2 text-sm font-medium ${
+            status === "error"
+              ? "bg-red-50 text-red-600"
+              : "bg-brand-green/10 text-brand-green"
           }`}
         >
           {message}

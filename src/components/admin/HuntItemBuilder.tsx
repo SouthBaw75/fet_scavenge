@@ -4,6 +4,12 @@ import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { HuntItem, HuntItemType } from "@/lib/types/hunt";
 
+const TYPE_BADGE_STYLES: Record<HuntItemType, string> = {
+  multiple_choice: "bg-brand-cyan/10 text-brand-cyan",
+  qr: "bg-brand-navy/10 text-brand-navy",
+  text: "bg-brand-green/10 text-brand-green",
+};
+
 const EMPTY_FORM = {
   type: "multiple_choice" as HuntItemType,
   prompt: "",
@@ -120,26 +126,32 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
   }
 
   return (
-    <div className="rounded-2xl border border-brand-navy/10 bg-white p-6 shadow-sm">
+    <div className="animate-slide-up rounded-2xl border border-brand-navy/10 bg-white p-6 shadow-sm transition-shadow hover:shadow-md">
       <h2 className="text-lg font-semibold text-brand-navy">Hunt Items</h2>
 
       <ul className="mt-4 flex flex-col gap-2">
         {items.map((item, i) => (
           <li
             key={item.id}
-            className="flex items-center justify-between rounded-lg border border-brand-navy/10 px-4 py-3"
+            className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 transition-colors ${
+              editingId === item.id
+                ? "border-brand-cyan bg-brand-cyan/5"
+                : "border-brand-navy/10 hover:bg-brand-navy/[0.02]"
+            }`}
           >
             <div>
-              <span className="text-xs font-semibold uppercase tracking-wide text-brand-cyan">
+              <span
+                className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${TYPE_BADGE_STYLES[item.type]}`}
+              >
                 {item.type.replace("_", " ")}
               </span>
-              <p className="font-medium text-brand-navy">{item.prompt}</p>
+              <p className="mt-1 font-medium text-brand-navy">{item.prompt}</p>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => move(item, -1)}
                 disabled={i === 0}
-                className="text-brand-navy/50 disabled:opacity-30"
+                className="flex h-7 w-7 items-center justify-center rounded-full text-brand-navy/50 transition-colors hover:bg-brand-navy/5 hover:text-brand-navy disabled:opacity-30 disabled:hover:bg-transparent"
                 aria-label="Move up"
               >
                 ↑
@@ -147,20 +159,20 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
               <button
                 onClick={() => move(item, 1)}
                 disabled={i === items.length - 1}
-                className="text-brand-navy/50 disabled:opacity-30"
+                className="flex h-7 w-7 items-center justify-center rounded-full text-brand-navy/50 transition-colors hover:bg-brand-navy/5 hover:text-brand-navy disabled:opacity-30 disabled:hover:bg-transparent"
                 aria-label="Move down"
               >
                 ↓
               </button>
               <button
                 onClick={() => startEdit(item)}
-                className="text-sm font-medium text-brand-navy underline"
+                className="rounded-full px-2 py-1 text-sm font-medium text-brand-navy underline-offset-2 transition-colors hover:bg-brand-cyan/10 hover:underline"
               >
                 Edit
               </button>
               <button
                 onClick={() => remove(item)}
-                className="text-sm font-medium text-red-600 underline"
+                className="rounded-full px-2 py-1 text-sm font-medium text-red-600 underline-offset-2 transition-colors hover:bg-red-50 hover:underline"
               >
                 Delete
               </button>
@@ -253,14 +265,14 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
             <button
               onClick={save}
               disabled={!form.prompt.trim() || saving}
-              className="rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white disabled:opacity-40"
+              className="btn-springy rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:opacity-40"
             >
               {editingId ? "Save Changes" : "Add Item"}
             </button>
             {editingId && (
               <button
                 onClick={cancelEdit}
-                className="rounded-full border border-brand-navy/20 px-5 py-2 text-sm font-semibold text-brand-navy"
+                className="rounded-full border border-brand-navy/20 px-5 py-2 text-sm font-semibold text-brand-navy transition-colors hover:bg-brand-navy/5"
               >
                 Cancel
               </button>

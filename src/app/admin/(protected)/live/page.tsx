@@ -107,14 +107,36 @@ export default function AdminLivePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [huntId]);
 
+  const huntingCount = teams.filter(
+    (t) => t.started_at && !t.finished_at,
+  ).length;
+  const finishedCount = teams.filter((t) => t.finished_at).length;
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-brand-navy">Live Progress</h1>
+      <div className="animate-slide-up flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="font-display text-3xl font-semibold text-brand-navy">
+            Live Hunt Tracker
+          </h1>
+          <p className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-brand-navy/60">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand-cyan opacity-60" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-brand-cyan" />
+              </span>
+              {huntingCount} hunting
+            </span>
+            <span className="font-medium text-brand-green">
+              {finishedCount} finished
+            </span>
+            <span>{teams.length} teams total</span>
+          </p>
+        </div>
         <select
           value={huntId ?? ""}
           onChange={(e) => setHuntId(e.target.value)}
-          className="rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
+          className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm shadow-sm outline-none transition-shadow focus:border-brand-cyan focus:ring-2 focus:ring-brand-cyan/30"
         >
           {hunts.map((h) => (
             <option key={h.id} value={h.id}>
@@ -124,50 +146,53 @@ export default function AdminLivePage() {
         </select>
       </div>
 
-      <div className="overflow-hidden rounded-2xl border border-brand-navy/10 bg-white shadow-sm">
-        <table className="w-full text-left text-sm">
-          <thead className="border-b border-brand-navy/10 bg-brand-navy/5 text-brand-navy/70">
-            <tr>
-              <th className="px-4 py-3">Team</th>
-              <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Progress</th>
-              <th className="px-4 py-3">Time</th>
-            </tr>
-          </thead>
-          <tbody>
-            {teams.map((team) => {
-              const answered = progressCounts[team.id] ?? 0;
-              const status = team.finished_at
-                ? "Finished"
-                : team.started_at
-                  ? "In Progress"
-                  : "Not Started";
+      <div className="stagger-children grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {teams.map((team) => {
+          const answered = progressCounts[team.id] ?? 0;
+          const status = team.finished_at
+            ? "Finished"
+            : team.started_at
+              ? "Hunting"
+              : "Not Started";
+          const pct =
+            itemCount > 0
+              ? Math.min(100, Math.round((answered / itemCount) * 100))
+              : 0;
 
-              return (
-                <tr
-                  key={team.id}
-                  className="border-b border-brand-navy/5 last:border-0"
+          return (
+            <div
+              key={team.id}
+              className={`rounded-2xl border bg-white p-5 shadow-sm transition-shadow hover:shadow-md ${
+                status === "Finished"
+                  ? "border-brand-green/40 ring-2 ring-brand-green/25"
+                  : status === "Hunting"
+                    ? "border-brand-navy/10 border-l-4 border-l-brand-cyan"
+                    : "border-brand-navy/10 opacity-80"
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <p className="font-semibold text-brand-navy">
+                  {team.team_name}
+                </p>
+                <span
+                  className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${
+                    status === "Finished"
+                      ? "bg-brand-green/10 text-brand-green"
+                      : status === "Hunting"
+                        ? "bg-brand-cyan/10 text-brand-cyan"
+                        : "bg-brand-navy/10 text-brand-navy/60"
+                  }`}
                 >
-                  <td className="px-4 py-3 font-medium text-brand-navy">
-                    {team.team_name}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                        status === "Finished"
-                          ? "bg-brand-green/10 text-brand-green"
-                          : status === "In Progress"
-                            ? "bg-brand-cyan/10 text-brand-cyan"
-                            : "bg-brand-navy/10 text-brand-navy/60"
-                      }`}
-                    >
-                      {status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-brand-navy/70">
-                    {answered} / {itemCount}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-brand-navy">
+                  {status === "Finished" ? "✓ Finished" : status}
+                </span>
+              </div>
+
+              <div className="mt-4">
+                <div className="flex items-baseline justify-between text-xs text-brand-navy/60">
+                  <span>
+                    {answered} / {itemCount} items
+                  </span>
+                  <span className="font-mono text-sm text-brand-navy">
                     {team.started_at && !team.finished_at && (
                       <HuntTimer startedAt={team.started_at} />
                     )}
@@ -181,22 +206,24 @@ export default function AdminLivePage() {
                         )}
                       </span>
                     )}
-                  </td>
-                </tr>
-              );
-            })}
-            {teams.length === 0 && (
-              <tr>
-                <td
-                  colSpan={4}
-                  className="px-4 py-6 text-center text-brand-navy/50"
-                >
-                  No teams registered yet.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+                  </span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-brand-navy/10">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-brand-cyan to-brand-green transition-[width] duration-700 ease-out"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {teams.length === 0 && (
+          <div className="col-span-full rounded-2xl border border-dashed border-brand-navy/20 bg-white px-4 py-10 text-center text-brand-navy/50">
+            No teams registered yet — cards will appear here live as families
+            join.
+          </div>
+        )}
       </div>
     </div>
   );
