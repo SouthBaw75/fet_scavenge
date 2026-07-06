@@ -23,13 +23,8 @@ export default function Home() {
             </span>
           </span>
 
-          {/* FETch says hi */}
-          <Fetch
-            pose="wave"
-            width={260}
-            priority
-            className="animate-bounce-soft drop-shadow-xl"
-          />
+          {/* FETch says hi — tucked right up against the headline */}
+          <Fetch pose="wave" width={230} priority className="-mb-3" />
 
           {/* Headline */}
           <h1 className="font-display text-5xl font-bold leading-[1.05] tracking-tight text-white sm:text-7xl">

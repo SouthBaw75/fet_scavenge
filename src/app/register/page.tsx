@@ -157,7 +157,7 @@ export default function RegisterPage() {
         <div className="relative z-10 mx-auto flex w-full max-w-md flex-col items-center gap-6">
           {step === "loading" && (
             <div className="flex flex-col items-center gap-4 text-center">
-              <Fetch pose="thinking" width={180} className="animate-bounce-soft" />
+              <Fetch pose="thinking" width={170} />
               <p className="font-display text-lg text-white/70">
                 Warming up the hunt...
               </p>
@@ -165,21 +165,29 @@ export default function RegisterPage() {
           )}
 
           {step === "no-hunt" && (
-            <div className="animate-pop-in w-full rounded-3xl bg-white p-8 text-center shadow-xl">
-              <Fetch pose="confused" width={200} className="mx-auto" />
-              <h1 className="mt-4 font-display text-3xl font-bold text-brand-navy">
-                No hunt is active... yet!
-              </h1>
-              <p className="mt-3 text-brand-navy/70">
-                Check with an FET team member to find out when the scavenger
-                hunt kicks off. It&apos;s going to be awesome!
-              </p>
+            <div className="w-full">
+              {/* FETch stands on the card's top edge */}
+              <div className="relative z-10 -mb-9 flex justify-center">
+                <Fetch pose="confused" width={180} />
+              </div>
+              <div className="animate-pop-in w-full rounded-3xl bg-white p-8 pt-14 text-center shadow-xl">
+                <h1 className="font-display text-3xl font-bold text-brand-navy">
+                  No hunt is active... yet!
+                </h1>
+                <p className="mt-3 text-brand-navy/70">
+                  Check with an FET team member to find out when the scavenger
+                  hunt kicks off. It&apos;s going to be awesome!
+                </p>
+              </div>
             </div>
           )}
 
           {step === "find-employee" && resumeTeam && (
-            <div className="animate-slide-up w-full rounded-3xl border-2 border-brand-cyan/60 bg-white p-6 text-center shadow-xl">
-              <Fetch pose="wink-wave" width={170} className="mx-auto" />
+            <div className="animate-slide-up w-full">
+              <div className="relative z-10 -mb-8 flex justify-center">
+                <Fetch pose="wink-wave" width={150} />
+              </div>
+              <div className="w-full rounded-3xl border-2 border-brand-cyan/60 bg-white p-6 pt-12 text-center shadow-xl">
               <p className="mt-2 font-display text-2xl font-bold text-brand-navy">
                 Welcome back, {resumeTeam.team_name}!
               </p>
@@ -198,6 +206,7 @@ export default function RegisterPage() {
               <p className="mt-3 text-xs font-medium text-brand-navy/50">
                 Or register a brand-new team below.
               </p>
+              </div>
             </div>
           )}
 
@@ -271,8 +280,11 @@ export default function RegisterPage() {
           )}
 
           {(step === "name-team" || step === "creating") && employee && (
-            <div className="animate-pop-in w-full rounded-3xl bg-white p-6 text-center shadow-xl sm:p-8">
-              <Fetch pose="thumbs-up" width={180} className="mx-auto" />
+            <div className="animate-pop-in w-full">
+              <div className="relative z-10 -mb-9 flex justify-center">
+                <Fetch pose="thumbs-up" width={170} />
+              </div>
+              <div className="w-full rounded-3xl bg-white p-6 pt-14 text-center shadow-xl sm:p-8 sm:pt-14">
               <h1 className="mt-2 font-display text-3xl font-bold text-brand-navy">
                 Welcome, {friendlyFirstName(employee.full_name)}&apos;s family!
               </h1>
@@ -330,6 +342,7 @@ export default function RegisterPage() {
               >
                 Not your family? Go back
               </button>
+              </div>
             </div>
           )}
         </div>

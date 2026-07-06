@@ -158,7 +158,7 @@ export default function HuntPage() {
       <div className="flex flex-1 flex-col">
         <SiteHeader />
         <main className="flex flex-1 flex-col items-center justify-center gap-3">
-          <Fetch pose="thinking" width={190} className="animate-bounce-soft" />
+          <Fetch pose="thinking" width={170} />
           <p className="font-display text-lg font-semibold text-brand-navy/70">
             Loading your hunt...
           </p>
@@ -195,7 +195,7 @@ export default function HuntPage() {
       <div className="flex flex-1 flex-col">
         <SiteHeader />
         <main className="flex flex-1 flex-col items-center justify-center gap-3">
-          <Fetch pose="thinking" width={190} className="animate-bounce-soft" />
+          <Fetch pose="thinking" width={170} />
           <p className="font-display text-lg font-semibold text-brand-navy/70">
             Loading your hunt...
           </p>
@@ -243,12 +243,11 @@ export default function HuntPage() {
         </div>
 
         {reveal ? (
-          <div className="animate-pop-in rounded-3xl border-2 border-brand-green/40 bg-white p-6 text-center shadow-xl shadow-brand-navy/5">
-            <Fetch
-              pose="celebrate"
-              width={190}
-              className="mx-auto animate-bounce-soft"
-            />
+          <div className="animate-pop-in">
+            <div className="relative z-10 -mb-10 flex justify-center">
+              <Fetch pose="celebrate" width={180} />
+            </div>
+            <div className="rounded-3xl border-2 border-brand-green/40 bg-white p-6 pt-14 text-center shadow-xl shadow-brand-navy/5">
             <h2 className="mt-2 font-display text-2xl font-bold text-brand-green">
               You found it!
             </h2>
@@ -261,6 +260,7 @@ export default function HuntPage() {
             >
               Next Stop →
             </button>
+            </div>
           </div>
         ) : (
         <div

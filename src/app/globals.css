@@ -190,6 +190,57 @@ body {
   animation: shimmer 4s linear infinite;
 }
 
+/* ---------- FETch mascot motion ---------- */
+
+/* Springy arrival: he hops in with a little tilt, like he ran on stage. */
+@keyframes fetch-in {
+  0% {
+    opacity: 0;
+    transform: translateY(30px) scale(0.5) rotate(-6deg);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-8px) scale(1.06) rotate(2deg);
+  }
+  80% {
+    transform: translateY(2px) scale(0.98) rotate(-1deg);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1) rotate(0deg);
+  }
+}
+
+/* Idle: a slow, gentle rock so he feels alive without being distracting. */
+@keyframes fetch-sway {
+  0%,
+  100% {
+    transform: rotate(-1.5deg) translateY(0);
+  }
+  50% {
+    transform: rotate(1.5deg) translateY(-4px);
+  }
+}
+
+.animate-fetch-in {
+  animation: fetch-in 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.animate-fetch-sway {
+  animation: fetch-sway 3.5s ease-in-out infinite;
+  transform-origin: 50% 90%; /* rock around his feet, not his center */
+}
+
+/* Soft elliptical ground shadow under FETch's feet. */
+.fetch-shadow {
+  border-radius: 9999px;
+  background: radial-gradient(
+    ellipse at center,
+    rgb(0 20 30 / 0.35) 0%,
+    rgb(0 20 30 / 0) 70%
+  );
+}
+
 /* Decorative floating brand triangle (pair with .animate-float) */
 .brand-triangle {
   width: 0;
@@ -210,6 +261,8 @@ body {
   .animate-float,
   .animate-pulse-glow,
   .animate-bounce-soft,
+  .animate-fetch-in,
+  .animate-fetch-sway,
   .stagger-children > *,
   .brand-gradient-text {
     animation: none !important;
