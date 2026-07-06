@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { EmployeeUpload } from "@/components/admin/EmployeeUpload";
+import { EmployeeManager } from "@/components/admin/EmployeeManager";
 import { HuntManager } from "@/components/admin/HuntManager";
 import { HuntItemBuilder } from "@/components/admin/HuntItemBuilder";
 
@@ -18,7 +18,7 @@ export default function AdminSetupPage() {
           Build the employee list, create hunts, and craft the clues.
         </p>
       </div>
-      <EmployeeUpload />
+      <EmployeeManager />
       <HuntManager
         selectedHuntId={selectedHuntId}
         onSelectHunt={setSelectedHuntId}

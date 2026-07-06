@@ -13,7 +13,11 @@ function normalizeHeader(header: string) {
   return header.trim().toLowerCase().replace(/\s+/g, "_");
 }
 
-export function EmployeeUpload() {
+export function EmployeeUpload({
+  onUploaded,
+}: {
+  onUploaded?: () => void;
+} = {}) {
   const supabase = createClient();
   const [rows, setRows] = useState<ParsedRow[]>([]);
   const [fileName, setFileName] = useState<string | null>(null);
@@ -82,12 +86,13 @@ export function EmployeeUpload() {
     setMessage(`Uploaded ${rows.length} employees.`);
     setRows([]);
     setFileName(null);
+    onUploaded?.();
   }
 
   return (
-    <div className="rounded-2xl border border-brand-navy/10 bg-white p-6 shadow-sm transition-shadow hover:shadow-md">
-      <h2 className="text-lg font-semibold text-brand-navy">
-        Upload Employee List
+    <div className="rounded-xl border border-brand-navy/10 bg-brand-navy/[0.02] p-5">
+      <h2 className="text-sm font-semibold text-brand-navy">
+        Bulk upload from CSV
       </h2>
       <p className="mt-1 text-sm text-brand-navy/60">
         CSV with a <code>full_name</code> column (and optional{" "}
