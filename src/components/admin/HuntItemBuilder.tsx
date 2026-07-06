@@ -331,24 +331,33 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
             </div>
           )}
 
-          <input
-            type="number"
-            min={1}
-            value={form.points}
-            onChange={(e) =>
-              setForm({ ...form, points: Number(e.target.value) })
-            }
-            placeholder="Points"
-            className="w-24 rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
-          />
+          <div>
+            <label className="text-xs font-semibold text-brand-navy/70">
+              Points
+            </label>
+            <input
+              type="number"
+              min={1}
+              value={form.points}
+              onChange={(e) =>
+                setForm({ ...form, points: Number(e.target.value) })
+              }
+              placeholder="Points"
+              className="mt-1 block w-24 rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
+            />
+          </div>
 
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={save}
               disabled={!form.prompt.trim() || saving}
-              className="btn-springy rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:opacity-40"
+              className="btn-springy rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {editingId ? "Save Changes" : "Add Item"}
+              {saving
+                ? "Saving..."
+                : editingId
+                  ? "Save Changes"
+                  : "Add Item"}
             </button>
             {editingId && (
               <button
@@ -357,6 +366,11 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
               >
                 Cancel
               </button>
+            )}
+            {!form.prompt.trim() && (
+              <span className="text-xs font-medium text-brand-navy/50">
+                Add a question / clue prompt above to enable this.
+              </span>
             )}
           </div>
         </div>
