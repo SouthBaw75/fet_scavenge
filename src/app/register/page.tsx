@@ -74,14 +74,14 @@ export default function RegisterPage() {
   }, []);
 
   const trimmedQuery = query.trim();
-  const visibleResults = trimmedQuery.length >= 2 ? results : [];
+  const visibleResults = trimmedQuery.length >= 1 ? results : [];
 
   useEffect(() => {
-    if (step !== "find-employee" || trimmedQuery.length < 2) return;
+    if (step !== "find-employee" || trimmedQuery.length < 1) return;
     let cancelled = false;
 
     async function search() {
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await new Promise((resolve) => setTimeout(resolve, 150));
       if (cancelled) return;
 
       setSearching(true);
@@ -90,7 +90,7 @@ export default function RegisterPage() {
         .select("id, full_name, department")
         .ilike("full_name", `%${trimmedQuery}%`)
         .order("full_name")
-        .limit(8);
+        .limit(10);
 
       if (cancelled) return;
       setResults((data as Employee[]) ?? []);
@@ -256,7 +256,7 @@ export default function RegisterPage() {
                     </li>
                   ))}
                 {!searching &&
-                  trimmedQuery.length >= 2 &&
+                  trimmedQuery.length >= 1 &&
                   visibleResults.length === 0 && (
                     <li className="rounded-2xl bg-brand-navy/5 px-4 py-4 text-center text-sm font-medium text-brand-navy/60">
                       🤔 No matches yet — keep typing or check the spelling.
