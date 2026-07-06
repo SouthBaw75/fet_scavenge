@@ -75,35 +75,23 @@ function PrintPortalContent() {
         </button>
       </div>
 
-      {/* The poster itself */}
-      <div className="flex flex-col items-center rounded-3xl border-4 border-brand-navy bg-white px-10 py-12 text-center shadow-xl print:border-2 print:shadow-none">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/brand/fet-logo.webp"
-          alt="Forum Energy Technologies"
-          className="h-14 w-auto"
-        />
+      {/* The poster itself — just FETch, the QR, and the essential text.
+          Sized to sit comfortably within one printed letter-size page. */}
+      <div className="mx-auto flex max-w-md flex-col items-center gap-4 rounded-3xl border-4 border-brand-navy bg-white px-8 py-8 text-center shadow-xl print:border-2 print:shadow-none">
+        <Fetch pose="wave" width={170} entrance={false} idle="none" shadow={false} />
 
-        <Fetch pose="wave" width={200} entrance={false} idle="none" className="mt-4" />
-
-        <h2 className="mt-4 font-display text-3xl font-bold leading-tight text-brand-navy">
-          Join the Hunt!
-        </h2>
-
-        <p className="mt-3 inline-block rounded-full bg-brand-cyan/10 px-5 py-2 font-display text-lg font-bold text-brand-navy">
+        <p className="font-display text-xl font-bold leading-snug text-brand-navy">
           {huntName}
         </p>
 
-        <div className="mt-8 rounded-3xl border-4 border-brand-navy p-4">
-          <QrImage value={portalUrl} size={280} />
+        <div className="rounded-2xl border-4 border-brand-navy p-3">
+          <QrImage value={portalUrl} size={220} />
         </div>
 
-        <p className="mt-6 max-w-sm font-display text-xl font-bold text-brand-navy">
+        <p className="font-display text-lg font-bold leading-snug text-brand-navy">
           Scan to register your family team!
         </p>
-        <p className="mt-2 font-mono text-sm text-brand-navy/50">
-          {portalUrl}
-        </p>
+        <p className="font-mono text-xs text-brand-navy/50">{portalUrl}</p>
       </div>
 
       <style jsx global>{`
@@ -112,7 +100,8 @@ function PrintPortalContent() {
             background: white;
           }
           @page {
-            margin: 0.5in;
+            size: letter;
+            margin: 0.6in;
           }
         }
       `}</style>
