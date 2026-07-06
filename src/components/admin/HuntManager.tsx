@@ -15,6 +15,8 @@ export function HuntManager({
   const [hunts, setHunts] = useState<Hunt[]>([]);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [resettingId, setResettingId] = useState<string | null>(null);
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
 
   async function refresh() {
     const { data } = await supabase
@@ -63,6 +65,44 @@ export function HuntManager({
     const settings = { ...hunt.settings, [key]: value };
     await supabase.from("hunts").update({ settings }).eq("id", hunt.id);
     await refresh();
+  }
+
+  // Deletes every team registered for the hunt; team_progress rows cascade.
+  // Questions, settings, and the employee list are untouched.
+  async function resetHunt(hunt: Hunt) {
+    setResetMessage(null);
+
+    const { count } = await supabase
+      .from("teams")
+      .select("id", { count: "exact", head: true })
+      .eq("hunt_id", hunt.id);
+    const teamCount = count ?? 0;
+
+    if (teamCount === 0) {
+      setResetMessage(`"${hunt.name}" has no teams to reset.`);
+      return;
+    }
+
+    const typed = window.prompt(
+      `⚠️ Reset "${hunt.name}"?\n\n` +
+        `This permanently deletes ${teamCount} team${teamCount === 1 ? "" : "s"} ` +
+        `and ALL of their answers and times. Questions and settings are kept.\n\n` +
+        `This cannot be undone. Type RESET to confirm:`,
+    );
+    if (typed?.trim().toUpperCase() !== "RESET") return;
+
+    setResettingId(hunt.id);
+    const { error } = await supabase
+      .from("teams")
+      .delete()
+      .eq("hunt_id", hunt.id);
+    setResettingId(null);
+
+    setResetMessage(
+      error
+        ? `Reset failed: ${error.message}`
+        : `"${hunt.name}" reset — ${teamCount} team${teamCount === 1 ? "" : "s"} and all progress deleted.`,
+    );
   }
 
   return (
@@ -147,9 +187,33 @@ export function HuntManager({
                 Show leaderboard to teams after they finish
               </label>
             </div>
+
+            <div className="mt-3 border-t border-brand-navy/10 pt-3">
+              <button
+                onClick={() => resetHunt(hunt)}
+                disabled={resettingId === hunt.id}
+                className="rounded-full border border-red-200 px-4 py-1.5 text-xs font-semibold text-red-600 transition-colors hover:bg-red-50 disabled:opacity-40"
+              >
+                {resettingId === hunt.id
+                  ? "Resetting..."
+                  : "↺ Reset hunt (delete all teams & progress)"}
+              </button>
+            </div>
           </li>
         ))}
       </ul>
+
+      {resetMessage && (
+        <p
+          className={`mt-4 rounded-lg px-4 py-2 text-sm font-medium ${
+            resetMessage.startsWith("Reset failed")
+              ? "bg-red-50 text-red-600"
+              : "bg-brand-green/10 text-brand-green"
+          }`}
+        >
+          {resetMessage}
+        </p>
+      )}
     </div>
   );
 }
