@@ -13,6 +13,8 @@ export interface Hunt {
   status: HuntStatus;
   settings: HuntSettings;
   created_at: string;
+  /** Admin-declared winner (set in Hunt HQ); null until confirmed. */
+  winner_team_id: string | null;
 }
 
 export interface HuntSettings {

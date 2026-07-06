@@ -8,7 +8,7 @@ import { seededShuffle } from "@/lib/shuffle";
 import { SiteHeader } from "@/components/SiteHeader";
 import { HuntTimer } from "@/components/HuntTimer";
 import { QrScannerView } from "@/components/QrScanner";
-import { playTap, playSubmit } from "@/lib/sound";
+import { playTap, playEffect } from "@/lib/sound";
 import { burstConfetti } from "@/lib/celebrate";
 import { Fetch } from "@/components/Fetch";
 import type { Hunt, PublicHuntItem, Team } from "@/lib/types/hunt";
@@ -126,7 +126,7 @@ export default function HuntPage() {
   async function submitAnswer(answer: string) {
     if (!team || !currentItem || submitting) return;
     setSubmitting(true);
-    playSubmit();
+    playEffect("submit");
 
     await supabase.rpc("submit_answer", {
       p_team_id: team.id,

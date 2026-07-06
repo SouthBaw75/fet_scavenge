@@ -60,6 +60,12 @@ create table teams (
   finished_at timestamptz
 );
 
+-- The admin-declared winner of a hunt. Finishing all questions does NOT
+-- auto-win — an admin confirms the winner in Hunt HQ (guided by the
+-- all-correct + fastest-time tiebreaker) and the winning team's app
+-- reacts live via realtime.
+alter table hunts add column winner_team_id uuid references teams(id) on delete set null;
+
 create table team_progress (
   id uuid primary key default gen_random_uuid(),
   team_id uuid not null references teams(id) on delete cascade,
@@ -223,7 +229,9 @@ $$;
 grant execute on function get_team_status(uuid) to anon;
 
 -- ---------- Realtime ----------
--- The admin live dashboard subscribes to these tables.
+-- The admin live dashboard subscribes to teams/team_progress; the family
+-- app subscribes to hunts to hear the winner declaration.
 
 alter publication supabase_realtime add table teams;
 alter publication supabase_realtime add table team_progress;
+alter publication supabase_realtime add table hunts;

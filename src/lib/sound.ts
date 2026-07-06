@@ -87,6 +87,38 @@ export function playSuccess() {
   ]);
 }
 
+/* ---------- Recorded sound effects (files in /public/sounds) ---------- */
+
+const SOUND_FILES = {
+  /** Played when a team submits an answer at any stop. */
+  submit: "/sounds/submit.mp3",
+  /** Played on the finish screen after answering every question. */
+  questComplete: "/sounds/quest-complete.mp3",
+  /** Played when the admin declares this team the winner. */
+  winnerFanfare: "/sounds/winner-fanfare.mp3",
+} as const;
+
+export type SoundEffect = keyof typeof SOUND_FILES;
+
+const audioCache: Partial<Record<SoundEffect, HTMLAudioElement>> = {};
+
+/** Play a recorded effect, respecting the mute toggle. Safe to call anywhere;
+ *  failures (autoplay policy, missing file) are silently ignored. */
+export function playEffect(name: SoundEffect) {
+  if (typeof window === "undefined" || isMuted()) return;
+  try {
+    let audio = audioCache[name];
+    if (!audio) {
+      audio = new Audio(SOUND_FILES[name]);
+      audioCache[name] = audio;
+    }
+    audio.currentTime = 0;
+    void audio.play().catch(() => {});
+  } catch {
+    // Never let a sound problem break the hunt.
+  }
+}
+
 /** Big finish fanfare for completing the hunt. */
 export function playFanfare() {
   play([
