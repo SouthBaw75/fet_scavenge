@@ -18,6 +18,7 @@ The full family flow was exercised end-to-end against the RPCs:
 
 ## Admin accounts
 
-There is no public admin signup. Create admin logins in the Supabase
-dashboard: **Authentication → Users → Add User**. Any authenticated user is
-treated as an admin in phase 1.
+There is no public admin signup. An initial admin login exists (created
+during setup — rotate its password in **Authentication → Users**). Add more
+admins the same way in the dashboard: **Authentication → Users → Add User**.
+Any authenticated user is treated as an admin in phase 1.
