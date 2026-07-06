@@ -82,7 +82,7 @@ export default function HuntPage() {
           supabase
             .from("public_hunt_items")
             .select(
-              "id, hunt_id, order_index, type, prompt, choices, points, reveal_message",
+              "id, hunt_id, order_index, type, prompt, choices, points, reveal_message, image_url",
             )
             .eq("hunt_id", currentTeam.hunt_id)
             .order("order_index"),
@@ -267,6 +267,15 @@ export default function HuntPage() {
           key={currentItem.id}
           className="animate-pop-in rounded-3xl border-2 border-brand-navy/10 bg-white p-6 shadow-xl shadow-brand-navy/5"
         >
+          {currentItem.image_url && (
+            // eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage URL, no build-time optimization needed
+            <img
+              src={currentItem.image_url}
+              alt="Take a look and answer the question below"
+              className="mb-4 max-h-64 w-full rounded-2xl object-cover"
+            />
+          )}
+
           <p className="font-display text-2xl font-bold leading-snug text-brand-navy">
             {currentItem.prompt}
           </p>

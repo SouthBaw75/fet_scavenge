@@ -18,8 +18,11 @@ const EMPTY_FORM = {
   correct_answer: "",
   qr_value: "",
   reveal_message: "",
+  image_url: "",
   points: 1,
 };
+
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB — plenty for a phone photo, keeps hunt pages fast
 
 // Generates a unique, hard-to-guess value to encode in a printed QR code.
 function generateQrValue() {
@@ -33,6 +36,8 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
   const [form, setForm] = useState(EMPTY_FORM);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
 
   async function refresh() {
     const { data } = await supabase
@@ -61,13 +66,50 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
       correct_answer: item.correct_answer ?? "",
       qr_value: item.qr_value ?? "",
       reveal_message: item.reveal_message ?? "",
+      image_url: item.image_url ?? "",
       points: item.points,
     });
+    setImageError(null);
   }
 
   function cancelEdit() {
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setImageError(null);
+  }
+
+  async function uploadImage(file: File) {
+    setImageError(null);
+
+    if (!file.type.startsWith("image/")) {
+      setImageError("Please choose an image file.");
+      return;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      setImageError("That image is too large (5MB max).");
+      return;
+    }
+
+    setUploadingImage(true);
+    const ext = file.name.split(".").pop() || "jpg";
+    const path = `${huntId}/${crypto.randomUUID()}.${ext}`;
+
+    const { error } = await supabase.storage
+      .from("question-images")
+      .upload(path, file, { upsert: false });
+
+    if (error) {
+      setImageError(error.message);
+      setUploadingImage(false);
+      return;
+    }
+
+    const {
+      data: { publicUrl },
+    } = supabase.storage.from("question-images").getPublicUrl(path);
+
+    setForm((f) => ({ ...f, image_url: publicUrl }));
+    setUploadingImage(false);
   }
 
   async function save() {
@@ -90,6 +132,10 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
       reveal_message:
         form.type === "qr" && form.reveal_message.trim()
           ? form.reveal_message.trim()
+          : null,
+      image_url:
+        form.type === "multiple_choice" && form.image_url.trim()
+          ? form.image_url.trim()
           : null,
       points: form.points,
     };
@@ -172,6 +218,11 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
               >
                 {item.type.replace("_", " ")}
               </span>
+              {item.image_url && (
+                <span className="ml-1.5 inline-block rounded-full bg-brand-navy/5 px-2 py-0.5 text-xs font-semibold text-brand-navy/60">
+                  📷 photo
+                </span>
+              )}
               <p className="mt-1 font-medium text-brand-navy">{item.prompt}</p>
             </div>
             <div className="flex items-center gap-2">
@@ -247,6 +298,52 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
 
           {form.type === "multiple_choice" && (
             <>
+              <div className="rounded-lg border border-brand-navy/15 bg-brand-navy/[0.02] p-3">
+                <label className="text-xs font-semibold text-brand-navy/70">
+                  Photo (optional) — ask &quot;what is this?&quot; with a picture
+                </label>
+
+                {form.image_url && (
+                  <div className="mt-2 flex items-start gap-3 rounded-lg bg-white p-2">
+                    {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage URL, no build-time optimization needed */}
+                    <img
+                      src={form.image_url}
+                      alt="Question preview"
+                      className="h-24 w-24 rounded-md object-cover"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, image_url: "" })}
+                      className="rounded-full px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-50"
+                    >
+                      Remove photo
+                    </button>
+                  </div>
+                )}
+
+                <input
+                  type="file"
+                  accept="image/*"
+                  disabled={uploadingImage}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) uploadImage(file);
+                    e.target.value = "";
+                  }}
+                  className="mt-2 block w-full text-xs text-brand-navy/70 file:mr-3 file:rounded-full file:border-0 file:bg-brand-cyan/10 file:px-4 file:py-2 file:text-xs file:font-semibold file:text-brand-navy hover:file:bg-brand-cyan/20"
+                />
+                {uploadingImage && (
+                  <p className="mt-1 text-xs font-medium text-brand-navy/60">
+                    Uploading...
+                  </p>
+                )}
+                {imageError && (
+                  <p className="mt-1 text-xs font-medium text-red-600">
+                    {imageError}
+                  </p>
+                )}
+              </div>
+
               <input
                 value={form.choicesText}
                 onChange={(e) =>
@@ -350,7 +447,7 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
           <div className="flex flex-wrap items-center gap-3">
             <button
               onClick={save}
-              disabled={!form.prompt.trim() || saving}
+              disabled={!form.prompt.trim() || saving || uploadingImage}
               className="btn-springy rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:cursor-not-allowed disabled:opacity-40"
             >
               {saving

@@ -2,7 +2,17 @@
 
 `migrations/0001_initial_schema.sql` is the consolidated, verified schema
 for the scavenger hunt (tables, RLS, column grants, security-definer RPCs,
-and Realtime setup). It has already been applied to the hosted project.
+and Realtime setup). `migrations/0002_winner_and_question_images.sql` adds
+the admin-declared winner and image-question support. Both are already
+applied to the hosted project.
+
+## Storage
+
+The `question-images` bucket holds photos attached to multiple-choice
+items (e.g. "what is this?" questions). It's a **public** bucket — files
+are served by URL without needing a read policy. Only `insert`/`update`/
+`delete` policies exist, scoped to `authenticated` (admins), so a family's
+phone can view images but never upload/replace/delete them.
 
 ## Backend verification (done)
 

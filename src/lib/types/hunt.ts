@@ -33,6 +33,8 @@ export interface HuntItem {
   qr_value: string | null;
   /** Optional flavor/educational message shown to a team after they scan a QR stop. */
   reveal_message: string | null;
+  /** Optional photo shown above the prompt (e.g. "what is this?" with a picture). */
+  image_url: string | null;
   points: number;
 }
 
