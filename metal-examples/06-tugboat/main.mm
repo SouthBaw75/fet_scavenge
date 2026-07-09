@@ -59,7 +59,7 @@ static const int kGrid = 360;        // water quads per side (wide enough that t
 static const float kSpacing = 0.5f;  // grid edges sit past the horizon haze)
 static const int kBuoyCount = 8;
 static const float kCollectRadius = 2.5f;
-static const int kMaxParticles = 1400;  // smoke + wake combined
+static const int kMaxParticles = 2600;  // smoke + wake combined
 static const int kMaxInFlight = 3;      // triple-buffered particle geometry
 
 // Single source of truth for the waves — the shader constant array is
@@ -282,9 +282,11 @@ fragment float4 boat_fragment(BoatVSOut in [[stage_in]],
 }
 
 // ---------------- Particles: smoke and wake foam ----------------
-// Camera-facing billboards built on the CPU. Each vertex already carries its
-// world position, a 0..1 UV, and an RGBA color; the fragment softens it into a
-// round puff with a radial alpha falloff.
+// One buffer of CPU-built quads, two looks. Smoke uses camera-facing
+// billboards with a soft round falloff; wake uses flat quads laid on the
+// water with a foamy, noise-broken alpha so it reads as churned surface, not
+// a puff. Each vertex carries world position (for world-space foam noise), a
+// 0..1 UV, and an RGBA color.
 
 struct PVertex {
     packed_float3 position;
@@ -295,6 +297,7 @@ struct PVertex {
 struct ParticleVSOut {
     float4 position [[position]];
     float2 uv;
+    float2 world;   // world xz, for continuous foam noise
     float4 color;
 };
 
@@ -302,9 +305,11 @@ vertex ParticleVSOut particle_vertex(uint vid [[vertex_id]],
                                      const device PVertex *verts [[buffer(0)]],
                                      constant Uniforms &u [[buffer(1)]]) {
     PVertex pv = verts[vid];
+    float3 wp = float3(pv.position);
     ParticleVSOut out;
-    out.position = u.mvp * float4(float3(pv.position), 1.0);
+    out.position = u.mvp * float4(wp, 1.0);
     out.uv = float2(pv.uv);
+    out.world = wp.xz;
     out.color = float4(pv.color);
     return out;
 }
@@ -313,6 +318,17 @@ fragment float4 particle_fragment(ParticleVSOut in [[stage_in]]) {
     float d = length(in.uv - 0.5) * 2.0;             // 0 center .. 1 edge
     float a = in.color.a * smoothstep(1.0, 0.0, d);  // soft round falloff
     return float4(in.color.rgb, a);
+}
+
+fragment float4 wake_fragment(ParticleVSOut in [[stage_in]],
+                              constant Uniforms &u [[buffer(0)]]) {
+    float d = length(in.uv - 0.5) * 2.0;
+    float mask = smoothstep(1.0, 0.15, d);           // soft-edged patch
+    // World-space foam that drifts slowly, so adjacent quads blend into one
+    // continuous churned trail instead of tiling.
+    float n = fbm(in.world * 1.1 + float2(u.sun.w * 0.25, -u.sun.w * 0.18));
+    float foam = saturate(mask * (0.3 + 1.25 * n));
+    return float4(in.color.rgb, in.color.a * foam);
 }
 )METAL";
 
@@ -340,6 +356,7 @@ struct ParticleVertex {
 struct Particle {
     simd_float3 pos;
     simd_float3 vel;
+    simd_float2 dir;         // horizontal orientation for flat wake quads
     float age;
     float life;
     float size0, size1;      // world-space diameter, start -> end
@@ -448,6 +465,27 @@ static void AppendBillboard(std::vector<ParticleVertex> &out, const Particle &p,
     push(p0, 0, 0); push(p2, 1, 1); push(p3, 0, 1);
 }
 
+// Emit a quad lying FLAT on the water (spanned by world X/Z), oriented along
+// the particle's travel direction and slightly elongated — so wake foam looks
+// painted on the surface and streaks along the trail, not like a floating puff.
+static void AppendWakeQuad(std::vector<ParticleVertex> &out, const Particle &p) {
+    float frac = p.age / p.life;
+    float size = p.size0 + (p.size1 - p.size0) * frac;
+    simd_float4 c = p.color0 + (p.color1 - p.color0) * frac;
+    simd_float2 d = simd_length(p.dir) > 1e-4f ? simd_normalize(p.dir)
+                                               : simd_make_float2(0, 1);
+    simd_float3 along = simd_make_float3(d.x, 0, d.y) * (size * 0.65f);
+    simd_float3 side = simd_make_float3(-d.y, 0, d.x) * (size * 0.5f);
+    simd_float3 C = p.pos;
+    simd_float3 p0 = C - along + side, p1 = C + along + side,
+                p2 = C + along - side, p3 = C - along - side;
+    auto push = [&](simd_float3 v, float uu, float vv) {
+        out.push_back({v.x, v.y, v.z, uu, vv, c.x, c.y, c.z, c.w});
+    };
+    push(p0, 0, 0); push(p1, 1, 0); push(p2, 1, 1);
+    push(p0, 0, 0); push(p2, 1, 1); push(p3, 0, 1);
+}
+
 // --- Procedural meshes from colored boxes ---
 
 static void AddBox(std::vector<SolidVertex> &verts, simd_float3 center,
@@ -520,7 +558,8 @@ enum {
     id<MTLCommandQueue> _queue;
     id<MTLRenderPipelineState> _waterPipeline;
     id<MTLRenderPipelineState> _solidPipeline;
-    id<MTLRenderPipelineState> _particlePipeline;
+    id<MTLRenderPipelineState> _particlePipeline;  // smoke billboards
+    id<MTLRenderPipelineState> _wakePipeline;      // flat foam quads
     id<MTLRenderPipelineState> _boatPipeline;      // textured asset boat
     id<MTLDepthStencilState> _depthState;
     id<MTLDepthStencilState> _noDepthState;
@@ -555,7 +594,8 @@ enum {
     std::vector<Particle> _particles;
     std::vector<ParticleVertex> _particleScratch;
     float _smokeAccum;
-    float _wakeAccum;
+    float _wakeAccum;   // stern wash
+    float _bowAccum;    // bow wave
     simd_float3 _boatRight, _boatUp, _boatBack, _boatWorldPos;
 
     // Inertial hull state (low-pass filtered toward the wave surface).
@@ -647,6 +687,14 @@ enum {
         return nil;
     }
 
+    // Wake shares the particle vertex/blend setup but uses the foamy fragment.
+    pdesc.fragmentFunction = [library newFunctionWithName:@"wake_fragment"];
+    _wakePipeline = [device newRenderPipelineStateWithDescriptor:pdesc error:&error];
+    if (!_wakePipeline) {
+        fprintf(stderr, "Wake pipeline error: %s\n", error.localizedDescription.UTF8String);
+        return nil;
+    }
+
     MTLDepthStencilDescriptor *noDepth = [MTLDepthStencilDescriptor new];
     noDepth.depthCompareFunction = MTLCompareFunctionAlways;
     noDepth.depthWriteEnabled = NO;
@@ -662,6 +710,7 @@ enum {
     _particles.reserve(kMaxParticles);
     _smokeAccum = 0;
     _wakeAccum = 0;
+    _bowAccum = 0;
 
     std::vector<SolidVertex> boat = MakeTugboat();
     _boatVertexCount = boat.size();
@@ -993,6 +1042,7 @@ enum {
         if ((int)_particles.size() >= kMaxParticles) break;
         Particle p;
         p.kind = 0;
+        p.dir = simd_make_float2(0, 1);   // unused by billboards
         // Funnel mouth: local (0, ~3.05, 2.1), with a little scatter.
         simd_float3 local = simd_make_float3(pm(_rng) * 0.15f, 3.05f, 2.1f + pm(_rng) * 0.15f);
         p.pos = [self localToWorld:local];
@@ -1011,35 +1061,65 @@ enum {
 }
 
 - (void)emitWake:(float)dt time:(float)t {
-    if (fabsf(_speed) < 0.4f) return;   // no wash when barely moving
+    float speed = fabsf(_speed);
+    if (speed < 0.5f) return;   // no wash when barely moving
     std::uniform_real_distribution<float> pm(-1.0f, 1.0f);
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
-    float rate = fabsf(_speed) * 9.0f;  // faster boat -> denser foam
-    _wakeAccum += dt * rate;
-    simd_float3 fwdH = simd_make_float3(sinf(_heading), 0, -cosf(_heading));
-    simd_float3 rightH = simd_normalize(simd_cross(fwdH, simd_make_float3(0, 1, 0)));
-    while (_wakeAccum >= 1.0f) {
-        _wakeAccum -= 1.0f;
+
+    simd_float2 fwdXZ = simd_make_float2(sinf(_heading), -cosf(_heading));
+    simd_float2 rightXZ = simd_make_float2(cosf(_heading), sinf(_heading));
+    float bowZ = -0.42f * kBoatTargetLength;    // front (local -z)
+    float sternZ = 0.42f * kBoatTargetLength;   // back  (local +z)
+    float beam = 0.14f * kBoatTargetLength;
+
+    // Bow wave: two streams peel off the front corners and stream aft, forming
+    // the diverging ~20° arms of the V.
+    _bowAccum += dt * speed * 7.0f;
+    while (_bowAccum >= 1.0f) {
+        _bowAccum -= 1.0f;
         if ((int)_particles.size() >= kMaxParticles) break;
         float side = (u01(_rng) < 0.5f) ? -1.0f : 1.0f;
         Particle p;
         p.kind = 1;
-        // Two streams off the stern quarters spread into a V.
-        simd_float3 local = simd_make_float3(side * (0.5f + u01(_rng) * 0.3f), 0.1f, 2.7f);
+        simd_float3 local = simd_make_float3(side * beam, 0.1f, bowZ + pm(_rng) * 0.4f);
         simd_float3 world = [self localToWorld:local];
-        WaveSample sw = SampleWaves(simd_make_float2(world.x, world.z), t);
-        world.y = sw.height + 0.06f;
+        world.y = SampleWaves(simd_make_float2(world.x, world.z), t).height + 0.06f;
         p.pos = world;
-        p.vel = rightH * (side * (0.7f + u01(_rng) * 0.5f))   // fan outward
-              + (-fwdH) * 0.25f                                // settle astern
-              + simd_make_float3(pm(_rng), 0, pm(_rng)) * 0.15f;
-        p.vel.y = 0;
+        simd_float2 d = simd_normalize(-fwdXZ + side * rightXZ * 0.6f);  // aft + outward
+        p.dir = d;
+        p.vel = simd_make_float3(d.x, 0, d.y) * (0.4f + 0.4f * u01(_rng))
+              + simd_make_float3(pm(_rng), 0, pm(_rng)) * 0.1f;
         p.age = 0;
-        p.life = 1.6f + u01(_rng) * 0.9f;
-        p.size0 = 0.35f;
-        p.size1 = 2.2f + u01(_rng) * 0.8f;
-        p.color0 = simd_make_float4(0.92f, 0.96f, 1.0f, 0.55f);   // bright foam
-        p.color1 = simd_make_float4(0.80f, 0.88f, 0.95f, 0.0f);   // fades to nothing
+        p.life = 1.8f + u01(_rng) * 1.0f;
+        p.size0 = 0.5f;
+        p.size1 = 2.6f + u01(_rng) * 0.8f;
+        p.color0 = simd_make_float4(0.95f, 0.98f, 1.0f, 0.60f);
+        p.color1 = simd_make_float4(0.85f, 0.92f, 0.98f, 0.0f);
+        _particles.push_back(p);
+    }
+
+    // Stern wash: the bright churned trail straight behind the boat, widening
+    // slowly as it ages.
+    _wakeAccum += dt * speed * 13.0f;
+    while (_wakeAccum >= 1.0f) {
+        _wakeAccum -= 1.0f;
+        if ((int)_particles.size() >= kMaxParticles) break;
+        Particle p;
+        p.kind = 1;
+        simd_float3 local = simd_make_float3(pm(_rng) * beam * 0.5f, 0.1f,
+                                             sternZ + pm(_rng) * 0.3f);
+        simd_float3 world = [self localToWorld:local];
+        world.y = SampleWaves(simd_make_float2(world.x, world.z), t).height + 0.06f;
+        p.pos = world;
+        p.dir = simd_normalize(-fwdXZ);   // streak along the trail
+        p.vel = simd_make_float3(-fwdXZ.x, 0, -fwdXZ.y) * 0.3f
+              + simd_make_float3(rightXZ.x, 0, rightXZ.y) * (pm(_rng) * 0.4f);
+        p.age = 0;
+        p.life = 2.6f + u01(_rng) * 1.2f;
+        p.size0 = 0.6f;
+        p.size1 = 2.2f + u01(_rng) * 0.7f;
+        p.color0 = simd_make_float4(1.0f, 1.0f, 1.0f, 0.70f);
+        p.color1 = simd_make_float4(0.85f, 0.92f, 0.98f, 0.0f);
         _particles.push_back(p);
     }
 }
@@ -1107,10 +1187,10 @@ enum {
     id<MTLBuffer> particleBuffer = _particleBuffers[_frameIndex];
     _particleScratch.clear();
     for (const Particle &p : _particles)
-        if (p.kind == 1) AppendBillboard(_particleScratch, p, right, up);
+        if (p.kind == 1) AppendWakeQuad(_particleScratch, p);   // flat foam on the water
     NSUInteger wakeVerts = _particleScratch.size();
     for (const Particle &p : _particles)
-        if (p.kind == 0) AppendBillboard(_particleScratch, p, right, up);
+        if (p.kind == 0) AppendBillboard(_particleScratch, p, right, up);  // smoke billboards
     NSUInteger totalVerts = _particleScratch.size();
     NSUInteger smokeVerts = totalVerts - wakeVerts;
     if (totalVerts > 0) {
@@ -1137,12 +1217,13 @@ enum {
              vertexStart:0
              vertexCount:(NSUInteger)kGrid * kGrid * 6];
 
-    // Wake foam: on the water, beneath the boat.
+    // Wake foam: flat on the water, beneath the boat.
     if (wakeVerts > 0) {
-        [enc setRenderPipelineState:_particlePipeline];
+        [enc setRenderPipelineState:_wakePipeline];
         [enc setDepthStencilState:_noDepthState];
         [enc setVertexBuffer:particleBuffer offset:0 atIndex:0];
         [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+        [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];   // wake_fragment reads time
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:wakeVerts];
     }
 
