@@ -1,11 +1,14 @@
 // 06 — Tugboat
 //
 // A tiny game: drive a tugboat across a Gerstner-wave ocean, viewed from a
-// chase camera angled 30° down, and collect the orange buoys. Everything is
-// procedural — the boat and buoys are colored boxes, the water is the same
-// wave math as example 05, and both the boat and the buoys sample the SAME
-// wave function on the CPU so they genuinely ride the swells (bob, pitch,
-// and roll). Distance haze blends the water edge into the sky at the horizon.
+// chase camera angled 30° down, and collect the orange buoys. The water and
+// buoys are procedural, and the boat is loaded from a real USDZ model via
+// Model I/O (assets/Tugboat.usdz) with a procedural box-boat fallback if the
+// file is missing. Everything samples the SAME wave function on the CPU so it
+// genuinely rides the swells (bob, pitch, roll). Distance haze blends the
+// water edge into the sky at the horizon.
+//
+// Pass a model path as argv[1] to override, e.g. ./06-tugboat myboat.usdz
 //
 // Two billboard particle systems add life: dark smoke puffing from the funnel
 // (heavier under throttle) and white foam churning off the stern into a wake.
@@ -22,6 +25,8 @@
 // not moving, just like a real boat. Score and throttle live in the title bar.
 
 #include "../common/app.h"
+#import <ModelIO/ModelIO.h>
+#import <MetalKit/MetalKit.h>
 #include <simd/simd.h>
 #include <algorithm>
 #include <cmath>
@@ -29,6 +34,16 @@
 #include <random>
 #include <string>
 #include <vector>
+
+// Optional path to a boat model (USDZ/OBJ), from argv[1]. When present and
+// loadable it replaces the procedural box-boat; otherwise we fall back.
+static NSString *gModelPath = nil;
+
+// --- Tuning for the loaded boat asset (tweak after seeing it on screen) ---
+static const float kBoatTargetLength = 8.0f;  // scale the model's footprint to this many meters
+static const float kBoatYawDeg = 0.0f;         // spin the model to face forward (-z) if needed
+static const float kBoatPitchDeg = 0.0f;       // tilt (use -90 if the model is Z-up, not Y-up)
+static const float kBoatDraft = 0.5f;          // how far the hull bottom sits below the waterline
 
 static const int kGrid = 360;        // water quads per side (wide enough that the
 static const float kSpacing = 0.5f;  // grid edges sit past the horizon haze)
@@ -217,6 +232,45 @@ fragment float4 solid_fragment(SolidVSOut in [[stage_in]],
     return float4(pow(color, float3(0.4545)), 1.0);
 }
 
+// ---------------- Textured mesh (loaded boat asset) ----------------
+// Uses [[stage_in]] with a vertex descriptor so it can consume whatever
+// interleaved position/normal/uv buffer Model I/O produces, and samples a
+// per-submesh base-color texture.
+
+struct BoatIn {
+    float3 position [[attribute(0)]];
+    float3 normal   [[attribute(1)]];
+    float2 uv       [[attribute(2)]];
+};
+
+struct BoatVSOut {
+    float4 position [[position]];
+    float3 normal;
+    float2 uv;
+};
+
+vertex BoatVSOut boat_vertex(BoatIn in [[stage_in]],
+                             constant Uniforms &u [[buffer(1)]]) {
+    BoatVSOut out;
+    out.position = u.mvp * float4(in.position, 1.0);
+    out.normal = (u.model * float4(in.normal, 0.0)).xyz;
+    out.uv = in.uv;
+    return out;
+}
+
+fragment float4 boat_fragment(BoatVSOut in [[stage_in]],
+                              constant Uniforms &u [[buffer(0)]],
+                              texture2d<float> baseColor [[texture(0)]],
+                              sampler samp [[sampler(0)]]) {
+    // sRGB textures are converted to linear on sample; light in linear, then
+    // gamma-encode at the end to match the other passes.
+    float3 albedo = baseColor.sample(samp, in.uv).rgb;
+    float3 n = normalize(in.normal);
+    float diffuse = max(dot(n, u.sun.xyz), 0.0);
+    float3 color = albedo * (0.35 + 0.8 * diffuse);
+    return float4(pow(color, float3(0.4545)), 1.0);
+}
+
 // ---------------- Particles: smoke and wake foam ----------------
 // Camera-facing billboards built on the CPU. Each vertex already carries its
 // world position, a 0..1 UV, and an RGBA color; the fragment softens it into a
@@ -337,6 +391,35 @@ static simd_float4x4 ModelMatrix(simd_float3 right, simd_float3 up, simd_float3 
                        simd_make_float4(position, 1));
 }
 
+static simd_float4x4 ScaleMat(float s) {
+    return simd_matrix(simd_make_float4(s, 0, 0, 0),
+                       simd_make_float4(0, s, 0, 0),
+                       simd_make_float4(0, 0, s, 0),
+                       simd_make_float4(0, 0, 0, 1));
+}
+
+static simd_float4x4 TransMat(simd_float3 t) {
+    simd_float4x4 m = matrix_identity_float4x4;
+    m.columns[3] = simd_make_float4(t.x, t.y, t.z, 1);
+    return m;
+}
+
+static simd_float4x4 RotYMat(float a) {
+    float c = cosf(a), s = sinf(a);
+    return simd_matrix(simd_make_float4(c, 0, -s, 0),
+                       simd_make_float4(0, 1, 0, 0),
+                       simd_make_float4(s, 0, c, 0),
+                       simd_make_float4(0, 0, 0, 1));
+}
+
+static simd_float4x4 RotXMat(float a) {
+    float c = cosf(a), s = sinf(a);
+    return simd_matrix(simd_make_float4(1, 0, 0, 0),
+                       simd_make_float4(0, c, s, 0),
+                       simd_make_float4(0, -s, c, 0),
+                       simd_make_float4(0, 0, 0, 1));
+}
+
 // Emit the six vertices of a camera-facing quad for one particle, sized and
 // tinted by its age. camR/camU are the camera's right/up axes in world space.
 static void AppendBillboard(std::vector<ParticleVertex> &out, const Particle &p,
@@ -428,12 +511,19 @@ enum {
     id<MTLRenderPipelineState> _waterPipeline;
     id<MTLRenderPipelineState> _solidPipeline;
     id<MTLRenderPipelineState> _particlePipeline;
+    id<MTLRenderPipelineState> _boatPipeline;      // textured asset boat
     id<MTLDepthStencilState> _depthState;
     id<MTLDepthStencilState> _noDepthState;
-    id<MTLBuffer> _boatMesh;
+    id<MTLSamplerState> _sampler;
+    id<MTLBuffer> _boatMesh;                        // procedural fallback boat
     NSUInteger _boatVertexCount;
     id<MTLBuffer> _buoyMesh;
     NSUInteger _buoyVertexCount;
+
+    // Loaded boat asset (empty -> use the procedural box-boat instead).
+    NSMutableArray<MTKMesh *> *_boatMeshes;
+    NSMutableArray<NSArray<id<MTLTexture>> *> *_boatSubmeshTextures;
+    std::vector<simd_float4x4> _boatMeshXforms;     // fixup * node transform, per mesh
 
     // Triple-buffered particle geometry so the CPU can build the next frame
     // while the GPU still reads the current one.
@@ -570,6 +660,35 @@ enum {
                                     length:buoy.size() * sizeof(SolidVertex)
                                    options:MTLResourceStorageModeShared];
 
+    // Texture sampler for the loaded boat.
+    MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+    sd.minFilter = MTLSamplerMinMagFilterLinear;
+    sd.magFilter = MTLSamplerMinMagFilterLinear;
+    sd.mipFilter = MTLSamplerMipFilterLinear;
+    sd.sAddressMode = MTLSamplerAddressModeRepeat;
+    sd.tAddressMode = MTLSamplerAddressModeRepeat;
+    _sampler = [device newSamplerStateWithDescriptor:sd];
+
+    // Try to load a real boat model; fall back to the box-boat if absent.
+    _boatMeshes = [NSMutableArray array];
+    _boatSubmeshTextures = [NSMutableArray array];
+    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+    if (gModelPath) [candidates addObject:gModelPath];
+    [candidates addObjectsFromArray:@[
+        @"06-tugboat/assets/Tugboat.usdz",
+        @"assets/Tugboat.usdz",
+        @"metal-examples/06-tugboat/assets/Tugboat.usdz",
+    ]];
+    for (NSString *path in candidates) {
+        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            [self loadBoatFromURL:[NSURL fileURLWithPath:path]
+                           device:device library:library view:view];
+            break;
+        }
+    }
+    if (_boatMeshes.count == 0)
+        printf("No boat model found; using the procedural box-boat.\n");
+
     _boatPos = simd_make_float2(0, 0);
     _heading = 0;
     _speed = 0;
@@ -609,6 +728,150 @@ enum {
     float a = angleDist(_rng);
     float r = radiusDist(_rng);
     _buoys[i] = _boatPos + simd_make_float2(r * cosf(a), r * sinf(a));
+}
+
+// A 1x1 linear texture of a flat color, for submeshes whose material has a
+// base color value rather than an image (keeps the shader to one code path).
+- (id<MTLTexture>)solidTexture:(simd_float4)c device:(id<MTLDevice>)device {
+    MTLTextureDescriptor *d =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                           width:1 height:1 mipmapped:NO];
+    id<MTLTexture> t = [device newTextureWithDescriptor:d];
+    uint8_t px[4] = {
+        (uint8_t)(std::clamp(c.x, 0.0f, 1.0f) * 255.0f),
+        (uint8_t)(std::clamp(c.y, 0.0f, 1.0f) * 255.0f),
+        (uint8_t)(std::clamp(c.z, 0.0f, 1.0f) * 255.0f),
+        255,
+    };
+    [t replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:px bytesPerRow:4];
+    return t;
+}
+
+// Resolve a submesh's base-color to an MTLTexture: the material's image if it
+// has one, otherwise a flat color, otherwise neutral grey.
+- (id<MTLTexture>)textureForMaterial:(MDLMaterial *)material
+                              loader:(MTKTextureLoader *)loader
+                              device:(id<MTLDevice>)device {
+    id<MTLTexture> tex = nil;
+    MDLMaterialProperty *bc = [material propertyWithSemantic:MDLMaterialSemanticBaseColor];
+    if (bc) {
+        if (bc.type == MDLMaterialPropertyTypeTexture && bc.textureSamplerValue.texture) {
+            CGImageRef img = [bc.textureSamplerValue.texture imageFromTexture];
+            if (img) {
+                NSError *e = nil;
+                tex = [loader newTextureWithCGImage:img
+                                            options:@{MTKTextureLoaderOptionSRGB: @YES,
+                                                      MTKTextureLoaderOptionGenerateMipmaps: @YES}
+                                              error:&e];
+                CGImageRelease(img);
+            }
+        } else if (bc.type == MDLMaterialPropertyTypeFloat3) {
+            tex = [self solidTexture:simd_make_float4(bc.float3Value.x, bc.float3Value.y,
+                                                      bc.float3Value.z, 1)
+                              device:device];
+        } else if (bc.type == MDLMaterialPropertyTypeFloat4) {
+            tex = [self solidTexture:bc.float4Value device:device];
+        }
+    }
+    if (!tex) tex = [self solidTexture:simd_make_float4(0.6f, 0.6f, 0.62f, 1) device:device];
+    return tex;
+}
+
+- (BOOL)loadBoatFromURL:(NSURL *)url
+                 device:(id<MTLDevice>)device
+                library:(id<MTLLibrary>)library
+                   view:(MTKView *)view {
+    MTKMeshBufferAllocator *allocator =
+        [[MTKMeshBufferAllocator alloc] initWithDevice:device];
+
+    // Interleaved position/normal/uv, the layout the boat pipeline expects.
+    MDLVertexDescriptor *vd = [[MDLVertexDescriptor alloc] init];
+    vd.attributes[0] = [[MDLVertexAttribute alloc] initWithName:MDLVertexAttributePosition
+                                                         format:MDLVertexFormatFloat3
+                                                         offset:0 bufferIndex:0];
+    vd.attributes[1] = [[MDLVertexAttribute alloc] initWithName:MDLVertexAttributeNormal
+                                                         format:MDLVertexFormatFloat3
+                                                         offset:12 bufferIndex:0];
+    vd.attributes[2] = [[MDLVertexAttribute alloc] initWithName:MDLVertexAttributeTextureCoordinate
+                                                         format:MDLVertexFormatFloat2
+                                                         offset:24 bufferIndex:0];
+    vd.layouts[0] = [[MDLVertexBufferLayout alloc] initWithStride:32];
+
+    MDLAsset *asset = [[MDLAsset alloc] initWithURL:url
+                                   vertexDescriptor:vd
+                                    bufferAllocator:allocator];
+    [asset loadTextures];
+
+    NSArray<MDLMesh *> *mdlMeshes = [asset childObjectsOfClass:[MDLMesh class]];
+    if (mdlMeshes.count == 0) {
+        printf("Boat asset has no meshes; using the procedural box-boat.\n");
+        return NO;
+    }
+
+    // Pipeline that consumes the Model I/O vertex layout.
+    NSError *error = nil;
+    MTLRenderPipelineDescriptor *pdesc = [MTLRenderPipelineDescriptor new];
+    pdesc.vertexFunction = [library newFunctionWithName:@"boat_vertex"];
+    pdesc.fragmentFunction = [library newFunctionWithName:@"boat_fragment"];
+    pdesc.vertexDescriptor = MTKMetalVertexDescriptorFromModelIO(vd);
+    pdesc.colorAttachments[0].pixelFormat = view.colorPixelFormat;
+    pdesc.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
+    _boatPipeline = [device newRenderPipelineStateWithDescriptor:pdesc error:&error];
+    if (!_boatPipeline) {
+        fprintf(stderr, "Boat pipeline error: %s\n", error.localizedDescription.UTF8String);
+        return NO;
+    }
+
+    MTKTextureLoader *loader = [[MTKTextureLoader alloc] initWithDevice:device];
+    for (MDLMesh *m in mdlMeshes) {
+        MTKMesh *mtk = [[MTKMesh alloc] initWithMesh:m device:device error:&error];
+        if (!mtk) {
+            fprintf(stderr, "MTKMesh error: %s\n", error.localizedDescription.UTF8String);
+            continue;
+        }
+        simd_float4x4 world = [MDLTransform globalTransformWithObject:m atTime:0.0];
+        NSMutableArray<id<MTLTexture>> *texs = [NSMutableArray array];
+        for (MDLSubmesh *sm in m.submeshes) {
+            [texs addObject:[self textureForMaterial:sm.material loader:loader device:device]];
+        }
+        [_boatMeshes addObject:mtk];
+        [_boatSubmeshTextures addObject:texs];
+        _boatMeshXforms.push_back(world);
+    }
+    if (_boatMeshes.count == 0) return NO;
+
+    // Fixup: recenter, scale the footprint to a sensible size, orient, and set
+    // the draft so the hull rides at the waterline. Folded into each mesh's
+    // node transform once, up front.
+    MDLAxisAlignedBoundingBox bb = asset.boundingBox;
+    simd_float3 mn = bb.minBounds, mx = bb.maxBounds;
+    simd_float3 center = (mn + mx) * 0.5f;
+    simd_float3 sz = mx - mn;
+    float footprint = fmaxf(sz.x, fmaxf(sz.y, sz.z));  // largest dim = boat length
+    if (footprint < 1e-4f) footprint = 1.0f;
+    float s = kBoatTargetLength / footprint;
+    float yaw = kBoatYawDeg * (float)M_PI / 180.0f;
+    float pitch = kBoatPitchDeg * (float)M_PI / 180.0f;
+
+    // Recenter -> scale -> orient, then measure the oriented model's lowest
+    // point so the draft is correct no matter which axis was "up".
+    simd_float4x4 rs = simd_mul(simd_mul(RotYMat(yaw), RotXMat(pitch)),
+                                simd_mul(ScaleMat(s), TransMat(-center)));
+    float minY = 1e30f;
+    for (int c = 0; c < 8; c++) {
+        simd_float3 corner = simd_make_float3((c & 1) ? mx.x : mn.x,
+                                              (c & 2) ? mx.y : mn.y,
+                                              (c & 4) ? mx.z : mn.z);
+        simd_float4 p = simd_mul(rs, simd_make_float4(corner, 1));
+        minY = fminf(minY, p.y);
+    }
+    simd_float4x4 fixup =
+        simd_mul(TransMat(simd_make_float3(0, -minY - kBoatDraft, 0)), rs);
+    for (simd_float4x4 &m : _boatMeshXforms) m = simd_mul(fixup, m);
+
+    printf("Boat loaded: %lu mesh(es), bbox (%.2f x %.2f x %.2f), scale %.4f\n",
+           (unsigned long)_boatMeshes.count, sz.x, sz.y, sz.z, s);
+    return YES;
 }
 
 - (void)stepGame:(float)dt time:(float)t {
@@ -828,14 +1091,45 @@ enum {
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:wakeVerts];
     }
 
-    // Boat: floats on the cached wave transform.
-    [enc setRenderPipelineState:_solidPipeline];
+    // Boat: the loaded asset if we have one, else the procedural box-boat.
+    // Both ride the same cached floating transform.
+    simd_float4x4 floatTransform = ModelMatrix(_boatRight, _boatUp, _boatBack, _boatWorldPos);
     [enc setDepthStencilState:_depthState];
-    {
-        simd_float4x4 model = ModelMatrix(_boatRight, _boatUp, _boatBack, _boatWorldPos);
+    if (_boatMeshes.count > 0) {
+        [enc setRenderPipelineState:_boatPipeline];
+        [enc setFragmentSamplerState:_sampler atIndex:0];
+        for (NSUInteger mi = 0; mi < _boatMeshes.count; mi++) {
+            MTKMesh *mesh = _boatMeshes[mi];
+            NSArray<id<MTLTexture>> *texs = _boatSubmeshTextures[mi];
+            simd_float4x4 model = simd_mul(floatTransform, _boatMeshXforms[mi]);
+            Uniforms bu = u;
+            bu.mvp = simd_mul(viewProj, model);
+            bu.model = model;
+            for (NSUInteger bi = 0; bi < mesh.vertexBuffers.count; bi++) {
+                id vbObj = mesh.vertexBuffers[bi];
+                if (![vbObj isKindOfClass:[MTKMeshBuffer class]]) continue;
+                MTKMeshBuffer *vb = vbObj;
+                [enc setVertexBuffer:vb.buffer offset:vb.offset atIndex:bi];
+            }
+            [enc setVertexBytes:&bu length:sizeof(bu) atIndex:1];
+            [enc setFragmentBytes:&bu length:sizeof(bu) atIndex:0];
+            NSUInteger j = 0;
+            for (MTKSubmesh *sm in mesh.submeshes) {
+                id<MTLTexture> tex = (j < texs.count) ? texs[j] : nil;
+                [enc setFragmentTexture:tex atIndex:0];
+                [enc drawIndexedPrimitives:sm.primitiveType
+                                indexCount:sm.indexCount
+                                 indexType:sm.indexType
+                               indexBuffer:sm.indexBuffer.buffer
+                         indexBufferOffset:sm.indexBuffer.offset];
+                j++;
+            }
+        }
+    } else {
+        [enc setRenderPipelineState:_solidPipeline];
         Uniforms bu = u;
-        bu.mvp = simd_mul(viewProj, model);
-        bu.model = model;
+        bu.mvp = simd_mul(viewProj, floatTransform);
+        bu.model = floatTransform;
         [enc setVertexBuffer:_boatMesh offset:0 atIndex:0];
         [enc setVertexBytes:&bu length:sizeof(bu) atIndex:1];
         [enc setFragmentBytes:&bu length:sizeof(bu) atIndex:0];
@@ -843,6 +1137,7 @@ enum {
     }
 
     // Buoys: bob and slowly spin.
+    [enc setRenderPipelineState:_solidPipeline];
     [enc setVertexBuffer:_buoyMesh offset:0 atIndex:0];
     for (int i = 0; i < kBuoyCount; i++) {
         WaveSample ws = SampleWaves(_buoys[i], t);
@@ -892,7 +1187,8 @@ enum {
 
 @end
 
-int main() {
+int main(int argc, const char *argv[]) {
+    if (argc > 1) gModelPath = [NSString stringWithUTF8String:argv[1]];
     return RunMetalApp(@"06 — Tugboat", 1100, 700, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[TugboatRenderer alloc] initWithView:view];
     });

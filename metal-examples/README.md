@@ -89,6 +89,16 @@ camera-facing quads, triple-buffered so the CPU builds the next frame's
 geometry while the GPU draws the current one — the wake is layered beneath
 the boat and the smoke above it.
 
+The boat itself is a real 3D model (`assets/Tugboat.usdz`) loaded at startup
+with Apple's **Model I/O** framework — `MDLAsset` → `MTKMesh` gives Metal
+vertex/index buffers directly, and each submesh's base-color texture is pulled
+from the USDZ and sampled by a dedicated textured pipeline. If the file is
+missing the game falls back to a procedural box-boat, so it always runs. Drop
+a different model in and pass it as an argument to try it:
+`./build/06-tugboat path/to/model.usdz`. Scale, orientation, and draft are
+auto-fitted from the model's bounding box (with tuning constants at the top of
+`main.mm`).
+
 Controls:
 
 | Key | Action | Key | Action |
