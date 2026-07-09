@@ -50,6 +50,7 @@ struct Wave {
     float3 pos;
     float3 normal;
     float  crest;   // -1..1, how near the top of the combined wave we are
+    float  jac;     // Jacobian determinant: < ~0.6 means the crest is folding
 };
 
 // Gerstner waves (GPU Gems ch.1): points move in circles, so crests get
@@ -60,6 +61,7 @@ Wave gerstner(float2 xz, float time, float intensity) {
     float3 p = float3(xz.x, 0.0, xz.y);
     float3 n = float3(0.0, 1.0, 0.0);
     float ampSum = 0.0;
+    float jxx = 1.0, jyy = 1.0, jxy = 0.0;   // horizontal-displacement Jacobian
     for (int i = 0; i < 6; i++) {
         float2 D = normalize(kWaves[i].xy);
         float A = kWaves[i].z * intensity;
@@ -74,12 +76,19 @@ Wave gerstner(float2 xz, float time, float intensity) {
         n.x -= D.x * k * A * c;
         n.z -= D.y * k * A * c;
         n.y -= Q * k * A * s;
+        // Where the horizontal map compresses (det -> 0), the crest folds
+        // over itself: that is where real whitecaps form.
+        float qkas = Q * k * A * s;
+        jxx -= qkas * D.x * D.x;
+        jyy -= qkas * D.y * D.y;
+        jxy -= qkas * D.x * D.y;
         ampSum += A;
     }
     Wave w;
     w.pos = p;
     w.normal = normalize(n);
     w.crest = p.y / ampSum;
+    w.jac = jxx * jyy - jxy * jxy;
     return w;
 }
 
@@ -111,14 +120,43 @@ float fbm(float2 p) {
     return v;
 }
 
-float3 skyColor(float3 rd, float3 sun) {
-    float3 col = mix(float3(0.75, 0.80, 0.85),           // haze at the horizon
-                     float3(0.18, 0.38, 0.66),           // zenith blue
-                     saturate(rd.y * 1.6 + 0.05));
+// Atmospheric sky: blue overhead falling to warm haze at the horizon, a hot
+// HDR sun with an aureole, and drifting fbm cumulus that catch the light.
+// Everything here reflects in the water, so the water inherits its realism.
+float3 skyColor(float3 rd, float3 sun, float time) {
     float sd = max(dot(rd, sun), 0.0);
-    col += float3(1.0, 0.75, 0.50) * pow(sd, 6.0) * 0.35;   // warm glow
-    col += float3(1.0, 0.90, 0.70) * pow(sd, 1200.0) * 18.0; // the disc itself
+    float horizon = pow(1.0 - saturate(rd.y), 3.5);
+    float3 zenith = float3(0.10, 0.28, 0.58);
+    float3 haze = mix(float3(0.58, 0.68, 0.78),          // cool haze
+                      float3(0.98, 0.68, 0.40),          // warm near the sun
+                      pow(sd, 4.0));
+    float3 col = mix(zenith, haze, horizon);
+    col += float3(1.0, 0.72, 0.42) * pow(sd, 9.0) * 0.45;    // aureole
+    col += float3(1.0, 0.92, 0.75) * pow(sd, 1400.0) * 60.0; // HDR disc -> bloom
+
+    // Clouds: flat fbm layer projected onto the sky dome, drifting slowly,
+    // brighter on the sunward side with shadowed undersides.
+    if (rd.y > 0.02) {
+        float2 cuv = rd.xz / (rd.y + 0.14) * 0.55
+                   + float2(time * 0.008, time * 0.003);
+        float shape = fbm(cuv);
+        float cover = smoothstep(0.52, 0.74, shape);
+        float detail = fbm(cuv * 2.7 + 11.0);
+        float3 cloud = mix(float3(0.52, 0.55, 0.60),     // shadowed base
+                           float3(1.08, 1.04, 0.98),     // sunlit top
+                           detail * 0.6 + 0.4 * pow(sd, 2.0));
+        cloud += float3(0.9, 0.55, 0.25) * pow(sd, 6.0) * 0.35;
+        float fade = smoothstep(0.02, 0.15, rd.y);       // thin out at horizon
+        col = mix(col, cloud, cover * fade * 0.85);
+    }
     return col;
+}
+
+// GGX microfacet lobe: the physically-based sun glitter on the water.
+float D_GGX(float NoH, float a) {
+    float a2 = a * a;
+    float d = NoH * NoH * (a2 - 1.0) + 1.0;
+    return a2 / (M_PI_F * d * d + 1e-6);
 }
 
 float3 tonemap(float3 c) {
@@ -149,8 +187,8 @@ fragment float4 sky_fragment(SkyVSOut in [[stage_in]],
     float3 rd = normalize(u.camFwd.xyz +
                           u.camRight.xyz * (ndc.x * aspect / focal) +
                           u.camUp.xyz * (ndc.y / focal));
-    float3 col = skyColor(rd, u.sun.xyz);
-    return float4(pow(tonemap(col), float3(0.4545)), 1.0);
+    float3 col = skyColor(rd, u.sun.xyz, u.sun.w);
+    return float4(col, 1.0);   // linear HDR; tonemap happens in the composite
 }
 
 // ---------------- Ocean pass: the displaced grid ----------------
@@ -160,6 +198,7 @@ struct OceanVSOut {
     float3 world;
     float3 normal;
     float  crest;
+    float  jac;
 };
 
 constant uint2 kCorner[6] = {
@@ -181,6 +220,7 @@ vertex OceanVSOut ocean_vertex(uint vid [[vertex_id]],
     out.world = w.pos;
     out.normal = w.normal;
     out.crest = w.crest;
+    out.jac = w.jac;
     return out;
 }
 
@@ -192,12 +232,15 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     float dist = length(toCam);
     float3 V = toCam / dist;
 
-    // Fine ripple detail on top of the interpolated geometric normal.
+    // Fine ripple detail, strongest near the camera (distant water reads
+    // smooth, which is what stretches the sun's glitter path to the horizon).
+    float detailAmp = 0.9 / (1.0 + dist * 0.04);
     float2 dp = in.world.xz * 1.3 + float2(time * 0.4, time * 0.25);
     float hC = fbm(dp);
     float hX = fbm(dp + float2(0.33, 0.0));
     float hZ = fbm(dp + float2(0.0, 0.33));
-    float3 n = normalize(normalize(in.normal) + float3(hC - hX, 0.0, hC - hZ) * 0.9);
+    float3 n = normalize(normalize(in.normal) +
+                         float3(hC - hX, 0.0, hC - hZ) * detailAmp);
 
     // Fresnel: ~2% reflective looking straight down, a mirror at grazing angles.
     float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
@@ -205,7 +248,7 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     // What the mirror sees.
     float3 R = reflect(-V, n);
     R.y = max(R.y, 0.03);
-    float3 reflection = skyColor(normalize(R), sun);
+    float3 reflection = skyColor(normalize(R), sun, time);
 
     // What's under the surface: deep water, plus light scattering through
     // the top of backlit crests.
@@ -215,23 +258,82 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
 
     float3 color = mix(body, reflection, fresnel);
 
-    // Sun glint.
-    color += float3(1.0, 0.85, 0.6) * pow(max(dot(R, sun), 0.0), 250.0) * (2.5 * fresnel + 0.3);
+    // Sun glitter: GGX microfacet lobe. Roughness grows with distance, so
+    // near water sparkles and the path elongates toward the horizon.
+    float alpha = clamp(0.035 + dist * 0.0022, 0.035, 0.30);
+    float3 H = normalize(V + sun);
+    float NoH = max(dot(n, H), 0.0);
+    float NoL = max(dot(n, sun), 0.0);
+    float spec = D_GGX(NoH, alpha) * 0.25;
+    color += float3(1.0, 0.85, 0.60) * spec * fresnel * NoL * 3.0;
 
-    // Foam where the crest is high, broken up by noise so it isn't a stripe.
-    // Heavier seas break more: whitecaps multiply with intensity.
+    // Whitecaps where the surface FOLDS (Jacobian pinch), not where it's
+    // merely high — foam hugs breaking crests the way real water does.
     float rough = clamp(u.misc.z, 0.25, 2.5);
-    float foamMask = fbm(in.world.xz * 0.7 + float2(time * 0.2, -time * 0.15));
-    float foam = smoothstep(0.35, 0.8, in.crest * (0.55 + 0.45 * rough))
-               * smoothstep(0.35, 0.75, foamMask + 0.25 * in.crest);
-    color = mix(color, float3(0.90, 0.93, 0.95), foam * 0.75);
+    float fold = smoothstep(0.78, 0.30, in.jac / max(rough * 0.6 + 0.4, 0.6));
+    float foamMask = fbm(in.world.xz * 0.9 + float2(time * 0.25, -time * 0.18));
+    float trail = smoothstep(0.30, 0.85, in.crest * (0.5 + 0.5 * rough))
+                * smoothstep(0.45, 0.8, foamMask) * 0.5;
+    float foam = clamp(fold * (0.55 + 0.45 * foamMask) + trail, 0.0, 1.0);
+    color = mix(color, float3(0.92, 0.95, 0.97), foam * 0.85);
 
     // Fade the far edge of the grid into the sky so it has no visible border.
     float3 rd = -V;
-    float3 horizon = skyColor(normalize(float3(rd.x, 0.015, rd.z)), sun);
+    float3 horizon = skyColor(normalize(float3(rd.x, 0.015, rd.z)), sun, time);
     color = mix(color, horizon, smoothstep(60.0, 95.0, dist));
 
-    return float4(pow(tonemap(color), float3(0.4545)), 1.0);
+    return float4(color, 1.0);   // linear HDR; tonemap happens in the composite
+}
+
+// ---------------- HDR post chain: bright-pass, blur, composite ----------------
+
+struct PostVSOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+vertex PostVSOut post_vertex(uint vid [[vertex_id]]) {
+    float2 p = float2((vid << 1) & 2, vid & 2);
+    PostVSOut o;
+    o.position = float4(p * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = float2(p.x, 1.0 - p.y);
+    return o;
+}
+
+fragment float4 bright_fragment(PostVSOut in [[stage_in]],
+                                texture2d<float> scene [[texture(0)]],
+                                sampler smp [[sampler(0)]]) {
+    float3 c = scene.sample(smp, in.uv).rgb;
+    float luma = dot(c, float3(0.299, 0.587, 0.114));
+    return float4(c * smoothstep(1.0, 2.2, luma), 1.0);
+}
+
+constant float kBlurW[5] = {0.227027, 0.194594, 0.121621, 0.054054, 0.016216};
+
+fragment float4 blur_fragment(PostVSOut in [[stage_in]],
+                              texture2d<float> src [[texture(0)]],
+                              sampler smp [[sampler(0)]],
+                              constant float2 &dir [[buffer(0)]]) {
+    float2 texel = 1.0 / float2(src.get_width(), src.get_height());
+    float3 c = src.sample(smp, in.uv).rgb * kBlurW[0];
+    for (int i = 1; i < 5; i++) {
+        float2 o = dir * texel * float(i) * 1.5;
+        c += src.sample(smp, in.uv + o).rgb * kBlurW[i];
+        c += src.sample(smp, in.uv - o).rgb * kBlurW[i];
+    }
+    return float4(c, 1.0);
+}
+
+fragment float4 composite_fragment(PostVSOut in [[stage_in]],
+                                   texture2d<float> scene [[texture(0)]],
+                                   texture2d<float> bloom [[texture(1)]],
+                                   sampler smp [[sampler(0)]]) {
+    float3 c = scene.sample(smp, in.uv).rgb;
+    c += bloom.sample(smp, in.uv).rgb * 0.65;
+    float2 cc = in.uv - 0.5;
+    c *= 1.0 - 0.30 * dot(cc, cc) * 2.0;     // gentle vignette
+    c = tonemap(c);
+    return float4(pow(c, float3(0.4545)), 1.0);
 }
 )METAL";
 
@@ -273,10 +375,40 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     id<MTLCommandQueue> _queue;
     id<MTLRenderPipelineState> _skyPipeline;
     id<MTLRenderPipelineState> _oceanPipeline;
+    id<MTLRenderPipelineState> _brightPipeline;
+    id<MTLRenderPipelineState> _blurPipeline;
+    id<MTLRenderPipelineState> _compositePipeline;
     id<MTLDepthStencilState> _skyDepth;
     id<MTLDepthStencilState> _oceanDepth;
+    id<MTLSamplerState> _sampler;
+    id<MTLTexture> _sceneTex, _sceneDepth, _bloomA, _bloomB;
     double _startTime;
     FPSCounter _fps;
+}
+
+- (void)ensureTargets:(id<MTLDevice>)device size:(CGSize)size {
+    NSUInteger w = (NSUInteger)size.width, h = (NSUInteger)size.height;
+    if (w == 0 || h == 0) return;
+    if (_sceneTex && _sceneTex.width == w && _sceneTex.height == h) return;
+
+    MTLTextureDescriptor *td =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                           width:w height:h mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModePrivate;
+    _sceneTex = [device newTextureWithDescriptor:td];
+
+    MTLTextureDescriptor *dd =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                           width:w height:h mipmapped:NO];
+    dd.usage = MTLTextureUsageRenderTarget;
+    dd.storageMode = MTLStorageModePrivate;
+    _sceneDepth = [device newTextureWithDescriptor:dd];
+
+    td.width = std::max<NSUInteger>(w / 4, 1);
+    td.height = std::max<NSUInteger>(h / 4, 1);
+    _bloomA = [device newTextureWithDescriptor:td];
+    _bloomB = [device newTextureWithDescriptor:td];
 }
 
 - (instancetype)initWithView:(MTKView *)view {
@@ -284,8 +416,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 
     id<MTLDevice> device = view.device;
     _queue = [device newCommandQueue];
-    view.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
-    view.clearColor = MTLClearColorMake(0.18, 0.38, 0.66, 1.0);
+    // The scene renders offscreen in HDR; the view only receives the final
+    // tonemapped composite, so it needs no depth buffer of its own.
 
     std::string source = "#define GRID " + std::to_string(kGrid) +
                          "\n#define SPACING " + std::to_string(kSpacing) + "f\n" +
@@ -295,9 +427,10 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 
     NSError *error = nil;
 
+    // Scene pipelines target the HDR offscreen texture.
     MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
-    desc.colorAttachments[0].pixelFormat = view.colorPixelFormat;
-    desc.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
+    desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+    desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
 
     desc.vertexFunction = [library newFunctionWithName:@"sky_vertex"];
     desc.fragmentFunction = [library newFunctionWithName:@"sky_fragment"];
@@ -314,6 +447,37 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         fprintf(stderr, "Ocean pipeline error: %s\n", error.localizedDescription.UTF8String);
         return nil;
     }
+
+    // Post pipelines: bright-pass and blur in HDR, composite to the drawable.
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+    pd.vertexFunction = [library newFunctionWithName:@"post_vertex"];
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+    pd.fragmentFunction = [library newFunctionWithName:@"bright_fragment"];
+    _brightPipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
+    if (!_brightPipeline) {
+        fprintf(stderr, "Bright pipeline error: %s\n", error.localizedDescription.UTF8String);
+        return nil;
+    }
+    pd.fragmentFunction = [library newFunctionWithName:@"blur_fragment"];
+    _blurPipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
+    if (!_blurPipeline) {
+        fprintf(stderr, "Blur pipeline error: %s\n", error.localizedDescription.UTF8String);
+        return nil;
+    }
+    pd.colorAttachments[0].pixelFormat = view.colorPixelFormat;
+    pd.fragmentFunction = [library newFunctionWithName:@"composite_fragment"];
+    _compositePipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
+    if (!_compositePipeline) {
+        fprintf(stderr, "Composite pipeline error: %s\n", error.localizedDescription.UTF8String);
+        return nil;
+    }
+
+    MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+    sd.minFilter = MTLSamplerMinMagFilterLinear;
+    sd.magFilter = MTLSamplerMinMagFilterLinear;
+    sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    _sampler = [device newSamplerStateWithDescriptor:sd];
 
     MTLDepthStencilDescriptor *depthDesc = [MTLDepthStencilDescriptor new];
     depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
@@ -387,24 +551,81 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                                  _intensityShown, 0),
     };
 
+    [self ensureTargets:view.device size:view.drawableSize];
+    if (!_sceneTex) return;
+
     id<MTLCommandBuffer> commands = [_queue commandBuffer];
-    id<MTLRenderCommandEncoder> enc = [commands renderCommandEncoderWithDescriptor:pass];
 
-    [enc setRenderPipelineState:_skyPipeline];
-    [enc setDepthStencilState:_skyDepth];
-    [enc setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
-    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    // 1) Scene in HDR: sky, then the displaced ocean grid.
+    MTLRenderPassDescriptor *scenePass = [MTLRenderPassDescriptor renderPassDescriptor];
+    scenePass.colorAttachments[0].texture = _sceneTex;
+    scenePass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    scenePass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    scenePass.depthAttachment.texture = _sceneDepth;
+    scenePass.depthAttachment.loadAction = MTLLoadActionClear;
+    scenePass.depthAttachment.storeAction = MTLStoreActionDontCare;
+    scenePass.depthAttachment.clearDepth = 1.0;
+    {
+        id<MTLRenderCommandEncoder> enc =
+            [commands renderCommandEncoderWithDescriptor:scenePass];
+        [enc setRenderPipelineState:_skyPipeline];
+        [enc setDepthStencilState:_skyDepth];
+        [enc setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
 
-    [enc setRenderPipelineState:_oceanPipeline];
-    [enc setDepthStencilState:_oceanDepth];
-    [enc setCullMode:MTLCullModeNone];
-    [enc setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:0];
-    [enc setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
-    [enc drawPrimitives:MTLPrimitiveTypeTriangle
-             vertexStart:0
-             vertexCount:(NSUInteger)kGrid * kGrid * 6];
+        [enc setRenderPipelineState:_oceanPipeline];
+        [enc setDepthStencilState:_oceanDepth];
+        [enc setCullMode:MTLCullModeNone];
+        [enc setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+        [enc setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                 vertexStart:0
+                 vertexCount:(NSUInteger)kGrid * kGrid * 6];
+        [enc endEncoding];
+    }
 
-    [enc endEncoding];
+    // 2) Bright-pass into quarter-res A.
+    MTLRenderPassDescriptor *bp = [MTLRenderPassDescriptor renderPassDescriptor];
+    bp.colorAttachments[0].texture = _bloomA;
+    bp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    bp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    {
+        id<MTLRenderCommandEncoder> enc = [commands renderCommandEncoderWithDescriptor:bp];
+        [enc setRenderPipelineState:_brightPipeline];
+        [enc setFragmentTexture:_sceneTex atIndex:0];
+        [enc setFragmentSamplerState:_sampler atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [enc endEncoding];
+    }
+
+    // 3) Two blur iterations (H,V,H,V) for a wide soft halo.
+    for (int p = 0; p < 4; p++) {
+        MTLRenderPassDescriptor *pp = [MTLRenderPassDescriptor renderPassDescriptor];
+        pp.colorAttachments[0].texture = (p % 2 == 0) ? _bloomB : _bloomA;
+        pp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        pp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [commands renderCommandEncoderWithDescriptor:pp];
+        [enc setRenderPipelineState:_blurPipeline];
+        [enc setFragmentTexture:(p % 2 == 0) ? _bloomA : _bloomB atIndex:0];
+        [enc setFragmentSamplerState:_sampler atIndex:0];
+        simd_float2 dir = (p % 2 == 0) ? simd_make_float2(1, 0) : simd_make_float2(0, 1);
+        [enc setFragmentBytes:&dir length:sizeof(dir) atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [enc endEncoding];
+    }
+
+    // 4) Composite: scene + bloom, tonemap, gamma, vignette.
+    {
+        id<MTLRenderCommandEncoder> enc =
+            [commands renderCommandEncoderWithDescriptor:pass];
+        [enc setRenderPipelineState:_compositePipeline];
+        [enc setFragmentTexture:_sceneTex atIndex:0];
+        [enc setFragmentTexture:_bloomA atIndex:1];
+        [enc setFragmentSamplerState:_sampler atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [enc endEncoding];
+    }
+
     [commands presentDrawable:drawable];
     [commands commit];
 

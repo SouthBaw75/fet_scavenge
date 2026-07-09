@@ -59,6 +59,13 @@ resolution that's millions of ray marches per frame, sustained at full
 refresh rate.
 
 ### 05 — Ocean
+*(Realism pass:* whitecaps form where the wave surface **folds** — the
+Gerstner displacement's Jacobian — not just where it's high; the sun path is
+a **GGX microfacet glitter** whose roughness grows with distance so near
+water sparkles while the path stretches to the horizon; an atmospheric sky
+with drifting fbm **clouds** that appear in the reflections; and the whole
+scene renders in **HDR with bloom**, tonemapped in a final composite. Wave
+intensity is adjustable live: ↑/↓ or presets 1–5, from glassy to storm.)*
 How games render water. A grid of ~780,000 vertices (generated from the
 vertex index — no vertex buffer) is displaced every frame by a sum of six
 **Gerstner waves**, the classic technique from GPU Gems: points move in
