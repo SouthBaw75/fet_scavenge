@@ -40,10 +40,10 @@
 static NSString *gModelPath = nil;
 
 // --- Tuning for the loaded boat asset (tweak after seeing it on screen) ---
-static const float kBoatTargetLength = 8.0f;  // scale the model's footprint to this many meters
-static const float kBoatYawDeg = 0.0f;         // spin the model to face forward (-z) if needed
-static const float kBoatPitchDeg = 0.0f;       // tilt (use -90 if the model is Z-up, not Y-up)
-static const float kBoatDraft = 0.5f;          // how far the hull bottom sits below the waterline
+static const float kBoatTargetLength = 12.0f;  // scale the model's longest axis to this many meters
+static const float kBoatYawDeg = 90.0f;         // spin the model to face forward (-z) if needed
+static const float kBoatPitchDeg = 0.0f;        // tilt (use -90 if the model is Z-up, not Y-up)
+static const float kBoatDraft = 0.5f;           // how far the hull bottom sits below the waterline
 
 static const int kGrid = 360;        // water quads per side (wide enough that the
 static const float kSpacing = 0.5f;  // grid edges sit past the horizon haze)
@@ -822,6 +822,12 @@ enum {
         return NO;
     }
 
+    // Accumulate the bounding box in the SAME space we draw in (each mesh's
+    // vertices times its node transform), so any root scale baked into those
+    // transforms is measured here and cancelled by the fit below.
+    simd_float3 gMin = simd_make_float3(1e30f, 1e30f, 1e30f);
+    simd_float3 gMax = simd_make_float3(-1e30f, -1e30f, -1e30f);
+
     MTKTextureLoader *loader = [[MTKTextureLoader alloc] initWithDevice:device];
     for (MDLMesh *m in mdlMeshes) {
         MTKMesh *mtk = [[MTKMesh alloc] initWithMesh:m device:device error:&error];
@@ -830,6 +836,16 @@ enum {
             continue;
         }
         simd_float4x4 world = [MDLTransform globalTransformWithObject:m atTime:0.0];
+        MDLAxisAlignedBoundingBox lb = m.boundingBox;
+        for (int c = 0; c < 8; c++) {
+            simd_float3 corner = simd_make_float3((c & 1) ? lb.maxBounds.x : lb.minBounds.x,
+                                                  (c & 2) ? lb.maxBounds.y : lb.minBounds.y,
+                                                  (c & 4) ? lb.maxBounds.z : lb.minBounds.z);
+            simd_float4 wp = simd_mul(world, simd_make_float4(corner, 1));
+            simd_float3 w = simd_make_float3(wp.x, wp.y, wp.z);
+            gMin = simd_min(gMin, w);
+            gMax = simd_max(gMax, w);
+        }
         NSMutableArray<id<MTLTexture>> *texs = [NSMutableArray array];
         for (MDLSubmesh *sm in m.submeshes) {
             [texs addObject:[self textureForMaterial:sm.material loader:loader device:device]];
@@ -840,11 +856,10 @@ enum {
     }
     if (_boatMeshes.count == 0) return NO;
 
-    // Fixup: recenter, scale the footprint to a sensible size, orient, and set
-    // the draft so the hull rides at the waterline. Folded into each mesh's
+    // Fixup: recenter, scale the longest axis to a sensible size, orient, and
+    // set the draft so the hull rides at the waterline. Folded into each mesh's
     // node transform once, up front.
-    MDLAxisAlignedBoundingBox bb = asset.boundingBox;
-    simd_float3 mn = bb.minBounds, mx = bb.maxBounds;
+    simd_float3 mn = gMin, mx = gMax;
     simd_float3 center = (mn + mx) * 0.5f;
     simd_float3 sz = mx - mn;
     float footprint = fmaxf(sz.x, fmaxf(sz.y, sz.z));  // largest dim = boat length
