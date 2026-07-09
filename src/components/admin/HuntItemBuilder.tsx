@@ -211,6 +211,222 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
         )}
       </div>
 
+      <div className="mt-4 rounded-xl border border-brand-navy/15 bg-brand-navy/[0.02] p-4">
+        <h3 className="font-semibold text-brand-navy">
+          {editingId ? "Edit Item" : "Add Item"}
+        </h3>
+        <div className="mt-3 flex flex-col gap-3">
+          <select
+            value={form.type}
+            onChange={(e) => {
+              const type = e.target.value as HuntItemType;
+              // Give QR items a code up front so it's never blank.
+              setForm({
+                ...form,
+                type,
+                qr_value:
+                  type === "qr" && !form.qr_value
+                    ? generateQrValue()
+                    : form.qr_value,
+              });
+            }}
+            className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
+          >
+            <option value="multiple_choice">Multiple Choice</option>
+            <option value="qr">QR Scan</option>
+            <option value="text">Typed Answer</option>
+          </select>
+
+          <textarea
+            value={form.prompt}
+            onChange={(e) => setForm({ ...form, prompt: e.target.value })}
+            placeholder="Question / clue prompt"
+            rows={2}
+            className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
+          />
+
+          {(form.type === "multiple_choice" || form.type === "text") && (
+            <div className="rounded-lg border border-brand-navy/15 bg-white p-3">
+              <label className="text-xs font-semibold text-brand-navy/70">
+                Photo (optional) — ask &quot;what is this?&quot; with a picture
+              </label>
+
+              {form.image_url && (
+                <div className="mt-2 flex items-start gap-3 rounded-lg bg-brand-navy/[0.02] p-2">
+                  {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage URL, no build-time optimization needed */}
+                  <img
+                    src={form.image_url}
+                    alt="Question preview"
+                    className="h-24 w-24 rounded-md object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, image_url: "" })}
+                    className="rounded-full px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-50"
+                  >
+                    Remove photo
+                  </button>
+                </div>
+              )}
+
+              <input
+                type="file"
+                accept="image/*"
+                disabled={uploadingImage}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) uploadImage(file);
+                  e.target.value = "";
+                }}
+                className="mt-2 block w-full text-xs text-brand-navy/70 file:mr-3 file:rounded-full file:border-0 file:bg-brand-cyan/10 file:px-4 file:py-2 file:text-xs file:font-semibold file:text-brand-navy hover:file:bg-brand-cyan/20"
+              />
+              {uploadingImage && (
+                <p className="mt-1 text-xs font-medium text-brand-navy/60">
+                  Optimizing &amp; uploading...
+                </p>
+              )}
+              {imageError && (
+                <p className="mt-1 text-xs font-medium text-red-600">
+                  {imageError}
+                </p>
+              )}
+            </div>
+          )}
+
+          {form.type === "multiple_choice" && (
+            <>
+              <input
+                value={form.choicesText}
+                onChange={(e) =>
+                  setForm({ ...form, choicesText: e.target.value })
+                }
+                placeholder="Choices, comma separated"
+                className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
+              />
+              <input
+                value={form.correct_answer}
+                onChange={(e) =>
+                  setForm({ ...form, correct_answer: e.target.value })
+                }
+                placeholder="Correct choice (must match one exactly)"
+                className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
+              />
+            </>
+          )}
+
+          {form.type === "text" && (
+            <input
+              value={form.correct_answer}
+              onChange={(e) =>
+                setForm({ ...form, correct_answer: e.target.value })
+              }
+              placeholder="Correct answer (case/whitespace insensitive)"
+              className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
+            />
+          )}
+
+          {form.type === "qr" && (
+            <div className="rounded-lg border border-brand-navy/15 bg-white p-3">
+              <label className="text-xs font-semibold text-brand-navy/70">
+                QR code value (encoded in the printed code)
+              </label>
+              <div className="mt-1 flex flex-col gap-2 sm:flex-row">
+                <input
+                  value={form.qr_value}
+                  onChange={(e) =>
+                    setForm({ ...form, qr_value: e.target.value })
+                  }
+                  placeholder="e.g. FET-A1B2C3"
+                  className="h-10 flex-1 rounded-lg border border-brand-navy/20 px-3 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    setForm({ ...form, qr_value: generateQrValue() })
+                  }
+                  className="btn-springy h-10 shrink-0 rounded-full border border-brand-cyan/50 bg-brand-cyan/10 px-4 text-sm font-semibold text-brand-navy"
+                >
+                  Generate code
+                </button>
+              </div>
+
+              {form.qr_value.trim() && (
+                <div className="mt-3 flex items-center gap-3 rounded-lg bg-brand-navy/[0.02] p-3">
+                  <QrImage value={form.qr_value.trim()} size={96} />
+                  <p className="text-xs text-brand-navy/60">
+                    This is the QR families will scan at the stop. Print it from
+                    the{" "}
+                    <span className="font-semibold text-brand-navy">
+                      Print QR codes
+                    </span>{" "}
+                    button once you&apos;ve saved this item.
+                  </p>
+                </div>
+              )}
+
+              <label className="mt-3 block text-xs font-semibold text-brand-navy/70">
+                Message shown after scanning (optional)
+              </label>
+              <textarea
+                value={form.reveal_message}
+                onChange={(e) =>
+                  setForm({ ...form, reveal_message: e.target.value })
+                }
+                placeholder="e.g. Nice find! This CNC machine cuts valve components for oilfield equipment."
+                rows={2}
+                className="mt-1 w-full rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="text-xs font-semibold text-brand-navy/70">
+              Points
+            </label>
+            <input
+              type="number"
+              min={1}
+              value={form.points}
+              onChange={(e) =>
+                setForm({ ...form, points: Number(e.target.value) })
+              }
+              placeholder="Points"
+              className="mt-1 block w-24 rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              onClick={save}
+              disabled={!form.prompt.trim() || saving || uploadingImage}
+              className="btn-springy rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {saving
+                ? "Saving..."
+                : editingId
+                  ? "Save Changes"
+                  : "Add Item"}
+            </button>
+            {editingId && (
+              <button
+                onClick={cancelEdit}
+                className="rounded-full border border-brand-navy/20 px-5 py-2 text-sm font-semibold text-brand-navy transition-colors hover:bg-brand-navy/5"
+              >
+                Cancel
+              </button>
+            )}
+            {!form.prompt.trim() && (
+              <span className="text-xs font-medium text-brand-navy/50">
+                Add a question / clue prompt above to enable this.
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <h3 className="mt-6 border-t border-brand-navy/10 pt-6 font-semibold text-brand-navy">
+        Items{items.length > 0 ? ` (${items.length})` : ""}
+      </h3>
       <ul className="mt-4 flex flex-col gap-2">
         {items.map((item, i) => (
           <li
@@ -270,219 +486,6 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
           <p className="text-sm text-brand-navy/50">No items yet.</p>
         )}
       </ul>
-
-      <div className="mt-6 border-t border-brand-navy/10 pt-6">
-        <h3 className="font-semibold text-brand-navy">
-          {editingId ? "Edit Item" : "Add Item"}
-        </h3>
-        <div className="mt-3 flex flex-col gap-3">
-          <select
-            value={form.type}
-            onChange={(e) => {
-              const type = e.target.value as HuntItemType;
-              // Give QR items a code up front so it's never blank.
-              setForm({
-                ...form,
-                type,
-                qr_value:
-                  type === "qr" && !form.qr_value
-                    ? generateQrValue()
-                    : form.qr_value,
-              });
-            }}
-            className="rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
-          >
-            <option value="multiple_choice">Multiple Choice</option>
-            <option value="qr">QR Scan</option>
-            <option value="text">Typed Answer</option>
-          </select>
-
-          <textarea
-            value={form.prompt}
-            onChange={(e) => setForm({ ...form, prompt: e.target.value })}
-            placeholder="Question / clue prompt"
-            rows={2}
-            className="rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
-          />
-
-          {(form.type === "multiple_choice" || form.type === "text") && (
-            <div className="rounded-lg border border-brand-navy/15 bg-brand-navy/[0.02] p-3">
-              <label className="text-xs font-semibold text-brand-navy/70">
-                Photo (optional) — ask &quot;what is this?&quot; with a picture
-              </label>
-
-              {form.image_url && (
-                <div className="mt-2 flex items-start gap-3 rounded-lg bg-white p-2">
-                  {/* eslint-disable-next-line @next/next/no-img-element -- external Supabase Storage URL, no build-time optimization needed */}
-                  <img
-                    src={form.image_url}
-                    alt="Question preview"
-                    className="h-24 w-24 rounded-md object-cover"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setForm({ ...form, image_url: "" })}
-                    className="rounded-full px-3 py-1 text-xs font-semibold text-red-600 hover:bg-red-50"
-                  >
-                    Remove photo
-                  </button>
-                </div>
-              )}
-
-              <input
-                type="file"
-                accept="image/*"
-                disabled={uploadingImage}
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) uploadImage(file);
-                  e.target.value = "";
-                }}
-                className="mt-2 block w-full text-xs text-brand-navy/70 file:mr-3 file:rounded-full file:border-0 file:bg-brand-cyan/10 file:px-4 file:py-2 file:text-xs file:font-semibold file:text-brand-navy hover:file:bg-brand-cyan/20"
-              />
-              {uploadingImage && (
-                <p className="mt-1 text-xs font-medium text-brand-navy/60">
-                  Optimizing &amp; uploading...
-                </p>
-              )}
-              {imageError && (
-                <p className="mt-1 text-xs font-medium text-red-600">
-                  {imageError}
-                </p>
-              )}
-            </div>
-          )}
-
-          {form.type === "multiple_choice" && (
-            <>
-              <input
-                value={form.choicesText}
-                onChange={(e) =>
-                  setForm({ ...form, choicesText: e.target.value })
-                }
-                placeholder="Choices, comma separated"
-                className="rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
-              />
-              <input
-                value={form.correct_answer}
-                onChange={(e) =>
-                  setForm({ ...form, correct_answer: e.target.value })
-                }
-                placeholder="Correct choice (must match one exactly)"
-                className="rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
-              />
-            </>
-          )}
-
-          {form.type === "text" && (
-            <input
-              value={form.correct_answer}
-              onChange={(e) =>
-                setForm({ ...form, correct_answer: e.target.value })
-              }
-              placeholder="Correct answer (case/whitespace insensitive)"
-              className="rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
-            />
-          )}
-
-          {form.type === "qr" && (
-            <div className="rounded-lg border border-brand-navy/15 bg-brand-navy/[0.02] p-3">
-              <label className="text-xs font-semibold text-brand-navy/70">
-                QR code value (encoded in the printed code)
-              </label>
-              <div className="mt-1 flex flex-col gap-2 sm:flex-row">
-                <input
-                  value={form.qr_value}
-                  onChange={(e) =>
-                    setForm({ ...form, qr_value: e.target.value })
-                  }
-                  placeholder="e.g. FET-A1B2C3"
-                  className="h-10 flex-1 rounded-lg border border-brand-navy/20 px-3 text-sm"
-                />
-                <button
-                  type="button"
-                  onClick={() =>
-                    setForm({ ...form, qr_value: generateQrValue() })
-                  }
-                  className="btn-springy h-10 shrink-0 rounded-full border border-brand-cyan/50 bg-brand-cyan/10 px-4 text-sm font-semibold text-brand-navy"
-                >
-                  Generate code
-                </button>
-              </div>
-
-              {form.qr_value.trim() && (
-                <div className="mt-3 flex items-center gap-3 rounded-lg bg-white p-3">
-                  <QrImage value={form.qr_value.trim()} size={96} />
-                  <p className="text-xs text-brand-navy/60">
-                    This is the QR families will scan at the stop. Print it from
-                    the{" "}
-                    <span className="font-semibold text-brand-navy">
-                      Print QR codes
-                    </span>{" "}
-                    button once you&apos;ve saved this item.
-                  </p>
-                </div>
-              )}
-
-              <label className="mt-3 block text-xs font-semibold text-brand-navy/70">
-                Message shown after scanning (optional)
-              </label>
-              <textarea
-                value={form.reveal_message}
-                onChange={(e) =>
-                  setForm({ ...form, reveal_message: e.target.value })
-                }
-                placeholder="e.g. Nice find! This CNC machine cuts valve components for oilfield equipment."
-                rows={2}
-                className="mt-1 w-full rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
-              />
-            </div>
-          )}
-
-          <div>
-            <label className="text-xs font-semibold text-brand-navy/70">
-              Points
-            </label>
-            <input
-              type="number"
-              min={1}
-              value={form.points}
-              onChange={(e) =>
-                setForm({ ...form, points: Number(e.target.value) })
-              }
-              placeholder="Points"
-              className="mt-1 block w-24 rounded-lg border border-brand-navy/20 px-3 py-2 text-sm"
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              onClick={save}
-              disabled={!form.prompt.trim() || saving || uploadingImage}
-              className="btn-springy rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {saving
-                ? "Saving..."
-                : editingId
-                  ? "Save Changes"
-                  : "Add Item"}
-            </button>
-            {editingId && (
-              <button
-                onClick={cancelEdit}
-                className="rounded-full border border-brand-navy/20 px-5 py-2 text-sm font-semibold text-brand-navy transition-colors hover:bg-brand-navy/5"
-              >
-                Cancel
-              </button>
-            )}
-            {!form.prompt.trim() && (
-              <span className="text-xs font-medium text-brand-navy/50">
-                Add a question / clue prompt above to enable this.
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
