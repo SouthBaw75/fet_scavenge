@@ -54,6 +54,7 @@ static const float kBoatHeaveResponse = 2.0f;   // vertical-bob responsiveness (
 static const float kBoatTiltResponse  = 1.5f;   // pitch/roll responsiveness (lower = stiffer)
 static const float kBoatTiltGain      = 0.45f;  // <1 keeps a bulky hull flatter than a cork
 static const float kBoatSink          = 0.25f;  // how deep the origin rides below the mean surface
+static const float kWakeBowSpread     = 0.42f;  // bow-wave arm angle: tan(half-angle) of the V
 
 static const int kGrid = 360;        // water quads per side (wide enough that the
 static const float kSpacing = 0.5f;  // grid edges sit past the horizon haze)
@@ -1068,31 +1069,35 @@ enum {
 
     simd_float2 fwdXZ = simd_make_float2(sinf(_heading), -cosf(_heading));
     simd_float2 rightXZ = simd_make_float2(cosf(_heading), sinf(_heading));
-    float bowZ = -0.42f * kBoatTargetLength;    // front (local -z)
-    float sternZ = 0.42f * kBoatTargetLength;   // back  (local +z)
+    float bowTipZ = -0.48f * kBoatTargetLength;   // cutwater point at the bow (local -z)
+    float sternZ = 0.42f * kBoatTargetLength;     // back (local +z)
     float beam = 0.14f * kBoatTargetLength;
 
-    // Bow wave: two streams peel off the front corners and stream aft, forming
-    // the diverging ~20° arms of the V.
-    _bowAccum += dt * speed * 7.0f;
+    // Bow wave: emitted from a single point at the cutwater and spreading
+    // outward at a fraction of boat speed, so the two arms hold a constant
+    // angle and the V's vertex stays pinned where the bow cuts the water.
+    _bowAccum += dt * speed * 9.0f;
     while (_bowAccum >= 1.0f) {
         _bowAccum -= 1.0f;
         if ((int)_particles.size() >= kMaxParticles) break;
         float side = (u01(_rng) < 0.5f) ? -1.0f : 1.0f;
         Particle p;
         p.kind = 1;
-        simd_float3 local = simd_make_float3(side * beam, 0.1f, bowZ + pm(_rng) * 0.4f);
+        // Right at the tip, on (or just off) the centerline -> sharp vertex.
+        simd_float3 local = simd_make_float3(pm(_rng) * 0.12f, 0.1f, bowTipZ + pm(_rng) * 0.1f);
         simd_float3 world = [self localToWorld:local];
         world.y = SampleWaves(simd_make_float2(world.x, world.z), t).height + 0.06f;
         p.pos = world;
-        simd_float2 d = simd_normalize(-fwdXZ + side * rightXZ * 0.6f);  // aft + outward
-        p.dir = d;
-        p.vel = simd_make_float3(d.x, 0, d.y) * (0.4f + 0.4f * u01(_rng))
-              + simd_make_float3(pm(_rng), 0, pm(_rng)) * 0.1f;
+        // The arm's world direction is aft plus outward; near-zero forward
+        // world velocity keeps the vertex at the tip as the boat advances.
+        p.dir = simd_normalize(-fwdXZ + side * rightXZ * kWakeBowSpread);
+        p.vel = simd_make_float3(side * rightXZ.x, 0, side * rightXZ.y)
+                    * (speed * kWakeBowSpread)
+              + simd_make_float3(pm(_rng), 0, pm(_rng)) * 0.08f;
         p.age = 0;
-        p.life = 1.8f + u01(_rng) * 1.0f;
-        p.size0 = 0.5f;
-        p.size1 = 2.6f + u01(_rng) * 0.8f;
+        p.life = 1.7f + u01(_rng) * 1.1f;
+        p.size0 = 0.3f;                     // sharp at the tip
+        p.size1 = 2.3f + u01(_rng) * 0.8f;  // widening along the arm
         p.color0 = simd_make_float4(0.95f, 0.98f, 1.0f, 0.60f);
         p.color1 = simd_make_float4(0.85f, 0.92f, 0.98f, 0.0f);
         _particles.push_back(p);

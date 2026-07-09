@@ -84,10 +84,11 @@ place. The boat and buoys are built from procedural colored boxes (no models).
 
 Two particle systems add life. Dark smoke puffs from the funnel (heavier when
 you throttle up) as camera-facing billboards. The wake is different: a bow
-wave peels off the front corners and a bright churned trail streams from the
-stern, together fanning into the classic V — drawn as flat foam quads laid on
-the water surface (not billboards) with a world-space noise-broken alpha, so
-it reads as churned water rather than a floating puff. Both are alpha-blended
+wave springs from a point at the cutwater and spreads into a V whose vertex
+stays pinned where the bow cuts the water, while a bright churned trail
+streams from the stern — drawn as flat foam quads laid on the water surface
+(not billboards) with a world-space noise-broken alpha, so it reads as
+churned water rather than a floating puff. Both are alpha-blended
 and triple-buffered so the CPU builds the next frame's geometry while the GPU
 draws the current one; the wake is layered beneath the boat and smoke above.
 
