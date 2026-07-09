@@ -60,10 +60,11 @@ static const float kWakeBowSpread     = 0.42f;  // bow-wave arm angle: tan(half-
 // --- Handling: a heavy tug is slow to build speed and slow to turn, and the
 // rudder only bites with water flowing forward past it. ---
 static const float kBoatThrust        = 3.5f;   // engine push (lower = slower to accelerate)
-static const float kBoatDrag          = 0.5f;   // water drag (cruise speed = thrust / drag)
+static const float kBoatDrag          = 0.33f;  // water drag (cruise speed = thrust / drag ~ 10.6 m/s)
 static const float kBoatTurnRate      = 0.9f;   // max yaw rate, rad/s (lower = slower turns)
 static const float kBoatSteerageSpeed = 3.0f;   // forward speed for full rudder authority
-static const float kBowPlungeGain     = 0.8f;   // extra bow pitch with speed (crashing over waves)
+static const float kBowPlungeGain     = 1.1f;   // extra bow pitch with speed (crashing over waves)
+static const float kBoatFastSpeed     = 8.5f;   // speed at which wake/spray/bounce reach full strength
 
 // --- Bow spray: droplets thrown up when the bow digs into a wave. ---
 static const float kSprayGravity   = 7.5f;      // how fast droplets arc back down (m/s^2)
@@ -1027,7 +1028,7 @@ enum {
     // grows with speed. The fore-aft slope already oscillates as the hull
     // advances through the wave field; we just deepen its effect with speed.
     float pitchGain = kBoatTiltGain +
-                      kBowPlungeGain * std::clamp(_speed / 4.0f, 0.0f, 1.0f);
+                      kBowPlungeGain * std::clamp(_speed / kBoatFastSpeed, 0.0f, 1.0f);
     _boatUp = simd_normalize(worldUp
               - fwd3 * (_boatTiltFwd * pitchGain)
               - right3 * (_boatTiltRight * kBoatTiltGain));
@@ -1090,6 +1091,7 @@ enum {
     if (speed < 0.5f) return;   // no wash when barely moving
     std::uniform_real_distribution<float> pm(-1.0f, 1.0f);
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+    float wakeScale = 0.7f + 0.6f * std::clamp(speed / kBoatFastSpeed, 0.0f, 1.0f);
 
     simd_float2 fwdXZ = simd_make_float2(sinf(_heading), -cosf(_heading));
     simd_float2 rightXZ = simd_make_float2(cosf(_heading), sinf(_heading));
@@ -1120,8 +1122,8 @@ enum {
               + simd_make_float3(pm(_rng), 0, pm(_rng)) * 0.08f;
         p.age = 0;
         p.life = 1.7f + u01(_rng) * 1.1f;
-        p.size0 = 0.3f;                     // sharp at the tip
-        p.size1 = 2.3f + u01(_rng) * 0.8f;  // widening along the arm
+        p.size0 = 0.3f * wakeScale;                     // sharp at the tip
+        p.size1 = (2.3f + u01(_rng) * 0.8f) * wakeScale; // widening along the arm
         p.color0 = simd_make_float4(0.95f, 0.98f, 1.0f, 0.60f);
         p.color1 = simd_make_float4(0.85f, 0.92f, 0.98f, 0.0f);
         _particles.push_back(p);
@@ -1145,8 +1147,8 @@ enum {
               + simd_make_float3(rightXZ.x, 0, rightXZ.y) * (pm(_rng) * 0.4f);
         p.age = 0;
         p.life = 2.6f + u01(_rng) * 1.2f;
-        p.size0 = 0.6f;
-        p.size1 = 2.2f + u01(_rng) * 0.7f;
+        p.size0 = 0.6f * wakeScale;
+        p.size1 = (2.2f + u01(_rng) * 0.7f) * wakeScale;
         p.color0 = simd_make_float4(1.0f, 1.0f, 1.0f, 0.70f);
         p.color1 = simd_make_float4(0.85f, 0.92f, 0.98f, 0.0f);
         _particles.push_back(p);
@@ -1162,7 +1164,7 @@ enum {
     simd_float2 fwdXZ = simd_make_float2(sinf(_heading), -cosf(_heading));
     simd_float2 rightXZ = simd_make_float2(cosf(_heading), sinf(_heading));
     float bowTipZ = -0.48f * kBoatTargetLength;
-    float beam = 0.14f * kBoatTargetLength;
+    float sf = std::clamp(speed / kBoatFastSpeed, 0.0f, 1.0f);   // 0 slow .. 1 fast
 
     // How deep the bow point is buried under the wave surface: the wave rises
     // faster than the inertial hull, so this spikes when the bow slams a crest.
@@ -1179,18 +1181,19 @@ enum {
         Particle p;
         p.kind = 2;
         p.dir = simd_make_float2(0, 1);   // unused by billboards
-        // Along the bow, at the waterline, thrown up and out to the sides.
-        simd_float3 local = simd_make_float3(pm(_rng) * beam, 0.05f, bowTipZ + u01(_rng) * 0.6f);
+        // Right at the cutwater — the same point the bow-wake V springs from.
+        simd_float3 local = simd_make_float3(pm(_rng) * 0.12f, 0.05f, bowTipZ + pm(_rng) * 0.1f);
         p.pos = [self localToWorld:local];
+        // Small and low when slow; tall and wide when fast.
         float side = pm(_rng);
-        p.vel = simd_make_float3(0, 2.6f + 2.4f * u01(_rng), 0)                 // up
-              + simd_make_float3(rightXZ.x, 0, rightXZ.y) * (side * (1.0f + u01(_rng)))  // out
-              + simd_make_float3(fwdXZ.x, 0, fwdXZ.y) * (0.5f + speed * 0.25f)  // forward with the bow
+        p.vel = simd_make_float3(0, 1.5f + 3.5f * sf + 1.2f * u01(_rng), 0)          // up
+              + simd_make_float3(rightXZ.x, 0, rightXZ.y) * (side * (0.5f + 1.8f * sf))  // out
+              + simd_make_float3(fwdXZ.x, 0, fwdXZ.y) * (0.3f + speed * 0.25f)        // forward
               + simd_make_float3(pm(_rng), 0, pm(_rng)) * 0.4f;
         p.age = 0;
         p.life = 0.6f + u01(_rng) * 0.7f;
-        p.size0 = 0.22f;
-        p.size1 = 0.6f + u01(_rng) * 0.3f;
+        p.size0 = 0.14f + 0.16f * sf;                        // starts small
+        p.size1 = (0.4f + 0.9f * sf) + u01(_rng) * 0.3f;     // more pronounced with speed
         p.color0 = simd_make_float4(0.95f, 0.97f, 1.0f, 0.55f);   // white water
         p.color1 = simd_make_float4(0.90f, 0.95f, 1.0f, 0.0f);    // fades as it falls
         _particles.push_back(p);
