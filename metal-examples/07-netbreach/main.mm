@@ -212,48 +212,67 @@ vertex EOut entity_vertex(uint vid [[vertex_id]],
     return o;
 }
 
+// Hard neon line: a crisp core ~`px` pixels wide around distance-measure d,
+// antialiased over one pixel via screen-space derivatives. The bloom pass
+// supplies the halo; the line itself stays razor sharp (the TRON look).
+float neon(float d, float px, float aa) {
+    return smoothstep(px * aa, max((px - 1.6) * aa, 0.0), d);
+}
+
 fragment float4 entity_fragment(EOut in [[stage_in]],
                                 constant Uni &u [[buffer(0)]]) {
     float2 p = in.lp;
     float a = 0.0;
     int shape = int(in.shape + 0.5);
 
-    if (shape == 0) {                       // soft glow dot
+    if (shape == 0) {                       // soft glow dot (particles, cores)
         float r = length(p);
         a = smoothstep(1.0, 0.0, r);
         a *= a;
-    } else if (shape == 1) {                // ring
+    } else if (shape == 1) {                // hard ring + faint interior
         float r = length(p);
-        a = smoothstep(0.16, 0.0, abs(r - 0.78)) + 0.15 * smoothstep(1.0, 0.0, r);
-    } else if (shape == 2) {                // diamond: soft fill + hot edge
+        float aa = fwidth(r);
+        a = neon(abs(r - 0.82), 2.2, aa) + 0.06 * smoothstep(0.82, 0.0, r);
+    } else if (shape == 2) {                // diamond: hard edge, dim body
         float d = abs(p.x) + abs(p.y);
-        a = 0.30 * smoothstep(1.0, 0.55, d)
-          + smoothstep(0.14, 0.0, abs(d - 0.85));
-    } else if (shape == 3) {                // hex ring
+        float aa = fwidth(d);
+        a = neon(abs(d - 0.88), 2.2, aa)
+          + 0.10 * smoothstep(aa, -aa, d - 0.88);
+    } else if (shape == 3) {                // hex: hard outline, dim body
         float2 q = abs(p);
-        float d = max(q.x * 0.866 + q.y * 0.5, q.y) - 0.8;
-        a = smoothstep(0.12, 0.0, abs(d)) + 0.12 * smoothstep(0.9, 0.0, length(p));
-    } else if (shape == 4) {                // soft square
+        float d = max(q.x * 0.866 + q.y * 0.5, q.y) - 0.82;
+        float aa = fwidth(d);
+        a = neon(abs(d), 2.2, aa) + 0.08 * smoothstep(aa, -aa, d);
+    } else if (shape == 4) {                // solid, crisp-edged fill
         float d = max(abs(p.x), abs(p.y));
-        a = smoothstep(1.0, 0.6, d);
-    } else if (shape == 6) {                // conduit stream segment
+        float aa = fwidth(d);
+        a = smoothstep(aa, -aa, d - 0.96);
+    } else if (shape == 5) {                // square outline, dim body
+        float d = max(abs(p.x), abs(p.y));
+        float aa = fwidth(d);
+        a = neon(abs(d - 0.88), 2.2, aa)
+          + 0.10 * smoothstep(aa, -aa, d - 0.88);
+    } else if (shape == 6) {                // conduit: hard rails, glowing packets
         // params.x = arc distance at segment start, params.y = segment length
         float uWorld = in.params.x + (p.x * 0.5 + 0.5) * in.params.y;
-        float across = smoothstep(1.0, 0.0, abs(p.y));
-        float rail = smoothstep(0.25, 0.05, abs(abs(p.y) - 0.72));
+        float aa = fwidth(p.y);
+        float rail = neon(abs(abs(p.y) - 0.78), 1.8, aa);
         float d = fract(uWorld * 0.55 - u.time * 1.4);
         float packet = exp(-pow((d - 0.5) * 7.0, 2.0));
-        a = across * (0.10 + 0.85 * packet) + rail * 0.35;
+        float lane = smoothstep(0.7, 0.0, abs(p.y));
+        a = rail * 0.55 + lane * (0.05 + 0.8 * packet);
     } else if (shape == 7) {                // lightning bolt (params.x = seed)
         float wob = 0.5 * sin(p.x * 9.0 + in.params.x * 40.0 + u.time * 55.0)
                   * sin(p.x * 3.7 - in.params.x * 17.0);
         float flick = 0.7 + 0.3 * sin(u.time * 90.0 + in.params.x * 30.0);
-        a = smoothstep(0.55, 0.0, abs(p.y - wob)) * flick;
-        a += 0.4 * smoothstep(1.0, 0.6, abs(p.x)) * smoothstep(0.9, 0.0, abs(p.y));
+        float m = abs(p.y - wob);
+        float aa = fwidth(p.y);
+        a = (neon(m, 2.0, aa) + 0.35 * smoothstep(0.5, 0.0, m)) * flick;
     } else if (shape == 8) {                // thin exact ring (range indicator)
         float r = length(p);
-        a = 0.8 * smoothstep(0.05, 0.015, abs(r - 0.96))
-          + 0.05 * smoothstep(1.0, 0.0, r);
+        float aa = fwidth(r);
+        a = 0.85 * neon(abs(r - 0.97), 1.6, aa)
+          + 0.03 * smoothstep(1.0, 0.0, r);
     }
 
     return float4(in.color.rgb * a, a * in.color.a);
@@ -265,7 +284,7 @@ fragment float4 bright_fragment(FSOut in [[stage_in]],
                                 sampler smp [[sampler(0)]]) {
     float3 c = scene.sample(smp, in.uv).rgb;
     float luma = dot(c, float3(0.299, 0.587, 0.114));
-    float k = smoothstep(0.55, 1.1, luma);
+    float k = smoothstep(0.85, 1.4, luma);
     return float4(c * k, 1.0);
 }
 
@@ -912,7 +931,7 @@ struct Puff {
         _uScale, _uOffset,
         simd_make_float2((float)view.drawableSize.width, (float)view.drawableSize.height),
         t, 0,
-        simd_make_float4(1.15f, 0.9f, 0.06f, 0.0f),   // bloom, aberration, scanline
+        simd_make_float4(0.75f, 0.5f, 0.05f, 0.0f),   // bloom, aberration, scanline
     };
 
     // Track the hovered tile for the placement ghost.
@@ -964,9 +983,9 @@ struct Puff {
         simd_float2 tp = simd_make_float2(tw.tx + 0.5f, tw.ty + 0.5f);
         if (tw.type == kTowerSentry) {
             [self pushInst:tp half:simd_make_float2(0.34f, 0.34f) rot:0
-                     shape:4 color:spec.color * 0.7f params:simd_make_float4(0, 0, 0, 0)];
-            [self pushInst:tp half:simd_make_float2(0.34f, 0.09f) rot:tw.aim
-                     shape:4 color:spec.color * 1.4f params:simd_make_float4(0, 0, 0, 0)];
+                     shape:5 color:spec.color * 1.1f params:simd_make_float4(0, 0, 0, 0)];
+            [self pushInst:tp half:simd_make_float2(0.34f, 0.07f) rot:tw.aim
+                     shape:4 color:spec.color * 1.5f params:simd_make_float4(0, 0, 0, 0)];
         } else if (tw.type == kTowerArc) {
             [self pushInst:tp half:simd_make_float2(0.36f, 0.36f) rot:t * 1.5f
                      shape:1 color:spec.color params:simd_make_float4(0, 0, 0, 0)];
