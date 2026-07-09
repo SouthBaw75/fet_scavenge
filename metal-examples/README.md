@@ -58,6 +58,17 @@ ambient occlusion, specular highlights, fog, and an orbiting camera. At Retina
 resolution that's millions of ray marches per frame, sustained at full
 refresh rate.
 
+### 05 — Ocean
+How games render water. A grid of ~780,000 vertices (generated from the
+vertex index — no vertex buffer) is displaced every frame by a sum of six
+**Gerstner waves**, the classic technique from GPU Gems: points move in
+circles so crests sharpen and troughs flatten, and long waves travel faster
+than short ones just like the real sea. The fragment shader adds everything
+that makes water read as water: fresnel reflectivity, sky reflection, a hot
+sun glint, subsurface scattering through backlit crests, procedural foam,
+and distance fog into the horizon. The sky is a second bufferless fullscreen
+pass. No textures or assets — every pixel is math.
+
 ## Where to go from here
 
 - **Textures & samplers** — `MTLTexture`, `MTKTextureLoader`
