@@ -56,9 +56,9 @@ struct TowerSpec {
 static const TowerSpec kTowers[kTowerTypeCount] = {
     {"Sentry", 40, {30, 60}, {0.15f, 1.7f, 2.1f, 1.0f},          // cyan
      {{6, 2.0f, 3.0f, 0, 0}, {10, 2.5f, 3.0f, 0, 0}, {16, 3.0f, 3.5f, 0, 0}}},
-    {"Arc Coil", 70, {55, 90}, {0.9f, 1.4f, 2.2f, 1.0f},         // white-blue
+    {"Arc Coil", 70, {55, 90}, {1.5f, 1.9f, 2.5f, 1.0f},         // near-white
      {{5, 1.0f, 2.5f, 2, 0}, {8, 1.2f, 2.5f, 3, 0}, {12, 1.4f, 3.0f, 4, 0}}},
-    {"Cryo Node", 50, {40, 70}, {0.35f, 1.1f, 2.1f, 1.0f},       // ice
+    {"Cryo Node", 50, {40, 70}, {0.30f, 1.0f, 2.4f, 1.0f},       // deep ice blue
      {{0, 0, 2.0f, 0, 0.30f}, {0, 0, 2.5f, 0, 0.45f}, {0, 0, 3.0f, 0, 0.60f}}},
 };
 
@@ -78,8 +78,8 @@ struct EnemyType {
 };
 // TRON palette: intruders are orange; defenses are cyan/white.
 static const EnemyType kEnemyTypes[] = {
-    {12.0f, 1.0f, 0.30f, 2, false, {2.0f, 0.55f, 0.10f, 1.0f}},   // Bit — orange
-    { 8.0f, 2.2f, 0.24f, 3, false, {2.2f, 1.10f, 0.25f, 1.0f}},   // Daemon — hot amber
+    {12.0f, 1.0f, 0.30f, 2, false, {2.4f, 0.62f, 0.10f, 1.0f}},   // Bit — orange
+    { 8.0f, 2.2f, 0.24f, 3, false, {2.6f, 1.25f, 0.25f, 1.0f}},   // Daemon — hot amber
 };
 
 enum { kDmgKinetic = 0, kDmgEnergy = 1 };
@@ -119,51 +119,93 @@ float hash21(float2 p) {
     return fract(p.x * p.y);
 }
 
-// ---------- background: procedural circuit board ----------
+// ---------- background: TRON cityscape floor ----------
+// Dark desaturated blue-grey panel plating with seams, hex-plate accent
+// regions, a cool ambient key light, and the conduit drawn as a proper road:
+// darkened lane bounded by continuous white-hot edge ribbons.
+
+float segDist(float2 p, float2 a, float2 b) {
+    float2 ab = b - a;
+    float t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+    return length(p - a - ab * t);
+}
+
+float2 mod2(float2 p, float2 m) { return p - m * floor(p / m); }
+
+// Distance-ish offset to the nearest hex center (pointy tiling).
+float2 hexLocal(float2 p) {
+    float2 r = float2(1.0, 1.7320508);
+    float2 h = r * 0.5;
+    float2 a = mod2(p, r) - h;
+    float2 b = mod2(p + h, r) - h;
+    return dot(a, a) < dot(b, b) ? a : b;
+}
+
+float hexEdge(float2 lp) {   // distance from hex EDGE for a unit-ish cell
+    float2 q = abs(lp);
+    return max(dot(q, float2(0.866025, 0.5)), q.y);
+}
+
 fragment float4 bg_fragment(FSOut in [[stage_in]],
                             constant Uni &u [[buffer(0)]]) {
     // uv -> NDC -> world
     float2 ndc = float2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
     float2 w = (ndc - u.offset) / u.scale;
 
-    float3 col = float3(0.004, 0.010, 0.020);            // TRON near-black blue
+    // --- Panel plating: regions choose a plate size; plates vary in tone.
+    float2 region = floor(w / 6.0);
+    float rs = hash21(region);
+    float2 psize = (rs < 0.25) ? float2(3.0, 1.5) :
+                   (rs < 0.50) ? float2(1.5, 3.0) :
+                   (rs < 0.75) ? float2(2.0, 2.0) : float2(3.0, 3.0);
+    float2 pid = floor(w / psize);
+    float pr = hash21(pid * 1.31 + region * 13.7);
+    float3 col = float3(0.030, 0.046, 0.062) * (0.7 + 0.6 * pr);
 
-    // Slow breathing pulse radiating from the board center.
-    float2 c = w - float2(12.0, 7.0);
-    float breathe = 0.5 + 0.5 * sin(u.time * 0.5 - length(c) * 0.22);
+    // Cool key light pooling over the board + slow breathing.
+    float amb = 0.75 + 0.55 * exp(-length(w - float2(9.0, 9.5)) * 0.055);
+    amb *= 0.95 + 0.05 * sin(u.time * 0.5 - w.x * 0.08);
+    col *= amb;
 
-    if (w.x > -0.5 && w.x < 24.5 && w.y > -0.5 && w.y < 14.5) {
-        // The Grid: thin cyan lines, a stronger line every 4th.
-        float2 g = abs(fract(w) - 0.5);
-        float line1 = smoothstep(0.47, 0.5, max(g.x, g.y));
-        float2 g4 = abs(fract(w / 4.0) - 0.5);
-        float line4 = smoothstep(0.46, 0.5, max(g4.x, g4.y));
-        col += float3(0.020, 0.075, 0.105) * line1 * (0.6 + 0.4 * breathe);
-        col += float3(0.035, 0.150, 0.210) * line4;
-
-        // Sparse circuit traces with a pulse of light sliding along them —
-        // all cyan-white, keeping the palette disciplined.
-        float2 tile = floor(w);
-        float r = hash21(tile);
-        if (r > 0.86) {
-            float2 f = fract(w);
-            bool horiz = hash21(tile + 7.7) > 0.5;
-            float axis = horiz ? f.y : f.x;
-            float along = horiz ? f.x : f.y;
-            float traceLine = smoothstep(0.05, 0.0, abs(axis - 0.5));
-            float phase = fract(u.time * 0.3 + r * 9.0);
-            float pulse = exp(-pow((along - phase) * 6.0, 2.0));
-            float3 tcol = (r > 0.95) ? float3(0.8, 0.95, 1.0) : float3(0.10, 0.75, 0.95);
-            col += tcol * traceLine * (0.05 + 0.5 * pulse);
-        }
-
-        // Soft pads on the 4-grid intersections.
-        float2 p4 = abs(fract(w / 4.0 + 0.5) - 0.5) * 4.0;
-        float pad = smoothstep(0.14, 0.04, length(p4));
-        col += float3(0.05, 0.16, 0.22) * pad * breathe;
-    } else {
-        col *= 0.5;   // dead space outside the board
+    // Hex-plate accent regions (the TRON floor motif), softly outlined.
+    if (hash21(region + 5.1) > 0.70) {
+        float2 lp = hexLocal(w * 1.1);
+        float he = hexEdge(lp);
+        float hline = smoothstep(0.06, 0.02, abs(he - 0.44));
+        col += float3(0.020, 0.060, 0.085) * hline;
+        col *= 0.9 + 0.1 * hash21(floor(w * 1.1 - lp));   // per-hex tone step
     }
+
+    // Panel seams: a dark gap with a faint lit bevel beside it.
+    float2 pf = fract(w / psize);
+    float2 ew = min(pf, 1.0 - pf) * psize;
+    float seam = min(ew.x, ew.y);
+    col *= mix(0.30, 1.0, smoothstep(0.0, 0.045, seam));
+    col += float3(0.05, 0.10, 0.13) * smoothstep(0.10, 0.045, seam)
+                                    * smoothstep(0.015, 0.045, seam);
+
+    // Static micro-grain so surfaces read as material, not vector fill.
+    col *= 0.93 + 0.14 * hash21(floor(w * 24.0));
+
+    // --- The road: dark lane + double edge ribbons along the conduit.
+    float dRoad = 1e9;
+    for (int i = 0; i < kRoadCount - 1; i++)
+        dRoad = min(dRoad, segDist(w, kRoad[i], kRoad[i + 1]));
+    float laneHalf = 0.55;
+    float aa = fwidth(dRoad) * 1.5;
+    // darken the lane surface
+    col *= mix(0.30, 1.0, smoothstep(laneHalf - aa, laneHalf + aa, dRoad));
+    // white-hot primary ribbon at the lane edge (HDR: tonemap whitens core)
+    float ribbon = smoothstep(2.5 * aa, 0.5 * aa, abs(dRoad - laneHalf));
+    col += float3(1.6, 2.6, 3.2) * ribbon;
+    // dimmer inner guide line
+    float inner = smoothstep(2.0 * aa, 0.4 * aa, abs(dRoad - laneHalf * 0.45));
+    col += float3(0.10, 0.30, 0.42) * inner;
+
+    // Board bounds: fade the world off beyond the play area.
+    float2 bd = max(float2(-0.5, -0.5) - w, w - float2(24.5, 14.5));
+    float outside = max(max(bd.x, bd.y), 0.0);
+    col *= exp(-outside * 1.4);
 
     return float4(col, 1.0);
 }
@@ -252,15 +294,13 @@ fragment float4 entity_fragment(EOut in [[stage_in]],
         float aa = fwidth(d);
         a = neon(abs(d - 0.88), 2.2, aa)
           + 0.10 * smoothstep(aa, -aa, d - 0.88);
-    } else if (shape == 6) {                // conduit: hard rails, glowing packets
+    } else if (shape == 6) {                // road traffic: packets of hostile data
         // params.x = arc distance at segment start, params.y = segment length
         float uWorld = in.params.x + (p.x * 0.5 + 0.5) * in.params.y;
-        float aa = fwidth(p.y);
-        float rail = neon(abs(abs(p.y) - 0.78), 1.8, aa);
         float d = fract(uWorld * 0.55 - u.time * 1.4);
-        float packet = exp(-pow((d - 0.5) * 7.0, 2.0));
-        float lane = smoothstep(0.7, 0.0, abs(p.y));
-        a = rail * 0.55 + lane * (0.05 + 0.8 * packet);
+        float packet = exp(-pow((d - 0.5) * 8.0, 2.0));
+        float lane = smoothstep(0.85, 0.0, abs(p.y));
+        a = lane * (0.03 + 0.75 * packet);
     } else if (shape == 7) {                // lightning bolt (params.x = seed)
         float wob = 0.5 * sin(p.x * 9.0 + in.params.x * 40.0 + u.time * 55.0)
                   * sin(p.x * 3.7 - in.params.x * 17.0);
@@ -275,7 +315,11 @@ fragment float4 entity_fragment(EOut in [[stage_in]],
           + 0.03 * smoothstep(1.0, 0.0, r);
     }
 
-    return float4(in.color.rgb * a, a * in.color.a);
+    // The light-cycle look: line cores burn to white, halos stay colored.
+    // pow(a,5) only reaches the center of a line; the ACES tonemap and bloom
+    // finish the job.
+    float3 rgb = in.color.rgb * a + float3(1.0, 1.0, 1.0) * (pow(a, 5.0) * 0.9 * in.color.a);
+    return float4(rgb, a * in.color.a);
 }
 
 // ---------- bloom chain ----------
@@ -321,9 +365,11 @@ fragment float4 composite_fragment(FSOut in [[stage_in]],
 
     c += bloom.sample(smp, uv).rgb * u.fx.x;
 
-    // Scanlines + vignette.
+    // Faint scanlines, film grain, cool shadow tint, vignette.
     c *= 1.0 - u.fx.z * (0.5 + 0.5 * sin(uv.y * u.resolution.y * 3.14159));
-    c *= 1.0 - 0.35 * dot(cc, cc) * 2.2;
+    c += (hash21(uv * u.resolution.xy + fract(u.time) * 61.7) - 0.5) * 0.018;
+    c *= float3(0.97, 1.00, 1.04);
+    c *= 1.0 - 0.38 * dot(cc, cc) * 2.2;
 
     // Tonemap + gamma.
     c = saturate((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14));
@@ -443,7 +489,21 @@ struct Puff {
     id<MTLDevice> device = view.device;
     _queue = [device newCommandQueue];
 
-    id<MTLLibrary> library = CompileLibrary(device, kShaderSource);
+    // Bake the conduit polyline into the shader so the background can draw
+    // the road (dark lane + edge ribbons) with no extra buffers.
+    std::string roadSrc = "constant int kRoadCount = " + std::to_string(kPathCount) + ";\n"
+                          "constant float2 kRoad[" + std::to_string(kPathCount) + "] = {\n";
+    for (int i = 0; i < kPathCount; i++) {
+        char line[64];
+        snprintf(line, sizeof(line), "    float2(%f, %f),\n", kPath[i].x, kPath[i].y);
+        roadSrc += line;
+    }
+    roadSrc += "};\n";
+    std::string source(kShaderSource);
+    size_t anchor = source.find("// ---------- background");
+    source.insert(anchor, roadSrc);
+
+    id<MTLLibrary> library = CompileLibrary(device, source.c_str());
     if (!library) return nil;
 
     NSError *error = nil;
@@ -931,7 +991,7 @@ struct Puff {
         _uScale, _uOffset,
         simd_make_float2((float)view.drawableSize.width, (float)view.drawableSize.height),
         t, 0,
-        simd_make_float4(0.75f, 0.5f, 0.05f, 0.0f),   // bloom, aberration, scanline
+        simd_make_float4(0.9f, 0.5f, 0.03f, 0.0f),   // bloom, aberration, scanline
     };
 
     // Track the hovered tile for the placement ghost.
@@ -952,15 +1012,16 @@ struct Puff {
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
     _scratch.clear();
 
-    // Conduit stream — hostile traffic reads ORANGE in the TRON palette.
+    // Hostile traffic pulses riding the road (the road itself is drawn by
+    // the background shader).
     for (size_t i = 1; i < _waypoints.size(); i++) {
         simd_float2 a = _waypoints[i - 1], b = _waypoints[i];
         float len = simd_distance(a, b);
         [self pushInst:(a + b) * 0.5f
-                  half:simd_make_float2(len * 0.5f, 0.16f)
+                  half:simd_make_float2(len * 0.5f, 0.34f)
                    rot:atan2f(b.y - a.y, b.x - a.x)
                  shape:6
-                 color:simd_make_float4(1.7f, 0.75f, 0.12f, 1.0f)
+                 color:simd_make_float4(2.3f, 1.0f, 0.18f, 1.0f)
                 params:simd_make_float4(_cumLen[i - 1], len, 0, 0)];
     }
 
@@ -1141,8 +1202,9 @@ struct Puff {
         [enc endEncoding];
     }
 
-    // 3) Separable blur: A -> B (horizontal), B -> A (vertical).
-    for (int pass = 0; pass < 2; pass++) {
+    // 3) Separable blur, two iterations for a wide cinematic halo:
+    //    A -> B -> A -> B -> A (H,V,H,V).
+    for (int pass = 0; pass < 4; pass++) {
         MTLRenderPassDescriptor *pp = [MTLRenderPassDescriptor renderPassDescriptor];
         pp.colorAttachments[0].texture = (pass == 0) ? _bloomB : _bloomA;
         pp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
