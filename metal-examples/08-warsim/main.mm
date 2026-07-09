@@ -48,7 +48,8 @@ static const int kPuffCap = 2000;        // particle budget (reserved region)
 enum { kInfantry = 0, kArcher = 1, kCavalry = 2, kBerserker = 3, kCatapult = 4,
        kUnitTypeCount = 5 };
 enum { kPhaseSetup = 0, kPhaseBattle = 1, kPhaseDone = 2 };
-enum { kPuffBlood = 0, kPuffDust = 1, kPuffSpark = 2, kPuffFire = 3, kPuffSmoke = 4 };
+enum { kPuffBlood = 0, kPuffDust = 1, kPuffSpark = 2, kPuffFire = 3, kPuffSmoke = 4,
+       kPuffSplash = 5 };
 
 struct UnitSpec {
     const char *name;
@@ -90,7 +91,9 @@ struct Uni {
     float time;
     float phase;
     float2 camRight;     // world-space xz of the camera right axis
-    float2 pad2;
+    float lakeCount;
+    float pad;
+    float4 lakes[3];     // xy center (board), z radius, w seed
 };
 
 float hash21(float2 p) {
@@ -168,6 +171,27 @@ fragment float4 ground_fragment(GroundVSOut in [[stage_in]],
         float lineB = smoothstep(0.5, 0.1, abs(w.x - 82.0));
         col += float3(0.25) * (lineA + lineB) * inField;
     }
+
+    // Lakes: irregular noisy shoreline, sandy ring, animated water.
+    for (int i = 0; i < int(u.lakeCount + 0.5); i++) {
+        float2 lp = w - u.lakes[i].xy;
+        float wob = (fbm(w * 0.22 + u.lakes[i].w * 31.0) - 0.5) * 0.30;
+        float d = length(lp) / u.lakes[i].z - (0.92 + wob);   // <0 inside
+        float sand = smoothstep(0.14, 0.0, abs(d - 0.05));
+        col = mix(col, float3(0.42, 0.36, 0.24), sand * 0.8);
+        float water = smoothstep(0.015, -0.015, d);
+        if (water > 0.0) {
+            float depth = smoothstep(0.0, -0.55, d);
+            float3 wcol = mix(float3(0.16, 0.32, 0.36), float3(0.05, 0.14, 0.24), depth);
+            float ripple = fbm(w * 0.7 + float2(u.time * 0.22, u.time * 0.16)
+                               + u.lakes[i].w * 9.0);
+            wcol += float3(0.10, 0.14, 0.15) * smoothstep(0.55, 0.85, ripple);
+            float shoreFoam = smoothstep(0.05, 0.0, abs(d + 0.03));
+            wcol += float3(0.20) * shoreFoam;
+            col = mix(col, wcol, water);
+        }
+    }
+
     col *= 0.9 + 0.2 * smoothstep(120.0, 0.0, length(w - float2(70.0, 30.0)));
     return float4(gammaOut(col), 1.0);
 }
@@ -367,6 +391,37 @@ fragment float4 unit_fragment(BOut in [[stage_in]],
         return float4(gammaOut(mix(wood, steel, step(0.5, p.x)) * 0.9), 1.0);
     }
 
+    if (shape == 14) {                    // conifer tree (color = canopy tint)
+        float trunk = step(max(abs(p.x) - 0.07, abs(p.y + 0.82) - 0.20), 0.0);
+        float cov = trunk;
+        float3 colr = float3(0.30, 0.19, 0.10);
+        for (int L = 0; L < 3; L++) {
+            float base = -0.60 + 0.44 * float(L);
+            float topw = 0.72 - 0.18 * float(L);
+            float f = (p.y - base) / 0.78;
+            float tri = step(0.0, f) * step(f, 1.0) * step(abs(p.x), topw * (1.0 - f));
+            cov = max(cov, tri);
+            colr = mix(colr, in.color.rgb * (0.82 + 0.18 * float(L)), tri);
+        }
+        if (cov < 0.5) discard_fragment();
+        float sh2 = 0.72 + 0.28 * smoothstep(-1.0, 1.0, p.y);
+        sh2 *= 1.0 - 0.18 * smoothstep(0.0, 0.8, -p.x);
+        // per-tree light variation
+        sh2 *= 0.88 + 0.24 * fract(in.seed * 17.0);
+        return float4(gammaOut(colr * sh2), 1.0);
+    }
+
+    if (shape == 15) {                    // boulder (color = rock tint)
+        float2 q = p * float2(1.0, 1.25);
+        float n = fbm(p * 2.3 + in.seed * 13.0);
+        float r = length(q) + (n - 0.5) * 0.30;
+        if (r > 0.78) discard_fragment();
+        float sh2 = 0.55 + 0.50 * smoothstep(-0.9, 0.9, p.y);
+        sh2 *= 1.0 - 0.20 * smoothstep(0.0, 0.8, -p.x);
+        float3 colr = in.color.rgb * sh2 * (0.85 + 0.30 * fbm(p * 4.0 + in.seed * 7.0));
+        return float4(gammaOut(colr), 1.0);
+    }
+
     // ---- soldiers & catapult ----
     float cov = 0.0;
     float3 col = army;
@@ -504,6 +559,12 @@ struct Splat {
     float alpha;
 };
 
+// --- Terrain features ---
+struct Lake { simd_float2 pos; float radius, seed; };
+struct Boulder { simd_float2 pos; float radius, seed; };
+struct Tree { simd_float2 pos; float size, seed; simd_float4 tint; };
+struct Grove { simd_float2 pos; float radius; };
+
 // --------------------------------------------------------------- Matrices ---
 
 static simd_float4x4 Perspective(float fovy, float aspect, float nearZ, float farZ) {
@@ -554,6 +615,10 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     std::vector<Shot> _shots;
     std::vector<Puff> _puffs;
     std::vector<Splat> _splats;
+    std::vector<Lake> _lakes;
+    std::vector<Boulder> _boulders;
+    std::vector<Tree> _trees;
+    std::vector<Grove> _groves;
     std::vector<std::vector<int>> _grid;
     int _gridW, _gridH;
     float _cellSize;
@@ -662,6 +727,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     _haveVP = false;
     _lastPaint = simd_make_float2(-1000, -1000);
     _hudTop = 0;
+    [self generateTerrain:(unsigned)(CACurrentMediaTime() * 1000.0)];
     [self deployDefaultArmies];
 
     __unsafe_unretained WarSimRenderer *weakSelf = self;
@@ -674,6 +740,10 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         if (c == 49) { [weakSelf pressedFight]; return nil; }               // space
         if (c == 15) { [weakSelf resetField:YES]; return nil; }             // R
         if (c == 2)  { [weakSelf resetField:NO]; [weakSelf deployDefaultArmies]; return nil; } // D
+        if (c == 17 && weakSelf->_phase == kPhaseSetup) {                   // T: reroll terrain
+            [weakSelf generateTerrain:(unsigned)(CACurrentMediaTime() * 1000.0)];
+            return nil;
+        }
         if (c == 123 || c == 12) { weakSelf->_camYaw -= 0.12f; return nil; } // left / Q
         if (c == 124 || c == 14) { weakSelf->_camYaw += 0.12f; return nil; } // right / E
         if (c == 126) { weakSelf->_camPitch = std::min(weakSelf->_camPitch + 0.07f, 1.20f); return nil; }
@@ -728,10 +798,11 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         return event;
     }];
 
-    printf("WAR SIM v3  (if this line doesn't appear, you're running a stale build)\n"
+    printf("WAR SIM v4\n"
            "  HUD or 1-5: Infantry / Archer / Cavalry / Berserker / Catapult\n"
            "  Click/drag: stamp squads (left half = RED, right half = BLUE)\n"
            "  Right-click erase · SPACE/FIGHT battle · R clear · D defaults\n"
+           "  T: reroll terrain (lakes/forests/boulders, setup only)\n"
            "  Pinch or scroll: zoom · Arrows or Q/E: orbit · Up/Down: tilt\n");
 
     _startTime = CACurrentMediaTime();
@@ -752,8 +823,94 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     _winner = -1;
 }
 
+// ---------------------------------------------------------------- Terrain ---
+
+- (BOOL)isBlockedAt:(simd_float2)p radius:(float)r {
+    for (const Lake &l : _lakes)
+        if (simd_distance(p, l.pos) < l.radius * 0.92f + r) return YES;
+    for (const Boulder &b : _boulders)
+        if (simd_distance(p, b.pos) < b.radius + r) return YES;
+    return NO;
+}
+
+- (BOOL)inLake:(simd_float2)p {
+    for (const Lake &l : _lakes)
+        if (simd_distance(p, l.pos) < l.radius * 0.90f) return YES;
+    return NO;
+}
+
+- (void)generateTerrain:(unsigned)seed {
+    _lakes.clear();
+    _boulders.clear();
+    _trees.clear();
+    _groves.clear();
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+
+    int nLakes = 2 + (int)(u01(rng) * 2.0f);            // 2-3
+    for (int i = 0; i < nLakes; i++) {
+        Lake l;
+        l.radius = 5.0f + 4.0f * u01(rng);
+        for (int tries = 0; tries < 20; tries++) {
+            l.pos = simd_make_float2(28.0f + 84.0f * u01(rng), 12.0f + 56.0f * u01(rng));
+            bool clash = false;
+            for (const Lake &o : _lakes)
+                if (simd_distance(l.pos, o.pos) < l.radius + o.radius + 6.0f) clash = true;
+            if (!clash) break;
+        }
+        l.seed = u01(rng);
+        _lakes.push_back(l);
+    }
+
+    int nGroves = 3 + (int)(u01(rng) * 3.0f);           // 3-5
+    for (int g = 0; g < nGroves; g++) {
+        Grove gr;
+        gr.radius = 6.0f + 5.0f * u01(rng);
+        gr.pos = simd_make_float2(10.0f + 120.0f * u01(rng), 8.0f + 64.0f * u01(rng));
+        _groves.push_back(gr);
+        int nTrees = (int)(gr.radius * gr.radius * 0.55f);
+        for (int t = 0; t < nTrees; t++) {
+            float ang = u01(rng) * 6.2831853f;
+            float rr = gr.radius * sqrtf(u01(rng));
+            simd_float2 p = gr.pos + simd_make_float2(cosf(ang), sinf(ang)) * rr;
+            if (p.x < 1 || p.x > kFieldW - 1 || p.y < 1 || p.y > kFieldH - 1) continue;
+            if ([self isBlockedAt:p radius:0.3f]) continue;
+            Tree tr;
+            tr.pos = p;
+            tr.size = 1.7f + 1.0f * u01(rng);
+            tr.seed = u01(rng);
+            float mixT = u01(rng);
+            tr.tint = simd_make_float4(0.10f + 0.07f * mixT, 0.30f + 0.09f * mixT,
+                                       0.09f + 0.04f * mixT, 1.0f);
+            _trees.push_back(tr);
+        }
+    }
+
+    int nBoulders = 10 + (int)(u01(rng) * 5.0f);        // 10-14
+    for (int i = 0; i < nBoulders; i++) {
+        Boulder b;
+        b.radius = 0.8f + 1.1f * u01(rng);
+        for (int tries = 0; tries < 20; tries++) {
+            b.pos = simd_make_float2(6.0f + 128.0f * u01(rng), 6.0f + 68.0f * u01(rng));
+            if (![self isBlockedAt:b.pos radius:b.radius + 1.0f]) break;
+        }
+        b.seed = u01(rng);
+        _boulders.push_back(b);
+    }
+
+    // Evict any painted units now standing in water or rock.
+    _units.erase(std::remove_if(_units.begin(), _units.end(), [self](const Unit &u) {
+        return [self isBlockedAt:u.pos radius:kSpecs[u.type].radius];
+    }), _units.end());
+
+    printf("Terrain: %d lakes, %d groves (%d trees), %d boulders\n",
+           (int)_lakes.size(), (int)_groves.size(), (int)_trees.size(),
+           (int)_boulders.size());
+}
+
 - (void)spawnUnit:(int)type army:(int)army at:(simd_float2)pos {
     if ((int)_units.size() >= kMaxUnits) return;
+    if ([self isBlockedAt:pos radius:kSpecs[type].radius]) return;   // no lakes/rocks
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
     Unit un = {};
     un.pos = pos;
@@ -1075,10 +1232,34 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         want += push;
 
         u.vel += (want - u.vel) * std::min(6.0f * dt, 1.0f);
-        u.pos += u.vel * dt;
+
+        // Forests slow troops down — horses worst of all.
+        float terrainFactor = 1.0f;
+        for (const Grove &g : _groves) {
+            if (simd_distance(u.pos, g.pos) < g.radius) {
+                terrainFactor = (u.type == kCavalry) ? 0.40f : 0.60f;
+                break;
+            }
+        }
+        u.pos += u.vel * dt * terrainFactor;
+
+        // Lakes and boulders are impassable: slide along their edge.
+        for (const Lake &l : _lakes) {
+            float R = l.radius * 0.92f + spec.radius;
+            simd_float2 dl = u.pos - l.pos;
+            float dd = simd_length(dl);
+            if (dd < R) u.pos = l.pos + (dd > 1e-4f ? dl / dd : simd_make_float2(1, 0)) * R;
+        }
+        for (const Boulder &b : _boulders) {
+            float R = b.radius + spec.radius;
+            simd_float2 dl = u.pos - b.pos;
+            float dd = simd_length(dl);
+            if (dd < R) u.pos = b.pos + (dd > 1e-4f ? dl / dd : simd_make_float2(1, 0)) * R;
+        }
+
         u.pos.x = std::clamp(u.pos.x, 0.5f, kFieldW - 0.5f);
         u.pos.y = std::clamp(u.pos.y, 0.5f, kFieldH - 0.5f);
-        u.bobPhase += simd_length(u.vel) * dt * 6.0f;
+        u.bobPhase += simd_length(u.vel) * dt * 6.0f * terrainFactor;
     }
 
     // Shots: arrows + flaming balls.
@@ -1094,6 +1275,14 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         if (a.pos.y <= 0.0f) {
             a.alive = false;
             simd_float2 hit = simd_make_float2(a.pos.x, a.pos.z);
+            if ([self inLake:hit]) {
+                // Splash — the water eats arrows and fireballs alike.
+                int n = (a.kind == 1) ? 12 : 3;
+                [self spawnPuffs:hit y:0.2f kind:kPuffSplash count:n speed:2.5f size:0.30f];
+                if (a.kind == 1)
+                    [self spawnPuffs:hit y:0.4f kind:kPuffSmoke count:5 speed:1.2f size:0.7f];
+                continue;
+            }
             if (a.kind == 1) {
                 [self explodeAt:hit];
                 continue;
@@ -1301,19 +1490,45 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         float time;
         float phase;
         simd_float2 camRight;
-        simd_float2 pad2;
+        float lakeCount;
+        float pad;
+        simd_float4 lakes[3];
     } uni = {
         _viewProj,
         simd_make_float2((float)view.drawableSize.width, (float)view.drawableSize.height),
         t,
         (float)_phase,
         simd_make_float2(right.x, right.z),
-        simd_make_float2(0, 0),
+        (float)std::min(_lakes.size(), (size_t)3),
+        0,
+        {},
     };
+    for (size_t i = 0; i < _lakes.size() && i < 3; i++)
+        uni.lakes[i] = simd_make_float4(_lakes[i].pos.x, _lakes[i].pos.y,
+                                        _lakes[i].radius, _lakes[i].seed);
 
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
     _flatScratch.clear();
     _unitScratch.clear();
+
+    // ---- Terrain: shadows as decals, trees/boulders as billboards.
+    for (const Tree &tr : _trees) {
+        _flatScratch.push_back({tr.pos.x, tr.pos.y, tr.size * 0.42f, tr.size * 0.30f,
+                                0, 0, 0.02f, 0.03f, 0.02f, 0.35f, 0, 0, 0, 0});
+        _unitScratch.push_back({tr.pos.x, tr.pos.y, 0,
+                                tr.size * 1.15f, tr.size * 2.0f, 0, 14, 1,
+                                tr.tint.x, tr.tint.y, tr.tint.z, 1.0f,
+                                0, tr.seed, 0, 0});
+    }
+    for (const Boulder &b : _boulders) {
+        _flatScratch.push_back({b.pos.x, b.pos.y, b.radius * 1.25f, b.radius * 0.9f,
+                                0, 0, 0.02f, 0.02f, 0.02f, 0.35f, 0, 0, 0, 0});
+        float grey = 0.40f + 0.10f * b.seed;
+        _unitScratch.push_back({b.pos.x, b.pos.y, -b.radius * 0.18f,
+                                b.radius * 2.3f, b.radius * 1.9f, 0, 15, 1,
+                                grey, grey * 0.98f, grey * 0.95f, 1.0f,
+                                0, b.seed, 0, 0});
+    }
 
     // ---- Flat decals.
     for (const Splat &s : _splats) {
@@ -1411,11 +1626,12 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         float size = b.size * (b.kind == kPuffSmoke ? (1.0f + 2.0f * (1.0f - f)) : 1.0f);
         float occl, r, g, bl;
         switch (b.kind) {
-            case kPuffBlood: r = 0.45f; g = 0.02f; bl = 0.01f; occl = 0.85f; break;
-            case kPuffDust:  r = 0.42f; g = 0.36f; bl = 0.27f; occl = 0.55f; break;
-            case kPuffSpark: r = 1.60f; g = 1.30f; bl = 0.55f; occl = 0.0f;  break;
-            case kPuffFire:  r = 1.80f; g = 0.75f; bl = 0.18f; occl = 0.0f;  break;
-            default:         r = 0.13f; g = 0.12f; bl = 0.11f; occl = 0.75f; break;
+            case kPuffBlood:  r = 0.45f; g = 0.02f; bl = 0.01f; occl = 0.85f; break;
+            case kPuffDust:   r = 0.42f; g = 0.36f; bl = 0.27f; occl = 0.55f; break;
+            case kPuffSpark:  r = 1.60f; g = 1.30f; bl = 0.55f; occl = 0.0f;  break;
+            case kPuffFire:   r = 1.80f; g = 0.75f; bl = 0.18f; occl = 0.0f;  break;
+            case kPuffSplash: r = 0.55f; g = 0.70f; bl = 0.85f; occl = 0.60f; break;
+            default:          r = 0.13f; g = 0.12f; bl = 0.11f; occl = 0.75f; break;
         }
         _unitScratch.push_back({b.pos.x, b.pos.y, b.y - size,
                                 size * 2.0f, size * 2.0f, 0, 5, 1,
@@ -1499,7 +1715,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         state = _winner >= 0 ? (_winner == 0 ? @"RED WINS" : @"BLUE WINS")
                              : @"MUTUAL ANNIHILATION";
     view.window.title = [NSString stringWithFormat:
-        @"08 — WAR SIM v3 ▸ RED %d vs BLUE %d ▸ %@ ▸ %.0f fps",
+        @"08 — WAR SIM v4 ▸ RED %d vs BLUE %d ▸ %@ ▸ %.0f fps",
         alive[0], alive[1], state, _smoothedFPS];
 }
 

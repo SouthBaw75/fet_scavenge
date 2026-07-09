@@ -143,7 +143,10 @@ everything in the blast radius, friendly fire included. Click/drag stamps
 squads (left half = RED, right half = BLUE); right-click erases; D deploys
 default armies; R clears. Scroll to zoom; arrow keys or Q/E orbit and tilt
 the battle-cam. Melee hits knock units back with sparks and dust; catapult
-strikes shake the camera and leave scorched craters.
+strikes shake the camera and leave scorched craters. Random terrain makes
+every field tactical: **lakes** (impassable; projectiles splash harmlessly
+into them), **forests** (slow troops — cavalry worst of all), and
+**boulders** (impassable). Press T during setup to reroll the terrain.
 
 ## Where to go from here
 
