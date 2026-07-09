@@ -16,6 +16,7 @@
 
 #include "../common/app.h"
 #include <simd/simd.h>
+#include <algorithm>
 #include <string>
 
 static const int kGrid = 360;        // quads per side
@@ -32,7 +33,7 @@ struct Uniforms {
     float4 camUp;
     float4 camFwd;   // xyz = basis, w = focal length (1/tan(fov/2))
     float4 sun;      // xyz = direction to sun, w = time
-    float4 misc;     // xy = drawable resolution
+    float4 misc;     // xy = drawable resolution, z = wave intensity
 };
 
 // dir.x, dir.z, amplitude, wavelength — a swell plus five layers of chop.
@@ -55,13 +56,13 @@ struct Wave {
 // sharp and troughs get flat — the shape that makes it read as ocean
 // instead of rippling jelly. Deep-water dispersion: omega = sqrt(g*k),
 // so long waves travel faster than short ones, like the real sea.
-Wave gerstner(float2 xz, float time) {
+Wave gerstner(float2 xz, float time, float intensity) {
     float3 p = float3(xz.x, 0.0, xz.y);
     float3 n = float3(0.0, 1.0, 0.0);
     float ampSum = 0.0;
     for (int i = 0; i < 6; i++) {
         float2 D = normalize(kWaves[i].xy);
-        float A = kWaves[i].z;
+        float A = kWaves[i].z * intensity;
         float k = 2.0 * M_PI_F / kWaves[i].w;
         float omega = sqrt(9.8 * k);
         float Q = 0.62 / (k * A * 6.0);   // steepness, spread across the sum
@@ -174,7 +175,7 @@ vertex OceanVSOut ocean_vertex(uint vid [[vertex_id]],
     float2 xz = (float2(quad % GRID + corner.x, quad / GRID + corner.y)
                  - GRID * 0.5) * SPACING;
 
-    Wave w = gerstner(xz, u.sun.w);
+    Wave w = gerstner(xz, u.sun.w, u.misc.z);
     OceanVSOut out;
     out.position = u.mvp * float4(w.pos, 1.0);
     out.world = w.pos;
@@ -218,8 +219,11 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     color += float3(1.0, 0.85, 0.6) * pow(max(dot(R, sun), 0.0), 250.0) * (2.5 * fresnel + 0.3);
 
     // Foam where the crest is high, broken up by noise so it isn't a stripe.
+    // Heavier seas break more: whitecaps multiply with intensity.
+    float rough = clamp(u.misc.z, 0.25, 2.5);
     float foamMask = fbm(in.world.xz * 0.7 + float2(time * 0.2, -time * 0.15));
-    float foam = smoothstep(0.35, 0.8, in.crest) * smoothstep(0.35, 0.75, foamMask + 0.25 * in.crest);
+    float foam = smoothstep(0.35, 0.8, in.crest * (0.55 + 0.45 * rough))
+               * smoothstep(0.35, 0.75, foamMask + 0.25 * in.crest);
     color = mix(color, float3(0.90, 0.93, 0.95), foam * 0.75);
 
     // Fade the far edge of the grid into the sky so it has no visible border.
@@ -264,6 +268,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 @end
 
 @implementation OceanRenderer {
+    float _intensity;        // sea state: 0.2 calm .. 2.5 storm
+    float _intensityShown;   // eased value actually sent to the GPU
     id<MTLCommandQueue> _queue;
     id<MTLRenderPipelineState> _skyPipeline;
     id<MTLRenderPipelineState> _oceanPipeline;
@@ -318,6 +324,28 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     depthDesc.depthWriteEnabled = YES;
     _oceanDepth = [device newDepthStencilStateWithDescriptor:depthDesc];
 
+    _intensity = 1.0f;
+    _intensityShown = 1.0f;
+
+    // Sea-state controls: up/down arrows (or +/-) adjust smoothly, 1-5 are
+    // presets from glassy calm to full storm.
+    __unsafe_unretained OceanRenderer *weakSelf = self;
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                          handler:^NSEvent *(NSEvent *event) {
+        if (event.modifierFlags & NSEventModifierFlagCommand) return event;
+        unsigned short c = event.keyCode;
+        float &inten = weakSelf->_intensity;
+        if (c == 126 || c == 24) { inten = std::min(inten * 1.15f, 2.5f); return nil; } // up / =
+        if (c == 125 || c == 27) { inten = std::max(inten / 1.15f, 0.2f); return nil; } // down / -
+        if (c == 18) { inten = 0.30f; return nil; }   // 1 glassy
+        if (c == 19) { inten = 0.65f; return nil; }   // 2 light chop
+        if (c == 20) { inten = 1.00f; return nil; }   // 3 default
+        if (c == 21) { inten = 1.60f; return nil; }   // 4 heavy
+        if (c == 23) { inten = 2.40f; return nil; }   // 5 storm
+        return event;
+    }];
+    printf("Sea state: Up/Down (or +/-) adjust wave intensity, 1-5 presets.\n");
+
     _startTime = CACurrentMediaTime();
     return self;
 }
@@ -330,9 +358,13 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     float t = (float)(CACurrentMediaTime() - _startTime);
     float aspect = (float)(view.drawableSize.width / view.drawableSize.height);
 
-    // A boat-like camera: fixed position with a gentle bob, slowly panning
-    // back and forth across the sun.
-    simd_float3 eye = simd_make_float3(0.0f, 5.5f + 0.25f * sinf(t * 0.5f), 0.0f);
+    // Glide toward the requested sea state so changes swell in smoothly.
+    _intensityShown += (_intensity - _intensityShown) * 0.06f;
+
+    // A boat-like camera: fixed position with a gentle bob (heavier seas
+    // toss the boat harder), slowly panning back and forth across the sun.
+    float bob = 0.25f * _intensityShown;
+    simd_float3 eye = simd_make_float3(0.0f, 5.5f + bob * sinf(t * 0.5f), 0.0f);
     float yaw = 0.6f + 0.45f * sinf(t * 0.07f);
     simd_float3 fwd = simd_normalize(simd_make_float3(cosf(yaw), -0.10f, sinf(yaw)));
     simd_float3 right = simd_normalize(simd_cross(fwd, simd_make_float3(0, 1, 0)));
@@ -351,7 +383,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         .camFwd = simd_make_float4(fwd, focal),
         .sun = simd_make_float4(simd_normalize(simd_make_float3(0.8f, 0.12f, 0.55f)), t),
         .misc = simd_make_float4((float)view.drawableSize.width,
-                                 (float)view.drawableSize.height, 0, 0),
+                                 (float)view.drawableSize.height,
+                                 _intensityShown, 0),
     };
 
     id<MTLCommandBuffer> commands = [_queue commandBuffer];
@@ -375,7 +408,12 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     [commands presentDrawable:drawable];
     [commands commit];
 
-    _fps.tick(view.window, @"05 — Ocean");
+    const char *seaName = _intensity < 0.45f ? "glassy" :
+                          _intensity < 0.85f ? "light chop" :
+                          _intensity < 1.30f ? "moderate" :
+                          _intensity < 2.00f ? "heavy" : "STORM";
+    _fps.tick(view.window, [NSString stringWithFormat:
+        @"05 — Ocean ▸ Sea state x%.2f (%s) [↑/↓, 1-5]", _intensity, seaName]);
 }
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}
