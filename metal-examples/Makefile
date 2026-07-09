@@ -5,7 +5,7 @@ CXX        := clang++
 CXXFLAGS   := -std=c++20 -O2 -Wall -fobjc-arc
 FRAMEWORKS := -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore
 
-EXAMPLES := 01-triangle 02-cube 03-particles 04-raymarch 05-ocean
+EXAMPLES := 01-triangle 02-cube 03-particles 04-raymarch 05-ocean 06-tugboat
 BINARIES := $(EXAMPLES:%=build/%)
 
 all: $(BINARIES)

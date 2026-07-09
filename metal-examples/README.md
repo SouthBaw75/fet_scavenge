@@ -69,6 +69,29 @@ sun glint, subsurface scattering through backlit crests, procedural foam,
 and distance fog into the horizon. The sky is a second bufferless fullscreen
 pass. No textures or assets — every pixel is math.
 
+### 06 — Tugboat (a game!)
+Drive a tugboat across a top-down ocean and collect the floating buoys. The
+water is the same Gerstner-wave surface as example 05 seen from above, and the
+key trick is that the **boat and buoys sample the exact same wave function on
+the CPU** — the shader's wave table is generated from one C++ table at startup,
+so the game logic and the GPU water can never disagree. Everything rides the
+swell: the boat bobs, pitches, and rolls, and the buoys spin and bounce.
+
+Physics feel like a boat, not a car — throttle is persistent, drag brakes you,
+and the rudder only bites when water is flowing past it, so you can't spin in
+place. The boat and buoys are built from procedural colored boxes (no models).
+
+Controls:
+
+| Key | Action | Key | Action |
+| --- | --- | --- | --- |
+| `W` / `↑` | throttle up | `A` / `←` | rudder left |
+| `S` / `↓` | throttle down | `D` / `→` | rudder right |
+| `Space` | cut throttle | `R` | reset boat |
+
+Score and current throttle show in the window title. Get within range of a
+buoy and it's collected and respawns somewhere new.
+
 ## Where to go from here
 
 - **Textures & samplers** — `MTLTexture`, `MTKTextureLoader`

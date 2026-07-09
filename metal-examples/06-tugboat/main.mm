@@ -1,0 +1,619 @@
+// 06 — Tugboat
+//
+// A tiny game: drive a tugboat across a top-down Gerstner-wave ocean and
+// collect the orange buoys. Everything is procedural — the boat and buoys are
+// colored boxes, the water is the same wave math as example 05 viewed from
+// above, and both the boat and the buoys sample the SAME wave function on the
+// CPU so they genuinely ride the swells (bob, pitch, and roll).
+//
+// Controls:
+//   W / Up      throttle up          A / Left    rudder left
+//   S / Down    throttle down        D / Right   rudder right
+//   Space       cut throttle         R           reset boat
+//
+// The rudder needs water flowing past it: steering barely works when you're
+// not moving, just like a real boat. Score and throttle live in the title bar.
+
+#include "../common/app.h"
+#include <simd/simd.h>
+#include <algorithm>
+#include <cmath>
+#include <random>
+#include <string>
+#include <vector>
+
+static const int kGrid = 240;        // water quads per side
+static const float kSpacing = 0.5f;  // meters per quad
+static const int kBuoyCount = 8;
+static const float kCollectRadius = 2.5f;
+
+// Single source of truth for the waves — the shader constant array is
+// generated from this table, and the CPU buoyancy code below reads it too.
+// dir.x, dir.z, amplitude, wavelength. A calm sea so driving is pleasant.
+static const float kWaveTable[6][4] = {
+    {1.0f,  0.20f, 0.22f, 14.0f},
+    {0.7f,  0.60f, 0.14f,  8.5f},
+    {1.0f, -0.50f, 0.10f,  5.0f},
+    {0.5f,  0.90f, 0.06f,  3.0f},
+    {0.9f, -0.80f, 0.035f, 1.8f},
+    {0.3f,  1.00f, 0.02f,  1.0f},
+};
+
+static const char *kShaderSource = R"METAL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct Uniforms {
+    float4x4 mvp;
+    float4x4 model;
+    float4 camPos;  // xyz
+    float4 sun;     // xyz = direction to sun, w = time
+    float4 misc;    // xy = water grid origin (world xz)
+};
+
+struct Wave {
+    float3 pos;
+    float3 normal;
+    float  crest;
+};
+
+Wave gerstner(float2 xz, float time) {
+    float3 p = float3(xz.x, 0.0, xz.y);
+    float3 n = float3(0.0, 1.0, 0.0);
+    float ampSum = 0.0;
+    for (int i = 0; i < 6; i++) {
+        float2 D = normalize(kWaves[i].xy);
+        float A = kWaves[i].z;
+        float k = 2.0 * M_PI_F / kWaves[i].w;
+        float omega = sqrt(9.8 * k);
+        float Q = 0.5 / (k * A * 6.0);
+        float theta = k * dot(D, xz) - omega * time;
+        float s = sin(theta), c = cos(theta);
+        p.x += Q * A * D.x * c;
+        p.z += Q * A * D.y * c;
+        p.y += A * s;
+        n.x -= D.x * k * A * c;
+        n.z -= D.y * k * A * c;
+        n.y -= Q * k * A * s;
+        ampSum += A;
+    }
+    Wave w;
+    w.pos = p;
+    w.normal = normalize(n);
+    w.crest = p.y / ampSum;
+    return w;
+}
+
+float hash21(float2 p) {
+    p = fract(p * float2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float vnoise(float2 p) {
+    float2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash21(i), hash21(i + float2(1, 0)), f.x),
+               mix(hash21(i + float2(0, 1)), hash21(i + float2(1, 1)), f.x), f.y);
+}
+
+float fbm(float2 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 3; i++) { v += a * vnoise(p); p *= 2.13; a *= 0.5; }
+    return v;
+}
+
+// ---------------- Water ----------------
+
+struct WaterVSOut {
+    float4 position [[position]];
+    float3 world;
+    float3 normal;
+    float  crest;
+};
+
+constant uint2 kCorner[6] = {
+    uint2(0, 0), uint2(1, 0), uint2(1, 1),
+    uint2(0, 0), uint2(1, 1), uint2(0, 1),
+};
+
+vertex WaterVSOut water_vertex(uint vid [[vertex_id]],
+                               constant Uniforms &u [[buffer(0)]]) {
+    uint quad = vid / 6;
+    uint2 corner = kCorner[vid % 6];
+    float2 xz = u.misc.xy +
+                (float2(quad % GRID + corner.x, quad / GRID + corner.y)
+                 - GRID * 0.5) * SPACING;
+    Wave w = gerstner(xz, u.sun.w);
+    WaterVSOut out;
+    out.position = u.mvp * float4(w.pos, 1.0);
+    out.world = w.pos;
+    out.normal = w.normal;
+    out.crest = w.crest;
+    return out;
+}
+
+fragment float4 water_fragment(WaterVSOut in [[stage_in]],
+                               constant Uniforms &u [[buffer(0)]]) {
+    float time = u.sun.w;
+    float3 sun = u.sun.xyz;
+    float3 V = normalize(u.camPos.xyz - in.world);
+
+    // Ripple detail on top of the geometric wave normal.
+    float2 dp = in.world.xz * 1.6 + float2(time * 0.4, time * 0.25);
+    float hC = fbm(dp);
+    float hX = fbm(dp + float2(0.3, 0.0));
+    float hZ = fbm(dp + float2(0.0, 0.3));
+    float3 n = normalize(normalize(in.normal) + float3(hC - hX, 0.0, hC - hZ) * 0.8);
+
+    float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+    float3 skyRef = mix(float3(0.45, 0.62, 0.78), float3(0.25, 0.45, 0.70),
+                        saturate(n.y));
+
+    float3 deep = float3(0.03, 0.16, 0.22);
+    float3 shallow = float3(0.05, 0.30, 0.32);
+    float3 body = mix(deep, shallow, max(in.crest, 0.0) * 0.6);
+
+    float3 color = mix(body, skyRef, fresnel);
+
+    // Sun sparkle off the ripples.
+    float3 R = reflect(-V, n);
+    color += float3(1.0, 0.95, 0.8) * pow(max(dot(R, sun), 0.0), 180.0) * 1.2;
+
+    // Foam on the crests.
+    float foamMask = fbm(in.world.xz * 0.9 + float2(time * 0.2, -time * 0.15));
+    float foam = smoothstep(0.45, 0.85, in.crest) *
+                 smoothstep(0.35, 0.75, foamMask + 0.25 * in.crest);
+    color = mix(color, float3(0.90, 0.93, 0.95), foam * 0.6);
+
+    return float4(pow(color, float3(0.4545)), 1.0);
+}
+
+// ---------------- Solid objects (boat, buoys) ----------------
+
+struct SolidVertexIn {
+    packed_float3 position;
+    packed_float3 normal;
+    packed_float3 color;
+};
+
+struct SolidVSOut {
+    float4 position [[position]];
+    float3 normal;
+    float3 color;
+};
+
+vertex SolidVSOut solid_vertex(uint vid [[vertex_id]],
+                               const device SolidVertexIn *verts [[buffer(0)]],
+                               constant Uniforms &u [[buffer(1)]]) {
+    SolidVertexIn v = verts[vid];
+    SolidVSOut out;
+    out.position = u.mvp * float4(float3(v.position), 1.0);
+    out.normal = (u.model * float4(float3(v.normal), 0.0)).xyz;
+    out.color = float3(v.color);
+    return out;
+}
+
+fragment float4 solid_fragment(SolidVSOut in [[stage_in]],
+                               constant Uniforms &u [[buffer(0)]]) {
+    float3 n = normalize(in.normal);
+    float diffuse = max(dot(n, u.sun.xyz), 0.0);
+    float3 color = in.color * (0.35 + 0.75 * diffuse);
+    return float4(pow(color, float3(0.4545)), 1.0);
+}
+)METAL";
+
+struct Uniforms {
+    simd_float4x4 mvp;
+    simd_float4x4 model;
+    simd_float4 camPos;
+    simd_float4 sun;
+    simd_float4 misc;
+};
+
+struct SolidVertex {
+    float px, py, pz;
+    float nx, ny, nz;
+    float cr, cg, cb;
+};
+
+// --- CPU copy of the wave function, for buoyancy. Must match the shader. ---
+
+struct WaveSample {
+    float height;
+    simd_float3 normal;
+};
+
+static WaveSample SampleWaves(simd_float2 xz, float time) {
+    float h = 0.0f;
+    simd_float3 n = simd_make_float3(0, 1, 0);
+    for (int i = 0; i < 6; i++) {
+        simd_float2 D = simd_normalize(simd_make_float2(kWaveTable[i][0], kWaveTable[i][1]));
+        float A = kWaveTable[i][2];
+        float k = 2.0f * (float)M_PI / kWaveTable[i][3];
+        float omega = sqrtf(9.8f * k);
+        float Q = 0.5f / (k * A * 6.0f);
+        float theta = k * simd_dot(D, xz) - omega * time;
+        float s = sinf(theta), c = cosf(theta);
+        h += A * s;
+        n.x -= D.x * k * A * c;
+        n.z -= D.y * k * A * c;
+        n.y -= Q * k * A * s;
+    }
+    return { h, simd_normalize(n) };
+}
+
+// --- Matrices ---
+
+static simd_float4x4 Perspective(float fovyRadians, float aspect, float nearZ, float farZ) {
+    float ys = 1.0f / tanf(fovyRadians * 0.5f);
+    float xs = ys / aspect;
+    float zs = farZ / (nearZ - farZ);
+    return simd_matrix(simd_make_float4(xs, 0, 0, 0),
+                       simd_make_float4(0, ys, 0, 0),
+                       simd_make_float4(0, 0, zs, -1),
+                       simd_make_float4(0, 0, nearZ * zs, 0));
+}
+
+static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, simd_float3 fwd) {
+    return simd_matrix(
+        simd_make_float4(right.x, up.x, -fwd.x, 0),
+        simd_make_float4(right.y, up.y, -fwd.y, 0),
+        simd_make_float4(right.z, up.z, -fwd.z, 0),
+        simd_make_float4(-simd_dot(right, eye), -simd_dot(up, eye), simd_dot(fwd, eye), 1));
+}
+
+static simd_float4x4 ModelMatrix(simd_float3 right, simd_float3 up, simd_float3 back,
+                                 simd_float3 position) {
+    return simd_matrix(simd_make_float4(right, 0),
+                       simd_make_float4(up, 0),
+                       simd_make_float4(back, 0),
+                       simd_make_float4(position, 1));
+}
+
+// --- Procedural meshes from colored boxes ---
+
+static void AddBox(std::vector<SolidVertex> &verts, simd_float3 center,
+                   simd_float3 size, simd_float3 color) {
+    struct Face { simd_float3 n, u, v; };
+    const Face faces[6] = {
+        { { 0,  0,  1}, { 1, 0,  0}, {0, 1,  0} },
+        { { 0,  0, -1}, {-1, 0,  0}, {0, 1,  0} },
+        { { 1,  0,  0}, { 0, 0, -1}, {0, 1,  0} },
+        { {-1,  0,  0}, { 0, 0,  1}, {0, 1,  0} },
+        { { 0,  1,  0}, { 1, 0,  0}, {0, 0, -1} },
+        { { 0, -1,  0}, { 1, 0,  0}, {0, 0,  1} },
+    };
+    simd_float3 h = size * 0.5f;
+    for (const Face &f : faces) {
+        simd_float3 fn = f.n * h, fu = f.u * h, fv = f.v * h;
+        const simd_float3 corners[4] = {
+            center + fn - fu - fv, center + fn + fu - fv,
+            center + fn + fu + fv, center + fn - fu + fv,
+        };
+        const int indices[6] = {0, 1, 2, 0, 2, 3};
+        for (int i : indices) {
+            simd_float3 p = corners[i];
+            verts.push_back({p.x, p.y, p.z, f.n.x, f.n.y, f.n.z, color.x, color.y, color.z});
+        }
+    }
+}
+
+// Local convention: forward = -z, up = +y. Origin at the waterline.
+static std::vector<SolidVertex> MakeTugboat() {
+    std::vector<SolidVertex> v;
+    const simd_float3 red = {0.75f, 0.15f, 0.12f};
+    const simd_float3 wood = {0.55f, 0.38f, 0.22f};
+    const simd_float3 white = {0.92f, 0.92f, 0.95f};
+    const simd_float3 dark = {0.20f, 0.20f, 0.22f};
+    const simd_float3 black = {0.12f, 0.12f, 0.14f};
+    AddBox(v, {0, 0.45f,  0.1f}, {2.2f, 0.9f, 5.6f}, red);   // hull
+    AddBox(v, {0, 0.45f, -3.1f}, {1.4f, 0.9f, 0.8f}, red);   // bow
+    AddBox(v, {0, 0.95f,  0.1f}, {2.0f, 0.12f, 5.2f}, wood); // deck
+    AddBox(v, {0, 1.55f,  0.8f}, {1.5f, 1.1f, 1.8f}, white); // cabin
+    AddBox(v, {0, 2.15f,  0.8f}, {1.7f, 0.12f, 2.0f}, dark); // roof
+    AddBox(v, {0, 2.00f,  2.1f}, {0.6f, 1.4f, 0.6f}, black); // funnel
+    AddBox(v, {0, 2.75f,  2.1f}, {0.64f, 0.3f, 0.64f}, red); // funnel stripe
+    return v;
+}
+
+static std::vector<SolidVertex> MakeBuoy() {
+    std::vector<SolidVertex> v;
+    const simd_float3 orange = {1.0f, 0.45f, 0.05f};
+    const simd_float3 white = {0.95f, 0.95f, 0.95f};
+    const simd_float3 light = {1.0f, 0.9f, 0.3f};
+    AddBox(v, {0, 0.25f, 0}, {1.0f, 0.5f, 1.0f}, orange);
+    AddBox(v, {0, 0.70f, 0}, {0.55f, 0.5f, 0.55f}, orange);
+    AddBox(v, {0, 1.15f, 0}, {0.30f, 0.5f, 0.30f}, white);
+    AddBox(v, {0, 1.50f, 0}, {0.18f, 0.2f, 0.18f}, light);
+    return v;
+}
+
+// Key codes (ANSI layout).
+enum {
+    kKeyA = 0, kKeyS = 1, kKeyD = 2, kKeyW = 13, kKeyR = 15, kKeySpace = 49,
+    kKeyLeft = 123, kKeyRight = 124, kKeyDown = 125, kKeyUp = 126,
+};
+
+@interface TugboatRenderer : NSObject <MTKViewDelegate>
+- (instancetype)initWithView:(MTKView *)view;
+@end
+
+@implementation TugboatRenderer {
+    id<MTLCommandQueue> _queue;
+    id<MTLRenderPipelineState> _waterPipeline;
+    id<MTLRenderPipelineState> _solidPipeline;
+    id<MTLDepthStencilState> _depthState;
+    id<MTLBuffer> _boatMesh;
+    NSUInteger _boatVertexCount;
+    id<MTLBuffer> _buoyMesh;
+    NSUInteger _buoyVertexCount;
+
+    // Game state
+    bool _keys[128];
+    simd_float2 _boatPos;
+    float _heading;      // radians; 0 = up-screen (-z)
+    float _speed;        // m/s along heading
+    float _throttle;     // -0.4 .. 1.0
+    simd_float2 _buoys[kBuoyCount];
+    int _score;
+    std::mt19937 _rng;
+
+    double _startTime;
+    double _lastFrameTime;
+    float _smoothedFPS;
+}
+
+- (instancetype)initWithView:(MTKView *)view {
+    if (!(self = [super init])) return nil;
+
+    id<MTLDevice> device = view.device;
+    _queue = [device newCommandQueue];
+    view.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
+    view.clearColor = MTLClearColorMake(0.03, 0.16, 0.22, 1.0);
+
+    // Generate the shader's wave table from the C++ table so the CPU
+    // buoyancy math and the GPU water can never drift apart.
+    std::string waves = "constant float4 kWaves[6] = {\n";
+    for (int i = 0; i < 6; i++) {
+        char line[128];
+        snprintf(line, sizeof(line), "    float4(%f, %f, %f, %f),\n",
+                 kWaveTable[i][0], kWaveTable[i][1], kWaveTable[i][2], kWaveTable[i][3]);
+        waves += line;
+    }
+    waves += "};\n";
+
+    std::string source = "#define GRID " + std::to_string(kGrid) +
+                         "\n#define SPACING " + std::to_string(kSpacing) + "f\n";
+    std::string body(kShaderSource);
+    // The wave table must appear after `using namespace metal;` — inject it
+    // at the start of the shader body, which begins after the header lines.
+    size_t insertAt = body.find("struct Uniforms");
+    body.insert(insertAt, waves);
+    source += body;
+
+    id<MTLLibrary> library = CompileLibrary(device, source.c_str());
+    if (!library) return nil;
+
+    NSError *error = nil;
+    MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
+    desc.colorAttachments[0].pixelFormat = view.colorPixelFormat;
+    desc.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
+
+    desc.vertexFunction = [library newFunctionWithName:@"water_vertex"];
+    desc.fragmentFunction = [library newFunctionWithName:@"water_fragment"];
+    _waterPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+    if (!_waterPipeline) {
+        fprintf(stderr, "Water pipeline error: %s\n", error.localizedDescription.UTF8String);
+        return nil;
+    }
+
+    desc.vertexFunction = [library newFunctionWithName:@"solid_vertex"];
+    desc.fragmentFunction = [library newFunctionWithName:@"solid_fragment"];
+    _solidPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+    if (!_solidPipeline) {
+        fprintf(stderr, "Solid pipeline error: %s\n", error.localizedDescription.UTF8String);
+        return nil;
+    }
+
+    MTLDepthStencilDescriptor *depthDesc = [MTLDepthStencilDescriptor new];
+    depthDesc.depthCompareFunction = MTLCompareFunctionLess;
+    depthDesc.depthWriteEnabled = YES;
+    _depthState = [device newDepthStencilStateWithDescriptor:depthDesc];
+
+    std::vector<SolidVertex> boat = MakeTugboat();
+    _boatVertexCount = boat.size();
+    _boatMesh = [device newBufferWithBytes:boat.data()
+                                    length:boat.size() * sizeof(SolidVertex)
+                                   options:MTLResourceStorageModeShared];
+
+    std::vector<SolidVertex> buoy = MakeBuoy();
+    _buoyVertexCount = buoy.size();
+    _buoyMesh = [device newBufferWithBytes:buoy.data()
+                                    length:buoy.size() * sizeof(SolidVertex)
+                                   options:MTLResourceStorageModeShared];
+
+    _boatPos = simd_make_float2(0, 0);
+    _heading = 0;
+    _speed = 0;
+    _throttle = 0;
+    _score = 0;
+    _rng.seed(7);
+    for (int i = 0; i < kBuoyCount; i++) [self respawnBuoy:i];
+
+    // Keyboard: a local event monitor beats subclassing the view.
+    memset(_keys, 0, sizeof(_keys));
+    __unsafe_unretained TugboatRenderer *weakSelf = self;
+    [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp)
+                                          handler:^NSEvent *(NSEvent *event) {
+        if (event.modifierFlags & NSEventModifierFlagCommand) return event; // keep Cmd+Q
+        unsigned short code = event.keyCode;
+        if (code < 128) {
+            weakSelf->_keys[code] = (event.type == NSEventTypeKeyDown);
+            return nil;
+        }
+        return event;
+    }];
+
+    printf("Controls:\n"
+           "  W/Up  throttle up     A/Left   rudder left\n"
+           "  S/Down throttle down  D/Right  rudder right\n"
+           "  Space cut throttle    R        reset boat\n");
+
+    _startTime = CACurrentMediaTime();
+    _lastFrameTime = _startTime;
+    _smoothedFPS = 60;
+    return self;
+}
+
+- (void)respawnBuoy:(int)i {
+    std::uniform_real_distribution<float> angleDist(0.0f, 2.0f * (float)M_PI);
+    std::uniform_real_distribution<float> radiusDist(18.0f, 55.0f);
+    float a = angleDist(_rng);
+    float r = radiusDist(_rng);
+    _buoys[i] = _boatPos + simd_make_float2(r * cosf(a), r * sinf(a));
+}
+
+- (void)stepGame:(float)dt time:(float)t {
+    float throttleInput = (_keys[kKeyW] || _keys[kKeyUp] ? 1.0f : 0.0f) -
+                          (_keys[kKeyS] || _keys[kKeyDown] ? 1.0f : 0.0f);
+    _throttle = std::clamp(_throttle + throttleInput * 0.7f * dt, -0.4f, 1.0f);
+    if (_keys[kKeySpace]) _throttle *= expf(-6.0f * dt);
+    if (_keys[kKeyR]) { _boatPos = {0, 0}; _heading = 0; _speed = 0; _throttle = 0; }
+
+    float steer = (_keys[kKeyD] || _keys[kKeyRight] ? 1.0f : 0.0f) -
+                  (_keys[kKeyA] || _keys[kKeyLeft] ? 1.0f : 0.0f);
+
+    // Rudder authority grows with speed; reverses when backing up.
+    float flow = std::min(fabsf(_speed) / 4.0f + 0.15f, 1.0f);
+    _heading += steer * 1.5f * flow * dt * (_speed >= 0 ? 1.0f : -1.0f);
+
+    // Throttle drives, drag brakes. Tugs are torquey but slow.
+    _speed += (_throttle * 6.0f - _speed * 0.8f) * dt;
+
+    simd_float2 fwd = simd_make_float2(sinf(_heading), -cosf(_heading));
+    _boatPos += fwd * _speed * dt;
+
+    for (int i = 0; i < kBuoyCount; i++) {
+        if (simd_distance(_boatPos, _buoys[i]) < kCollectRadius) {
+            _score++;
+            printf("Buoy collected! Total: %d\n", _score);
+            [self respawnBuoy:i];
+        }
+    }
+}
+
+- (void)drawInMTKView:(MTKView *)view {
+    MTLRenderPassDescriptor *pass = view.currentRenderPassDescriptor;
+    id<CAMetalDrawable> drawable = view.currentDrawable;
+    if (!pass || !drawable) return;
+
+    double now = CACurrentMediaTime();
+    float t = (float)(now - _startTime);
+    float dtRaw = (float)(now - _lastFrameTime);
+    _lastFrameTime = now;
+    float dt = std::min(dtRaw, 1.0f / 30.0f);
+    if (dtRaw > 0) _smoothedFPS += (1.0f / dtRaw - _smoothedFPS) * 0.05f;
+
+    [self stepGame:dt time:t];
+
+    // Mostly top-down camera, tilted a touch so the boat reads as 3D.
+    simd_float3 eye = simd_make_float3(_boatPos.x, 40.0f, _boatPos.y + 14.0f);
+    simd_float3 target = simd_make_float3(_boatPos.x, 0.0f, _boatPos.y);
+    simd_float3 fwd = simd_normalize(target - eye);
+    simd_float3 right = simd_normalize(simd_cross(fwd, simd_make_float3(0, 1, 0)));
+    simd_float3 up = simd_cross(right, fwd);
+
+    float aspect = (float)(view.drawableSize.width / view.drawableSize.height);
+    simd_float4x4 proj = Perspective(55.0f * (float)M_PI / 180.0f, aspect, 1.0f, 300.0f);
+    simd_float4x4 viewProj = simd_mul(proj, LookAt(eye, right, up, fwd));
+
+    simd_float4 sun = simd_make_float4(simd_normalize(simd_make_float3(0.5f, 0.75f, 0.35f)), t);
+
+    // Water grid follows the boat, snapped to the grid so vertices don't swim.
+    simd_float2 gridOrigin = {
+        floorf(_boatPos.x / kSpacing) * kSpacing,
+        floorf(_boatPos.y / kSpacing) * kSpacing,
+    };
+
+    id<MTLCommandBuffer> commands = [_queue commandBuffer];
+    id<MTLRenderCommandEncoder> enc = [commands renderCommandEncoderWithDescriptor:pass];
+    [enc setDepthStencilState:_depthState];
+    [enc setCullMode:MTLCullModeNone];
+
+    // Water
+    Uniforms u = {};
+    u.mvp = viewProj;
+    u.model = matrix_identity_float4x4;
+    u.camPos = simd_make_float4(eye, 0);
+    u.sun = sun;
+    u.misc = simd_make_float4(gridOrigin.x, gridOrigin.y, 0, 0);
+    [enc setRenderPipelineState:_waterPipeline];
+    [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
+    [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle
+             vertexStart:0
+             vertexCount:(NSUInteger)kGrid * kGrid * 6];
+
+    [enc setRenderPipelineState:_solidPipeline];
+
+    // Boat: floats on the same waves the GPU renders.
+    {
+        WaveSample ws = SampleWaves(_boatPos, t);
+        simd_float3 worldUp = simd_make_float3(0, 1, 0);
+        // Tilt the boat halfway toward the wave normal so it pitches and rolls
+        // with the swell without lying flat on steep faces.
+        simd_float3 bUp = simd_normalize(worldUp + (ws.normal - worldUp) * 0.5f);
+        simd_float3 bFwd0 = simd_make_float3(sinf(_heading), 0, -cosf(_heading));
+        simd_float3 bRight = simd_normalize(simd_cross(bFwd0, bUp));
+        simd_float3 pos = simd_make_float3(_boatPos.x, ws.height - 0.25f, _boatPos.y);
+        simd_float4x4 model = ModelMatrix(bRight, bUp, simd_cross(bRight, bUp), pos);
+
+        Uniforms bu = u;
+        bu.mvp = simd_mul(viewProj, model);
+        bu.model = model;
+        [enc setVertexBuffer:_boatMesh offset:0 atIndex:0];
+        [enc setVertexBytes:&bu length:sizeof(bu) atIndex:1];
+        [enc setFragmentBytes:&bu length:sizeof(bu) atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:_boatVertexCount];
+    }
+
+    // Buoys: bob and slowly spin.
+    [enc setVertexBuffer:_buoyMesh offset:0 atIndex:0];
+    for (int i = 0; i < kBuoyCount; i++) {
+        WaveSample ws = SampleWaves(_buoys[i], t);
+        float spin = t * 0.8f + (float)i * 1.3f;
+        simd_float3 worldUp = simd_make_float3(0, 1, 0);
+        simd_float3 bRight = simd_make_float3(cosf(spin), 0, sinf(spin));
+        simd_float3 bUp = simd_normalize(worldUp + (ws.normal - worldUp) * 0.7f);
+        simd_float3 bBack = simd_normalize(simd_cross(bRight, bUp));
+        bRight = simd_cross(bUp, bBack);
+        simd_float3 pos = simd_make_float3(_buoys[i].x, ws.height - 0.15f, _buoys[i].y);
+        simd_float4x4 model = ModelMatrix(bRight, bUp, bBack, pos);
+
+        Uniforms su = u;
+        su.mvp = simd_mul(viewProj, model);
+        su.model = model;
+        [enc setVertexBytes:&su length:sizeof(su) atIndex:1];
+        [enc setFragmentBytes:&su length:sizeof(su) atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:_buoyVertexCount];
+    }
+
+    [enc endEncoding];
+    [commands presentDrawable:drawable];
+    [commands commit];
+
+    view.window.title = [NSString stringWithFormat:
+        @"06 — Tugboat ⚓ Buoys: %d — Throttle %+d%% — %.0f fps",
+        _score, (int)lroundf(_throttle * 100), _smoothedFPS];
+}
+
+- (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}
+
+@end
+
+int main() {
+    return RunMetalApp(@"06 — Tugboat", 1100, 700, ^(MTKView *view) {
+        return (NSObject<MTKViewDelegate> *)[[TugboatRenderer alloc] initWithView:view];
+    });
+}
