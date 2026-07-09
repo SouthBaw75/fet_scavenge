@@ -82,8 +82,11 @@ Physics feel like a boat, not a car — throttle is persistent, drag brakes you,
 and the rudder only bites when water is flowing past it, so you can't spin in
 place. The boat and buoys are built from procedural colored boxes (no models).
 
-Two particle systems add life. Dark smoke puffs from the funnel (heavier when
-you throttle up) as camera-facing billboards. The wake is different: a bow
+Three particle systems add life. Dark smoke puffs from the funnel (heavier
+when you throttle up) as camera-facing billboards. White spray bursts off the
+bow — emitted in proportion to how deep the bow is buried in the wave times
+boat speed, so it erupts as the hull slams into crests, then arcs back down
+under gravity. The wake is different again: a bow
 wave springs from a point at the cutwater and spreads into a V whose vertex
 stays pinned where the bow cuts the water, while a bright churned trail
 streams from the stern — drawn as flat foam quads laid on the water surface

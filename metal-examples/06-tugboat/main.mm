@@ -65,6 +65,11 @@ static const float kBoatTurnRate      = 0.9f;   // max yaw rate, rad/s (lower = 
 static const float kBoatSteerageSpeed = 3.0f;   // forward speed for full rudder authority
 static const float kBowPlungeGain     = 0.8f;   // extra bow pitch with speed (crashing over waves)
 
+// --- Bow spray: droplets thrown up when the bow digs into a wave. ---
+static const float kSprayGravity   = 7.5f;      // how fast droplets arc back down (m/s^2)
+static const float kSprayThreshold = 0.12f;     // bow immersion (m) before spray kicks in
+static const float kSprayAmount    = 45.0f;     // density per metre of immersion per m/s of speed
+
 static const int kGrid = 360;        // water quads per side (wide enough that the
 static const float kSpacing = 0.5f;  // grid edges sit past the horizon haze)
 static const int kBuoyCount = 8;
@@ -606,6 +611,7 @@ enum {
     float _smokeAccum;
     float _wakeAccum;   // stern wash
     float _bowAccum;    // bow wave
+    float _sprayAccum;  // bow spray
     simd_float3 _boatRight, _boatUp, _boatBack, _boatWorldPos;
 
     // Inertial hull state (low-pass filtered toward the wave surface).
@@ -721,6 +727,7 @@ enum {
     _smokeAccum = 0;
     _wakeAccum = 0;
     _bowAccum = 0;
+    _sprayAccum = 0;
 
     std::vector<SolidVertex> boat = MakeTugboat();
     _boatVertexCount = boat.size();
@@ -1030,6 +1037,7 @@ enum {
 
     [self emitSmoke:dt];
     [self emitWake:dt time:t];
+    [self emitSpray:dt time:t];
     [self stepParticles:dt time:t];
 
     for (int i = 0; i < kBuoyCount; i++) {
@@ -1145,14 +1153,60 @@ enum {
     }
 }
 
+- (void)emitSpray:(float)dt time:(float)t {
+    float speed = std::max(_speed, 0.0f);
+    if (speed < 0.6f) return;
+    std::uniform_real_distribution<float> pm(-1.0f, 1.0f);
+    std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+
+    simd_float2 fwdXZ = simd_make_float2(sinf(_heading), -cosf(_heading));
+    simd_float2 rightXZ = simd_make_float2(cosf(_heading), sinf(_heading));
+    float bowTipZ = -0.48f * kBoatTargetLength;
+    float beam = 0.14f * kBoatTargetLength;
+
+    // How deep the bow point is buried under the wave surface: the wave rises
+    // faster than the inertial hull, so this spikes when the bow slams a crest.
+    simd_float3 bowWorld = [self localToWorld:simd_make_float3(0, 0, bowTipZ)];
+    float hBow = SampleWaves(simd_make_float2(bowWorld.x, bowWorld.z), t).height;
+    float immersion = hBow - bowWorld.y;
+    float crash = std::max(immersion - kSprayThreshold, 0.0f);
+    if (crash <= 0.0f) return;
+
+    _sprayAccum += crash * speed * kSprayAmount * dt;
+    while (_sprayAccum >= 1.0f) {
+        _sprayAccum -= 1.0f;
+        if ((int)_particles.size() >= kMaxParticles) break;
+        Particle p;
+        p.kind = 2;
+        p.dir = simd_make_float2(0, 1);   // unused by billboards
+        // Along the bow, at the waterline, thrown up and out to the sides.
+        simd_float3 local = simd_make_float3(pm(_rng) * beam, 0.05f, bowTipZ + u01(_rng) * 0.6f);
+        p.pos = [self localToWorld:local];
+        float side = pm(_rng);
+        p.vel = simd_make_float3(0, 2.6f + 2.4f * u01(_rng), 0)                 // up
+              + simd_make_float3(rightXZ.x, 0, rightXZ.y) * (side * (1.0f + u01(_rng)))  // out
+              + simd_make_float3(fwdXZ.x, 0, fwdXZ.y) * (0.5f + speed * 0.25f)  // forward with the bow
+              + simd_make_float3(pm(_rng), 0, pm(_rng)) * 0.4f;
+        p.age = 0;
+        p.life = 0.6f + u01(_rng) * 0.7f;
+        p.size0 = 0.22f;
+        p.size1 = 0.6f + u01(_rng) * 0.3f;
+        p.color0 = simd_make_float4(0.95f, 0.97f, 1.0f, 0.55f);   // white water
+        p.color1 = simd_make_float4(0.90f, 0.95f, 1.0f, 0.0f);    // fades as it falls
+        _particles.push_back(p);
+    }
+}
+
 - (void)stepParticles:(float)dt time:(float)t {
     for (Particle &p : _particles) {
         p.age += dt;
         p.pos += p.vel * dt;
         if (p.kind == 0) {
-            p.vel.y *= expf(-0.6f * dt);   // buoyant rise eases off
+            p.vel.y *= expf(-0.6f * dt);   // smoke's buoyant rise eases off
             p.vel.x *= expf(-0.3f * dt);
             p.vel.z *= expf(-0.3f * dt);
+        } else if (p.kind == 2) {
+            p.vel.y -= kSprayGravity * dt;  // spray droplets arc back down
         } else {
             // Foam clings to the moving water surface and spreads then settles.
             WaveSample sw = SampleWaves(simd_make_float2(p.pos.x, p.pos.z), t);
@@ -1211,9 +1265,9 @@ enum {
         if (p.kind == 1) AppendWakeQuad(_particleScratch, p);   // flat foam on the water
     NSUInteger wakeVerts = _particleScratch.size();
     for (const Particle &p : _particles)
-        if (p.kind == 0) AppendBillboard(_particleScratch, p, right, up);  // smoke billboards
+        if (p.kind != 1) AppendBillboard(_particleScratch, p, right, up);  // smoke + spray
     NSUInteger totalVerts = _particleScratch.size();
-    NSUInteger smokeVerts = totalVerts - wakeVerts;
+    NSUInteger billboardVerts = totalVerts - wakeVerts;
     if (totalVerts > 0) {
         memcpy([particleBuffer contents], _particleScratch.data(),
                totalVerts * sizeof(ParticleVertex));
@@ -1315,13 +1369,13 @@ enum {
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:_buoyVertexCount];
     }
 
-    // Smoke: over everything.
-    if (smokeVerts > 0) {
+    // Smoke and bow spray: billboards over everything.
+    if (billboardVerts > 0) {
         [enc setRenderPipelineState:_particlePipeline];
         [enc setDepthStencilState:_noDepthState];
         [enc setVertexBuffer:particleBuffer offset:0 atIndex:0];
         [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
-        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:wakeVerts vertexCount:smokeVerts];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:wakeVerts vertexCount:billboardVerts];
     }
 
     [enc endEncoding];
