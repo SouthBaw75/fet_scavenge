@@ -21,8 +21,9 @@
 //   S / Down    throttle down        D / Right   rudder right
 //   Space       cut throttle         R           reset boat
 //
-// The rudder needs water flowing past it: steering barely works when you're
-// not moving, just like a real boat. Score and throttle live in the title bar.
+// The rudder only bites with water flowing forward past it: the boat won't
+// turn at a standstill or in reverse, and it's slow to build speed and slow
+// to come around, like a heavy tug. Score and throttle live in the title bar.
 
 #include "../common/app.h"
 #import <ModelIO/ModelIO.h>
@@ -55,6 +56,14 @@ static const float kBoatTiltResponse  = 1.5f;   // pitch/roll responsiveness (lo
 static const float kBoatTiltGain      = 0.45f;  // <1 keeps a bulky hull flatter than a cork
 static const float kBoatSink          = 0.25f;  // how deep the origin rides below the mean surface
 static const float kWakeBowSpread     = 0.42f;  // bow-wave arm angle: tan(half-angle) of the V
+
+// --- Handling: a heavy tug is slow to build speed and slow to turn, and the
+// rudder only bites with water flowing forward past it. ---
+static const float kBoatThrust        = 3.5f;   // engine push (lower = slower to accelerate)
+static const float kBoatDrag          = 0.5f;   // water drag (cruise speed = thrust / drag)
+static const float kBoatTurnRate      = 0.9f;   // max yaw rate, rad/s (lower = slower turns)
+static const float kBoatSteerageSpeed = 3.0f;   // forward speed for full rudder authority
+static const float kBowPlungeGain     = 0.8f;   // extra bow pitch with speed (crashing over waves)
 
 static const int kGrid = 360;        // water quads per side (wide enough that the
 static const float kSpacing = 0.5f;  // grid edges sit past the horizon haze)
@@ -960,7 +969,7 @@ enum {
 - (void)stepGame:(float)dt time:(float)t {
     float throttleInput = (_keys[kKeyW] || _keys[kKeyUp] ? 1.0f : 0.0f) -
                           (_keys[kKeyS] || _keys[kKeyDown] ? 1.0f : 0.0f);
-    _throttle = std::clamp(_throttle + throttleInput * 0.7f * dt, -0.4f, 1.0f);
+    _throttle = std::clamp(_throttle + throttleInput * 0.6f * dt, -0.4f, 1.0f);
     if (_keys[kKeySpace]) _throttle *= expf(-6.0f * dt);
     if (_keys[kKeyR]) {
         _boatPos = simd_make_float2(0, 0); _heading = 0; _speed = 0; _throttle = 0;
@@ -971,12 +980,13 @@ enum {
     float steer = (_keys[kKeyD] || _keys[kKeyRight] ? 1.0f : 0.0f) -
                   (_keys[kKeyA] || _keys[kKeyLeft] ? 1.0f : 0.0f);
 
-    // Rudder authority grows with speed; reverses when backing up.
-    float flow = std::min(fabsf(_speed) / 4.0f + 0.15f, 1.0f);
-    _heading += steer * 1.5f * flow * dt * (_speed >= 0 ? 1.0f : -1.0f);
+    // The rudder only bites with water flowing forward past it: no turning at a
+    // standstill or in reverse, and steerage ramps up with forward speed.
+    float steerage = std::clamp(_speed / kBoatSteerageSpeed, 0.0f, 1.0f);
+    _heading += steer * kBoatTurnRate * steerage * dt;
 
-    // Throttle drives, drag brakes. Tugs are torquey but slow.
-    _speed += (_throttle * 6.0f - _speed * 0.8f) * dt;
+    // Heavy hull: gentle thrust against gentle drag, so it builds speed slowly.
+    _speed += (_throttle * kBoatThrust - _speed * kBoatDrag) * dt;
 
     simd_float2 fwd = simd_make_float2(sinf(_heading), -cosf(_heading));
     _boatPos += fwd * _speed * dt;
@@ -1005,8 +1015,14 @@ enum {
     simd_float3 fwd3 = simd_make_float3(fwdXZ.x, 0, fwdXZ.y);
     simd_float3 right3 = simd_make_float3(rightXZ.x, 0, rightXZ.y);
     simd_float3 worldUp = simd_make_float3(0, 1, 0);
+    // As the boat drives forward it plows over the swells, so the bow rises on
+    // each oncoming crest and dips in the trough — a slow bounce whose depth
+    // grows with speed. The fore-aft slope already oscillates as the hull
+    // advances through the wave field; we just deepen its effect with speed.
+    float pitchGain = kBoatTiltGain +
+                      kBowPlungeGain * std::clamp(_speed / 4.0f, 0.0f, 1.0f);
     _boatUp = simd_normalize(worldUp
-              - fwd3 * (_boatTiltFwd * kBoatTiltGain)
+              - fwd3 * (_boatTiltFwd * pitchGain)
               - right3 * (_boatTiltRight * kBoatTiltGain));
     _boatRight = simd_normalize(simd_cross(fwd3, _boatUp));
     _boatBack = simd_cross(_boatRight, _boatUp);
