@@ -144,9 +144,14 @@ squads (left half = RED, right half = BLUE); right-click erases; D deploys
 default armies; R clears. Scroll to zoom; arrow keys or Q/E orbit and tilt
 the battle-cam. Melee hits knock units back with sparks and dust; catapult
 strikes shake the camera and leave scorched craters. Random terrain makes
-every field tactical: **lakes** (impassable; projectiles splash harmlessly
-into them), **forests** (slow troops — cavalry worst of all), and
-**boulders** (impassable). Press T during setup to reroll the terrain.
+every field tactical: **hills and valleys** (real displaced geometry — slower
+uphill, faster downhill, archers outrange from high ground, shots land on the
+true surface), **lakes** (impassable; projectiles splash harmlessly into
+them), **forests** (slow troops — cavalry worst of all), and **boulders**
+(impassable). Press T during setup to reroll the terrain. Every soldier also
+rolls individual **skill** at spawn — HP, damage, attack speed, and archery
+accuracy all vary man to man (veterans stand slightly taller), so even
+identical squads fight like real, uneven troops.
 
 ## Where to go from here
 

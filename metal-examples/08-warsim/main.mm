@@ -92,9 +92,26 @@ struct Uni {
     float phase;
     float2 camRight;     // world-space xz of the camera right axis
     float lakeCount;
-    float pad;
+    float hillCount;
     float4 lakes[3];     // xy center (board), z radius, w seed
+    float4 hills[8];     // xy center (board), z radius, w height (+hill/-valley)
 };
+
+// Heightfield: sum of gaussian hills/valleys, flattened around lakes so the
+// water always sits in level ground. MUST match the CPU heightAt: mirror.
+float terrainH(float2 w, constant Uni &u) {
+    float h = 0.0;
+    for (int i = 0; i < int(u.hillCount + 0.5); i++) {
+        float2 d = w - u.hills[i].xy;
+        float s = u.hills[i].z * 0.5;
+        h += u.hills[i].w * exp(-dot(d, d) / (2.0 * s * s));
+    }
+    for (int i = 0; i < int(u.lakeCount + 0.5); i++) {
+        float dl = length(w - u.lakes[i].xy);
+        h *= smoothstep(u.lakes[i].z * 0.95, u.lakes[i].z * 1.8, dl);
+    }
+    return h;
+}
 
 float hash21(float2 p) {
     p = fract(p * float2(123.34, 456.21));
@@ -129,16 +146,14 @@ struct GroundVSOut {
     float2 w;
 };
 
-constant float2 kGroundCorners[6] = {
-    float2(-160, -120), float2(300, -120), float2(300, 200),
-    float2(-160, -120), float2(300, 200), float2(-160, 200),
-};
-
+// Tessellated ground mesh: vertices carry board coords; the heightfield is
+// applied here so hills and valleys are real displaced geometry.
 vertex GroundVSOut ground_vertex(uint vid [[vertex_id]],
-                                 constant Uni &u [[buffer(0)]]) {
-    float2 b = kGroundCorners[vid];
+                                 const device packed_float2 *verts [[buffer(0)]],
+                                 constant Uni &u [[buffer(1)]]) {
+    float2 b = float2(verts[vid]);
     GroundVSOut o;
-    o.position = u.viewProj * float4(b.x, 0.0, -b.y, 1.0);
+    o.position = u.viewProj * float4(b.x, terrainH(b, u), -b.y, 1.0);
     o.w = b;
     return o;
 }
@@ -150,6 +165,17 @@ fragment float4 ground_fragment(GroundVSOut in [[stage_in]],
     float n2 = fbm(w * 0.35 + 17.0);
     float3 grass = mix(float3(0.13, 0.24, 0.08), float3(0.22, 0.34, 0.12), n1);
     grass *= 0.85 + 0.3 * n2;
+
+    // Height + slope: hilltops dry out, valleys go lush; sun-facing slopes
+    // catch light. Normal from central differences of the heightfield.
+    float hC = terrainH(w, u);
+    float hX = terrainH(w + float2(0.9, 0.0), u);
+    float hY = terrainH(w + float2(0.0, 0.9), u);
+    float3 nrm = normalize(float3(-(hX - hC) / 0.9, 1.0, -(hY - hC) / 0.9));
+    grass = mix(grass, float3(0.30, 0.29, 0.14), clamp(hC * 0.16, 0.0, 0.5));   // dry tops
+    grass = mix(grass, float3(0.08, 0.19, 0.07), clamp(-hC * 0.22, 0.0, 0.5));  // lush dips
+    float sun = dot(nrm, normalize(float3(0.45, 1.0, 0.35)));
+    grass *= 0.72 + 0.45 * clamp(sun, 0.0, 1.0);
 
     float mid = smoothstep(18.0, 4.0, abs(w.x - 70.0));
     float patches = smoothstep(0.62, 0.75, fbm(w * 0.13 + 41.0));
@@ -229,7 +255,7 @@ vertex FOut flat_vertex(uint vid [[vertex_id]],
     float cs = cos(inst.rot), sn = sin(inst.rot);
     float2 b = float2(inst.center) + float2(p.x * cs - p.y * sn, p.x * sn + p.y * cs);
     FOut o;
-    o.position = u.viewProj * float4(b.x, 0.02, -b.y, 1.0);
+    o.position = u.viewProj * float4(b.x, terrainH(b, u) + 0.05, -b.y, 1.0);
     o.lp = lp;
     o.color = float4(inst.color);
     o.params = float4(inst.params);
@@ -289,9 +315,10 @@ vertex BOut unit_vertex(uint vid [[vertex_id]],
     float2 q = lp * float2(inst.w, inst.h) * 0.5;
     float cs = cos(inst.rot), sn = sin(inst.rot);
     q = float2(q.x * cs - q.y * sn, q.x * sn + q.y * cs);
-    // Cylindrical billboard: horizontal axis follows the camera's right.
+    // Cylindrical billboard standing on the heightfield.
+    float ground = terrainH(float2(inst.px, inst.pz), u);
     float3 wp = float3(inst.px + u.camRight.x * q.x,
-                       inst.h * 0.5 + q.y + inst.yoff,
+                       ground + inst.h * 0.5 + q.y + inst.yoff,
                        -inst.pz + u.camRight.y * q.x);
     BOut o;
     o.position = u.viewProj * float4(wp, 1.0);
@@ -526,6 +553,8 @@ struct Unit {
     simd_float2 pos, vel;
     int army, type;
     float hp;
+    float skill;       // ~1.0; individual competence, rolled at spawn
+    float sizeMul;     // veterans stand a little taller
     float cooldown;
     float retarget;
     int target;
@@ -564,6 +593,7 @@ struct Lake { simd_float2 pos; float radius, seed; };
 struct Boulder { simd_float2 pos; float radius, seed; };
 struct Tree { simd_float2 pos; float size, seed; simd_float4 tint; };
 struct Grove { simd_float2 pos; float radius; };
+struct Hill { simd_float2 pos; float radius, height; };   // height < 0 = valley
 
 // --------------------------------------------------------------- Matrices ---
 
@@ -619,6 +649,9 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     std::vector<Boulder> _boulders;
     std::vector<Tree> _trees;
     std::vector<Grove> _groves;
+    std::vector<Hill> _hills;
+    id<MTLBuffer> _groundMesh;
+    NSUInteger _groundVertCount;
     std::vector<std::vector<int>> _grid;
     int _gridW, _gridH;
     float _cellSize;
@@ -715,6 +748,24 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     _gridH = (int)ceilf(kFieldH / _cellSize);
     _grid.resize((size_t)_gridW * _gridH);
 
+    // Tessellated ground mesh (board coords; the vertex shader displaces it
+    // by the heightfield, so terrain rerolls need no mesh rebuild).
+    {
+        std::vector<float> verts;
+        const float x0 = -60, x1 = 200, y0g = -45, y1g = 125, step = 3.0f;
+        for (float y = y0g; y < y1g; y += step) {
+            for (float x = x0; x < x1; x += step) {
+                float xs[6] = {x, x + step, x + step, x, x + step, x};
+                float ys[6] = {y, y, y + step, y, y + step, y + step};
+                for (int k = 0; k < 6; k++) { verts.push_back(xs[k]); verts.push_back(ys[k]); }
+            }
+        }
+        _groundVertCount = verts.size() / 2;
+        _groundMesh = [device newBufferWithBytes:verts.data()
+                                          length:verts.size() * sizeof(float)
+                                         options:MTLResourceStorageModeShared];
+    }
+
     _phase = kPhaseSetup;
     _selectedType = kInfantry;
     _winner = -1;
@@ -798,7 +849,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         return event;
     }];
 
-    printf("WAR SIM v4\n"
+    printf("WAR SIM v5\n"
            "  HUD or 1-5: Infantry / Archer / Cavalry / Berserker / Catapult\n"
            "  Click/drag: stamp squads (left half = RED, right half = BLUE)\n"
            "  Right-click erase · SPACE/FIGHT battle · R clear · D defaults\n"
@@ -825,6 +876,29 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 
 // ---------------------------------------------------------------- Terrain ---
 
+// CPU mirror of the shader's terrainH — keep in sync.
+- (float)heightAt:(simd_float2)p {
+    float h = 0;
+    for (const Hill &hl : _hills) {
+        simd_float2 d = p - hl.pos;
+        float s = hl.radius * 0.5f;
+        h += hl.height * expf(-simd_dot(d, d) / (2.0f * s * s));
+    }
+    for (const Lake &l : _lakes) {
+        float dl = simd_distance(p, l.pos);
+        float t = std::clamp((dl - l.radius * 0.95f) / (l.radius * 0.85f), 0.0f, 1.0f);
+        h *= t * t * (3.0f - 2.0f * t);
+    }
+    return h;
+}
+
+- (simd_float2)gradAt:(simd_float2)p {
+    const float e = 0.6f;
+    return simd_make_float2(
+        ([self heightAt:p + simd_make_float2(e, 0)] - [self heightAt:p - simd_make_float2(e, 0)]) / (2 * e),
+        ([self heightAt:p + simd_make_float2(0, e)] - [self heightAt:p - simd_make_float2(0, e)]) / (2 * e));
+}
+
 - (BOOL)isBlockedAt:(simd_float2)p radius:(float)r {
     for (const Lake &l : _lakes)
         if (simd_distance(p, l.pos) < l.radius * 0.92f + r) return YES;
@@ -844,8 +918,19 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     _boulders.clear();
     _trees.clear();
     _groves.clear();
+    _hills.clear();
     std::mt19937 rng(seed);
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+
+    int nHills = 4 + (int)(u01(rng) * 4.0f);            // 4-7 hills/valleys
+    for (int i = 0; i < nHills && i < 8; i++) {
+        Hill h;
+        h.pos = simd_make_float2(10.0f + 120.0f * u01(rng), 8.0f + 64.0f * u01(rng));
+        h.radius = 12.0f + 14.0f * u01(rng);
+        h.height = (u01(rng) < 0.35f) ? -(1.2f + 1.8f * u01(rng))
+                                      : (1.6f + 2.8f * u01(rng));
+        _hills.push_back(h);
+    }
 
     int nLakes = 2 + (int)(u01(rng) * 2.0f);            // 2-3
     for (int i = 0; i < nLakes; i++) {
@@ -916,7 +1001,12 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     un.pos = pos;
     un.army = army;
     un.type = type;
-    un.hp = kSpecs[type].hp;
+    // Individual skill: triangular distribution around 1.0 (0.8 .. 1.2).
+    // No two swordsmen are the same man: skill scales HP, damage, attack
+    // speed, and archer accuracy; veterans render slightly bigger.
+    un.skill = 0.8f + 0.2f * (u01(_rng) + u01(_rng));
+    un.sizeMul = 0.88f + 0.35f * (un.skill - 0.8f);
+    un.hp = kSpecs[type].hp * un.skill;
     un.cooldown = u01(_rng) * 0.5f;
     un.retarget = u01(_rng) * 0.3f;
     un.target = -1;
@@ -955,9 +1045,16 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     simd_float4 p0 = simd_mul(inv, simd_make_float4(ndc.x, ndc.y, 0.0f, 1.0f));
     simd_float4 p1 = simd_mul(inv, simd_make_float4(ndc.x, ndc.y, 1.0f, 1.0f));
     simd_float3 a = p0.xyz / p0.w, b = p1.xyz / p1.w;
-    float t = (fabsf(b.y - a.y) > 1e-6f) ? a.y / (a.y - b.y) : 0.0f;
-    simd_float3 hit = a + (b - a) * t;
-    return simd_make_float2(hit.x, -hit.z);
+    // Iterate the ray against the heightfield so painting lands on hills.
+    float h = 0;
+    simd_float2 board = simd_make_float2(0, 0);
+    for (int it = 0; it < 3; it++) {
+        float t = (fabsf(b.y - a.y) > 1e-6f) ? (a.y - h) / (a.y - b.y) : 0.0f;
+        simd_float3 hit = a + (b - a) * t;
+        board = simd_make_float2(hit.x, -hit.z);
+        h = [self heightAt:board];
+    }
+    return board;
 }
 
 - (void)paintAt:(simd_float2)board erase:(BOOL)erase {
@@ -1055,6 +1152,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 - (void)spawnPuffs:(simd_float2)pos y:(float)y kind:(int)kind count:(int)n
              speed:(float)spd size:(float)size {
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+    float ground = [self heightAt:pos];
     for (int k = 0; k < n; k++) {
         if (_puffs.size() >= (size_t)kPuffCap - 1)
             _puffs.erase(_puffs.begin(), _puffs.begin() + 200);
@@ -1062,7 +1160,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         float ang = u01(_rng) * 6.2831853f;
         float s = spd * (0.4f + u01(_rng));
         b.pos = pos;
-        b.y = y + 0.4f * u01(_rng);
+        b.y = ground + y + 0.4f * u01(_rng);   // absolute altitude
         b.vel = simd_make_float2(cosf(ang), sinf(ang)) * s;
         b.vy = (kind == kPuffSmoke || kind == kPuffFire)
                    ? 1.2f + 2.0f * u01(_rng)
@@ -1142,7 +1240,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         } else {
             b.vy -= 9.8f * dt;
         }
-        if (b.y < 0.02f) b.y = 0.02f;
+        float g = [self heightAt:b.pos];
+        if (b.y < g + 0.02f) b.y = g + 0.02f;
     }
     _puffs.erase(std::remove_if(_puffs.begin(), _puffs.end(),
                  [](const Puff &b) { return b.age >= b.life; }), _puffs.end());
@@ -1173,22 +1272,32 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         simd_float2 dir = dist > 1e-4f ? d / dist : simd_make_float2(1, 0);
         float reach = spec.reach + spec.radius + kSpecs[tgt.type].radius;
 
-        bool archerShooting = (u.type == kArcher && dist < kArcherRange && dist > 4.0f);
+        // High ground extends an archer's reach; shooting uphill shortens it.
+        float archerReach = kArcherRange;
+        if (u.type == kArcher) {
+            float hAdv = [self heightAt:u.pos] - [self heightAt:tgt.pos];
+            archerReach = std::clamp(kArcherRange + hAdv * 3.0f, 18.0f, 36.0f);
+        }
+        bool archerShooting = (u.type == kArcher && dist < archerReach && dist > 4.0f);
         bool catShooting = (u.type == kCatapult && dist < kCatMaxRange && dist > kCatMinRange);
 
         simd_float2 want = simd_make_float2(0, 0);
         if (archerShooting || catShooting) {
             if (u.cooldown <= 0) {
                 bool cat = (u.type == kCatapult);
-                u.cooldown = (cat ? kCatReload : kArcherReload) * (0.9f + 0.2f * u01(_rng));
+                u.cooldown = (cat ? kCatReload : kArcherReload)
+                             * (1.6f - 0.6f * u.skill) * (0.9f + 0.2f * u01(_rng));
                 u.attackAnim = 1.0f;
                 float flightSpeed = cat ? 16.0f : 28.0f;
                 float T = std::clamp(dist / flightSpeed, cat ? 1.1f : 0.45f, cat ? 2.6f : 1.6f);
                 simd_float2 aim = tgt.pos + tgt.vel * (T * 0.85f);
-                float scatter = cat ? dist * 0.06f : dist * 0.12f;
+                // A skilled shooter groups tighter.
+                float scatter = (cat ? dist * 0.06f : dist * 0.12f) * (2.0f - u.skill);
                 aim += simd_make_float2(u01(_rng) - 0.5f, u01(_rng) - 0.5f) * scatter;
                 Shot sh;
-                sh.pos = simd_make_float3(u.pos.x, cat ? 1.8f : 1.3f, u.pos.y);
+                sh.pos = simd_make_float3(u.pos.x,
+                                          [self heightAt:u.pos] + (cat ? 1.8f : 1.3f),
+                                          u.pos.y);
                 simd_float2 flat = (aim - u.pos) / T;
                 sh.vel = simd_make_float3(flat.x, 0.5f * 9.8f * T, flat.y);
                 sh.army = u.army;
@@ -1200,9 +1309,11 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
             want = dir * spec.speed;
         } else {
             if (u.cooldown <= 0) {
-                u.cooldown = spec.cooldown * (0.9f + 0.2f * u01(_rng));
+                // Skill: better men swing harder and faster.
+                u.cooldown = spec.cooldown * (1.6f - 0.6f * u.skill)
+                             * (0.9f + 0.2f * u01(_rng));
                 u.attackAnim = 1.0f;
-                float dmg = spec.damage;
+                float dmg = spec.damage * u.skill;
                 float knock = 2.0f;
                 if (u.type == kCavalry && simd_length(u.vel) > kChargeSpeed) {
                     dmg *= kChargeMult;
@@ -1241,6 +1352,12 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                 break;
             }
         }
+        // Slopes: trudging uphill is slow, downhill gives a push.
+        float vlen = simd_length(u.vel);
+        if (vlen > 0.2f) {
+            float slope = simd_dot([self gradAt:u.pos], u.vel / vlen);
+            terrainFactor *= std::clamp(1.0f - slope * 0.55f, 0.55f, 1.30f);
+        }
         u.pos += u.vel * dt * terrainFactor;
 
         // Lakes and boulders are impassable: slide along their edge.
@@ -1272,7 +1389,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
             [self spawnPuffs:simd_make_float2(a.pos.x, a.pos.z) y:a.pos.y
                         kind:kPuffFire count:1 speed:0.4f size:0.35f];
         }
-        if (a.pos.y <= 0.0f) {
+        if (a.pos.y <= [self heightAt:simd_make_float2(a.pos.x, a.pos.z)]) {
             a.alive = false;
             simd_float2 hit = simd_make_float2(a.pos.x, a.pos.z);
             if ([self inLake:hit]) {
@@ -1491,8 +1608,9 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         float phase;
         simd_float2 camRight;
         float lakeCount;
-        float pad;
+        float hillCount;
         simd_float4 lakes[3];
+        simd_float4 hills[8];
     } uni = {
         _viewProj,
         simd_make_float2((float)view.drawableSize.width, (float)view.drawableSize.height),
@@ -1500,12 +1618,16 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         (float)_phase,
         simd_make_float2(right.x, right.z),
         (float)std::min(_lakes.size(), (size_t)3),
-        0,
+        (float)std::min(_hills.size(), (size_t)8),
+        {},
         {},
     };
     for (size_t i = 0; i < _lakes.size() && i < 3; i++)
         uni.lakes[i] = simd_make_float4(_lakes[i].pos.x, _lakes[i].pos.y,
                                         _lakes[i].radius, _lakes[i].seed);
+    for (size_t i = 0; i < _hills.size() && i < 8; i++)
+        uni.hills[i] = simd_make_float4(_hills[i].pos.x, _hills[i].pos.y,
+                                        _hills[i].radius, _hills[i].height);
 
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
     _flatScratch.clear();
@@ -1584,7 +1706,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         // Sprite id: types 0-3 match shapes 0-3; the catapult sprite is 6.
         float sprite = (u.type == kCatapult) ? 6.0f : (float)u.type;
         _unitScratch.push_back({u.pos.x, u.pos.y, bob - sink,
-                                spec.width, spec.height, rot,
+                                spec.width * u.sizeMul, spec.height * u.sizeMul, rot,
                                 sprite, facing,
                                 c.x, c.y, c.z, 1.0f,
                                 u.attackAnim, u.seed, 0, 0});
@@ -1596,16 +1718,19 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         float sx = simd_dot(v3, right);
         float sy = simd_dot(v3, up);
         float rot = atan2f(sy, sx);
+        // Shot altitude is absolute; the vertex shader adds terrain height,
+        // so subtract it here.
+        float g = [self heightAt:simd_make_float2(a.pos.x, a.pos.z)];
         if (a.kind == 0) {
-            _unitScratch.push_back({a.pos.x, a.pos.z, a.pos.y - 0.35f,
+            _unitScratch.push_back({a.pos.x, a.pos.z, a.pos.y - g - 0.35f,
                                     0.7f, 0.7f, rot, 4, 1,
                                     0.4f, 0.3f, 0.2f, 1.0f, 0, 0, 0, 0});
         } else {
             // Flaming ball: hot additive core + halo.
-            _unitScratch.push_back({a.pos.x, a.pos.z, a.pos.y - 0.45f,
+            _unitScratch.push_back({a.pos.x, a.pos.z, a.pos.y - g - 0.45f,
                                     0.9f, 0.9f, 0, 5, 1,
                                     1.6f, 0.65f, 0.15f, 0.9f, 0.0f, 0, 0, 0});
-            _unitScratch.push_back({a.pos.x, a.pos.z, a.pos.y - 0.2f,
+            _unitScratch.push_back({a.pos.x, a.pos.z, a.pos.y - g - 0.2f,
                                     0.4f, 0.4f, 0, 5, 1,
                                     1.9f, 1.5f, 0.9f, 1.0f, 0.0f, 0, 0, 0});
         }
@@ -1633,7 +1758,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
             case kPuffSplash: r = 0.55f; g = 0.70f; bl = 0.85f; occl = 0.60f; break;
             default:          r = 0.13f; g = 0.12f; bl = 0.11f; occl = 0.75f; break;
         }
-        _unitScratch.push_back({b.pos.x, b.pos.y, b.y - size,
+        float ground = [self heightAt:b.pos];
+        _unitScratch.push_back({b.pos.x, b.pos.y, b.y - ground - size,
                                 size * 2.0f, size * 2.0f, 0, 5, 1,
                                 r, g, bl, f, occl, 0, 0, 0});
         if ((int)_unitScratch.size() >= kPuffCap) break;
@@ -1656,9 +1782,11 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 
     [enc setRenderPipelineState:_groundPipeline];
     [enc setDepthStencilState:_depthWrite];
-    [enc setVertexBytes:&uni length:sizeof(uni) atIndex:0];
+    [enc setVertexBuffer:_groundMesh offset:0 atIndex:0];
+    [enc setVertexBytes:&uni length:sizeof(uni) atIndex:1];
     [enc setFragmentBytes:&uni length:sizeof(uni) atIndex:0];
-    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+            vertexCount:_groundVertCount];
 
     if (flatCount) {
         [enc setRenderPipelineState:_flatPipeline];
@@ -1715,7 +1843,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         state = _winner >= 0 ? (_winner == 0 ? @"RED WINS" : @"BLUE WINS")
                              : @"MUTUAL ANNIHILATION";
     view.window.title = [NSString stringWithFormat:
-        @"08 — WAR SIM v4 ▸ RED %d vs BLUE %d ▸ %@ ▸ %.0f fps",
+        @"08 — WAR SIM v5 ▸ RED %d vs BLUE %d ▸ %@ ▸ %.0f fps",
         alive[0], alive[1], state, _smoothedFPS];
 }
 
