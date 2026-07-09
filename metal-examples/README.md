@@ -119,12 +119,14 @@ buoy and it's collected and respawns somewhere new.
 ### 07 — NET BREACH (cyberpunk tower defense — in progress)
 A neon tower-defense game built to the spec in `07-netbreach/DESIGN.md`: you're
 a netrunner defending your Core from waves of intrusion ICE crawling a
-circuit-board conduit. **Current build (step 1):** the procedural circuit
-board, the animated data conduit, an HDR scene with a full bloom post-process
-chain (bright-pass → separable blur → composite with scanlines, chromatic
-aberration, vignette), Bits and Daemons marching the path, Core integrity with
-breach bursts, and a debug click-to-zap kill. Towers, the Spark-Node economy,
-and real waves come next.
+circuit-board conduit. **Current build (step 2):** TRON-styled palette
+(cyan/white defenses vs orange intruders on a near-black grid), HDR + bloom
+post chain, and real gameplay — three placeable towers (Sentry tracers, Arc
+Coil chain lightning, Cryo slow aura) with linear tier upgrades, the
+Spark-Node economy (kills pay; build, upgrade, sell), enemy HP bars, and Core
+integrity. Keys 1/2/3 pick a tower; left-click builds or upgrades;
+right-click sells. The 10-wave table with Golem/Wisp and the Black ICE boss
+land next.
 
 ## Where to go from here
 
