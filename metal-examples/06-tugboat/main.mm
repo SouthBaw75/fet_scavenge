@@ -1184,12 +1184,14 @@ enum {
         // Right at the cutwater — the same point the bow-wake V springs from.
         simd_float3 local = simd_make_float3(pm(_rng) * 0.12f, 0.05f, bowTipZ + pm(_rng) * 0.1f);
         p.pos = [self localToWorld:local];
-        // Small and low when slow; tall and wide when fast.
-        float side = pm(_rng);
-        p.vel = simd_make_float3(0, 1.5f + 3.5f * sf + 1.2f * u01(_rng), 0)          // up
-              + simd_make_float3(rightXZ.x, 0, rightXZ.y) * (side * (0.5f + 1.8f * sf))  // out
-              + simd_make_float3(fwdXZ.x, 0, fwdXZ.y) * (0.3f + speed * 0.25f)        // forward
-              + simd_make_float3(pm(_rng), 0, pm(_rng)) * 0.4f;
+        // Sheets peel off the cutwater and fan outward-and-aft along the same V
+        // as the bow wake — flying low over the water, not up over the bow.
+        float side = (u01(_rng) < 0.5f) ? -1.0f : 1.0f;
+        simd_float2 arm = simd_normalize(-fwdXZ + side * rightXZ * (kWakeBowSpread + 0.25f));
+        float outSpeed = 1.5f + speed * 0.7f;   // shoots further out the faster you go
+        p.vel = simd_make_float3(arm.x, 0, arm.y) * outSpeed          // out and aft along the V
+              + simd_make_float3(0, 0.8f + 1.6f * sf, 0)              // modest rise; gravity arcs it down
+              + simd_make_float3(pm(_rng), 0.3f * u01(_rng), pm(_rng)) * 0.5f;
         p.age = 0;
         p.life = 0.6f + u01(_rng) * 0.7f;
         p.size0 = 0.14f + 0.16f * sf;                        // starts small
