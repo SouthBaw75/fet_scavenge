@@ -61,8 +61,9 @@ static const float kWakeBowSpread     = 0.42f;  // bow-wave arm angle: tan(half-
 // rudder only bites with water flowing forward past it. ---
 static const float kBoatThrust        = 3.5f;   // engine push (lower = slower to accelerate)
 static const float kBoatDrag          = 0.33f;  // water drag (cruise speed = thrust / drag ~ 10.6 m/s)
-static const float kBoatTurnRate      = 0.9f;   // max yaw rate, rad/s (lower = slower turns)
-static const float kBoatSteerageSpeed = 3.0f;   // forward speed for full rudder authority
+static const float kBoatTurnRate      = 0.9f;   // base yaw rate at low speed, rad/s
+static const float kBoatSteerageSpeed = 1.5f;   // forward speed to gain steerage (no turn below way)
+static const float kTurnWiden         = 0.16f;  // yaw-rate falloff with speed -> wider radius when fast
 static const float kBowPlungeGain     = 1.1f;   // extra bow pitch with speed (crashing over waves)
 static const float kBoatFastSpeed     = 8.5f;   // speed at which wake/spray/bounce reach full strength
 
@@ -988,10 +989,14 @@ enum {
     float steer = (_keys[kKeyD] || _keys[kKeyRight] ? 1.0f : 0.0f) -
                   (_keys[kKeyA] || _keys[kKeyLeft] ? 1.0f : 0.0f);
 
-    // The rudder only bites with water flowing forward past it: no turning at a
-    // standstill or in reverse, and steerage ramps up with forward speed.
-    float steerage = std::clamp(_speed / kBoatSteerageSpeed, 0.0f, 1.0f);
-    _heading += steer * kBoatTurnRate * steerage * dt;
+    // The rudder only bites with water flowing forward past it — no turning at
+    // a standstill or in reverse. The yaw rate falls off as speed rises, so the
+    // turn RADIUS widens with speed: tight, nimble turns when slow; long sweeping
+    // arcs at cruise (radius = speed / yaw-rate).
+    float fwdSpeed = std::max(_speed, 0.0f);
+    float steerage = std::clamp(fwdSpeed / kBoatSteerageSpeed, 0.0f, 1.0f);
+    float turnRate = kBoatTurnRate * steerage / (1.0f + fwdSpeed * kTurnWiden);
+    _heading += steer * turnRate * dt;
 
     // Heavy hull: gentle thrust against gentle drag, so it builds speed slowly.
     _speed += (_throttle * kBoatThrust - _speed * kBoatDrag) * dt;
