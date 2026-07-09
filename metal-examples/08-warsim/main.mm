@@ -355,6 +355,9 @@ fragment float4 unit_fragment(BOut in [[stage_in]],
         if (bit == 0u) discard_fragment();
         return float4(in.color.rgb, in.color.a);
     }
+    if (shape == 13) {                    // solid rect (score bar segments)
+        return float4(in.color.rgb * in.color.a, in.color.a);
+    }
 
     if (shape == 4) {                     // arrow
         float sh = sdSeg(p, float2(-0.9, 0.0), float2(0.7, 0.0));
@@ -560,7 +563,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     std::mt19937 _rng;
 
     // Camera
-    float _camYaw, _camPitch, _camZoom, _shake;
+    float _camYaw, _camPitch, _camZoom, _camZoomTarget, _shake;
     simd_float4x4 _viewProj;
     simd_float2 _camRightBoard;
     bool _haveVP;
@@ -654,6 +657,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     _camYaw = 0;
     _camPitch = 47.0f * (float)M_PI / 180.0f;
     _camZoom = 1.0f;
+    _camZoomTarget = 1.0f;
     _shake = 0;
     _haveVP = false;
     _lastPaint = simd_make_float2(-1000, -1000);
@@ -676,11 +680,22 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         if (c == 125) { weakSelf->_camPitch = std::max(weakSelf->_camPitch - 0.07f, 0.45f); return nil; }
         return event;
     }];
+    // Trackpad pinch = the natural MacBook zoom gesture.
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMagnify
+                                          handler:^NSEvent *(NSEvent *event) {
+        weakSelf->_camZoomTarget = std::clamp(
+            weakSelf->_camZoomTarget / (1.0f + (float)event.magnification * 1.6f),
+            0.22f, 1.75f);
+        return event;
+    }];
+    // Two-finger scroll also zooms; precise (trackpad) deltas are gentler
+    // than clicky mouse-wheel lines. The camera eases toward the target.
     [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel
                                           handler:^NSEvent *(NSEvent *event) {
-        weakSelf->_camZoom = std::clamp(
-            weakSelf->_camZoom * expf((float)event.scrollingDeltaY * -0.004f),
-            0.30f, 1.75f);
+        float k = event.hasPreciseScrollingDeltas ? -0.0016f : -0.030f;
+        weakSelf->_camZoomTarget = std::clamp(
+            weakSelf->_camZoomTarget * expf((float)event.scrollingDeltaY * k),
+            0.22f, 1.75f);
         return event;
     }];
     [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown |
@@ -713,11 +728,11 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         return event;
     }];
 
-    printf("WAR SIM v2\n"
+    printf("WAR SIM v3  (if this line doesn't appear, you're running a stale build)\n"
            "  HUD or 1-5: Infantry / Archer / Cavalry / Berserker / Catapult\n"
            "  Click/drag: stamp squads (left half = RED, right half = BLUE)\n"
            "  Right-click erase · SPACE/FIGHT battle · R clear · D defaults\n"
-           "  Scroll zoom · Arrows or Q/E orbit · Up/Down tilt\n");
+           "  Pinch or scroll: zoom · Arrows or Q/E: orbit · Up/Down: tilt\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1160,9 +1175,10 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                  seed:0 facing:1];
         // The unit's own sprite as the icon (neutral grey army color).
         float iconScale = (i == kCavalry || i == kCatapult) ? 0.62f : 0.72f;
+        float iconShape = (i == kCatapult) ? 6.0f : (float)i;
         [self pushHud:cx cy:cy hw:hw * iconScale hh:hh * iconScale
-                shape:(float)i color:simd_make_float4(0.75f, 0.72f, 0.68f, 1)
-                flash:(i == kCatapult) ? 0.0f : 0.0f seed:0 facing:1];
+                shape:iconShape color:simd_make_float4(0.75f, 0.72f, 0.68f, 1)
+                flash:0 seed:0 facing:1];
     }
     // FIGHT / rematch button.
     float fx = x0 + 5 * (btn + gap) + 24 - gap;
@@ -1177,13 +1193,21 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
             color:simd_make_float4(0.55f, 0.95f, 0.45f, battle ? 0.3f : 1.0f)
             flash:0 seed:0 facing:1];
 
-    // Army counters, top corners, color-coded digit strips.
-    auto pushNumber = [&](int value, float xRight, float y, simd_float4 col, bool leftAlign) {
+    // --- Live scoreboard, top center: RED count | ratio bar | BLUE count.
+    const float sbW = 400, sbH = 78;
+    float sbx = (bw - sbW) * 0.5f, sby = bh - sbH - 10;
+    {   // backing panel
+        float cx, cy, hw, hh;
+        toNDC(sbx, sby, sbW, sbH, &cx, &cy, &hw, &hh);
+        [self pushHud:cx cy:cy hw:hw hh:hh shape:10
+                color:simd_make_float4(1, 1, 1, 0.9f) flash:0 seed:0 facing:1];
+    }
+    auto pushNumber = [&](int value, float xAnchor, float y, simd_float4 col, bool leftAlign) {
         char buf[8];
         snprintf(buf, sizeof(buf), "%d", value);
         int n = (int)strlen(buf);
-        const float dw = 18, dh = 26, dgap = 4;
-        float x = leftAlign ? xRight : xRight - n * (dw + dgap);
+        const float dw = 22, dh = 32, dgap = 5;
+        float x = leftAlign ? xAnchor : xAnchor - n * (dw + dgap);
         for (int i = 0; i < n; i++) {
             float ccx, ccy, chw, chh;
             toNDC(x + i * (dw + dgap), y, dw, dh, &ccx, &ccy, &chw, &chh);
@@ -1191,8 +1215,36 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                     flash:0 seed:(float)(buf[i] - '0') facing:1];
         }
     };
-    pushNumber(aliveRed, 24, bh - 46, kArmyColor[0] * 1.1f, true);
-    pushNumber(aliveBlue, bw - 24, bh - 46, kArmyColor[1] * 1.3f, false);
+    float digitsY = sby + sbH - 44;
+    pushNumber(aliveRed, sbx + sbW * 0.5f - 36, digitsY, kArmyColor[0] * 1.25f, false);
+    pushNumber(aliveBlue, sbx + sbW * 0.5f + 36, digitsY, kArmyColor[1] * 1.45f, true);
+    {   // center divider dot
+        float cx, cy, hw, hh;
+        toNDC(sbx + sbW * 0.5f - 3, digitsY + 12, 6, 6, &cx, &cy, &hw, &hh);
+        [self pushHud:cx cy:cy hw:hw hh:hh shape:13
+                color:simd_make_float4(0.8f, 0.8f, 0.8f, 0.9f) flash:0 seed:0 facing:1];
+    }
+    {   // live ratio bar: red share vs blue share of surviving troops
+        int total = std::max(aliveRed + aliveBlue, 1);
+        float barW = sbW - 48, barH = 10;
+        float bx = sbx + 24, by = sby + 12;
+        float redW = barW * (float)aliveRed / (float)total;
+        float cx, cy, hw, hh;
+        if (redW > 1) {
+            toNDC(bx, by, redW, barH, &cx, &cy, &hw, &hh);
+            [self pushHud:cx cy:cy hw:hw hh:hh shape:13
+                    color:simd_make_float4(kArmyColor[0].x, kArmyColor[0].y,
+                                           kArmyColor[0].z, 0.95f)
+                    flash:0 seed:0 facing:1];
+        }
+        if (barW - redW > 1) {
+            toNDC(bx + redW, by, barW - redW, barH, &cx, &cy, &hw, &hh);
+            [self pushHud:cx cy:cy hw:hw hh:hh shape:13
+                    color:simd_make_float4(kArmyColor[1].x, kArmyColor[1].y,
+                                           kArmyColor[1].z, 0.95f)
+                    flash:0 seed:0 facing:1];
+        }
+    }
 }
 
 // ---------------------------------------------------------------- Render ---
@@ -1215,7 +1267,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         _simAccum -= kStep;
     }
 
-    // Orbit battle-cam with zoom and shake.
+    // Orbit battle-cam with eased zoom and shake.
+    _camZoom += (_camZoomTarget - _camZoom) * std::min(1.0f, dtRaw * 10.0f);
     float aspect = (float)(view.drawableSize.width / view.drawableSize.height);
     float fovy = 33.0f * (float)M_PI / 180.0f;
     float tanH = tanf(fovy * 0.5f);
@@ -1313,9 +1366,11 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
             facing = simd_dot(simd_make_float2(u.army == 0 ? 1.0f : -1.0f, 0),
                               _camRightBoard) >= 0 ? 1.0f : -1.0f;
         simd_float4 c = kArmyColor[u.army];
+        // Sprite id: types 0-3 match shapes 0-3; the catapult sprite is 6.
+        float sprite = (u.type == kCatapult) ? 6.0f : (float)u.type;
         _unitScratch.push_back({u.pos.x, u.pos.y, bob - sink,
                                 spec.width, spec.height, rot,
-                                (float)u.type, facing,
+                                sprite, facing,
                                 c.x, c.y, c.z, 1.0f,
                                 u.attackAnim, u.seed, 0, 0});
         if ((int)_unitScratch.size() >= kUnitCap) break;
