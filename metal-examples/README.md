@@ -116,6 +116,16 @@ Controls:
 Score and current throttle show in the window title. Get within range of a
 buoy and it's collected and respawns somewhere new.
 
+### 07 — NET BREACH (cyberpunk tower defense — in progress)
+A neon tower-defense game built to the spec in `07-netbreach/DESIGN.md`: you're
+a netrunner defending your Core from waves of intrusion ICE crawling a
+circuit-board conduit. **Current build (step 1):** the procedural circuit
+board, the animated data conduit, an HDR scene with a full bloom post-process
+chain (bright-pass → separable blur → composite with scanlines, chromatic
+aberration, vignette), Bits and Daemons marching the path, Core integrity with
+breach bursts, and a debug click-to-zap kill. Towers, the Spark-Node economy,
+and real waves come next.
+
 ## Where to go from here
 
 - **Textures & samplers** — `MTLTexture`, `MTKTextureLoader`
