@@ -1499,7 +1499,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         state = _winner >= 0 ? (_winner == 0 ? @"RED WINS" : @"BLUE WINS")
                              : @"MUTUAL ANNIHILATION";
     view.window.title = [NSString stringWithFormat:
-        @"08 — WAR SIM ▸ RED %d vs BLUE %d ▸ %@ ▸ %.0f fps",
+        @"08 — WAR SIM v3 ▸ RED %d vs BLUE %d ▸ %@ ▸ %.0f fps",
         alive[0], alive[1], state, _smoothedFPS];
 }
 
