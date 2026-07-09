@@ -302,30 +302,30 @@ static void AddBox(std::vector<SolidVertex> &verts, simd_float3 center,
 // Local convention: forward = -z, up = +y. Origin at the waterline.
 static std::vector<SolidVertex> MakeTugboat() {
     std::vector<SolidVertex> v;
-    const simd_float3 red = {0.75f, 0.15f, 0.12f};
-    const simd_float3 wood = {0.55f, 0.38f, 0.22f};
-    const simd_float3 white = {0.92f, 0.92f, 0.95f};
-    const simd_float3 dark = {0.20f, 0.20f, 0.22f};
-    const simd_float3 black = {0.12f, 0.12f, 0.14f};
-    AddBox(v, {0, 0.45f,  0.1f}, {2.2f, 0.9f, 5.6f}, red);   // hull
-    AddBox(v, {0, 0.45f, -3.1f}, {1.4f, 0.9f, 0.8f}, red);   // bow
-    AddBox(v, {0, 0.95f,  0.1f}, {2.0f, 0.12f, 5.2f}, wood); // deck
-    AddBox(v, {0, 1.55f,  0.8f}, {1.5f, 1.1f, 1.8f}, white); // cabin
-    AddBox(v, {0, 2.15f,  0.8f}, {1.7f, 0.12f, 2.0f}, dark); // roof
-    AddBox(v, {0, 2.00f,  2.1f}, {0.6f, 1.4f, 0.6f}, black); // funnel
-    AddBox(v, {0, 2.75f,  2.1f}, {0.64f, 0.3f, 0.64f}, red); // funnel stripe
+    const simd_float3 red = simd_make_float3(0.75f, 0.15f, 0.12f);
+    const simd_float3 wood = simd_make_float3(0.55f, 0.38f, 0.22f);
+    const simd_float3 white = simd_make_float3(0.92f, 0.92f, 0.95f);
+    const simd_float3 dark = simd_make_float3(0.20f, 0.20f, 0.22f);
+    const simd_float3 black = simd_make_float3(0.12f, 0.12f, 0.14f);
+    AddBox(v, simd_make_float3(0, 0.45f,  0.1f), simd_make_float3(2.2f, 0.9f, 5.6f), red);   // hull
+    AddBox(v, simd_make_float3(0, 0.45f, -3.1f), simd_make_float3(1.4f, 0.9f, 0.8f), red);   // bow
+    AddBox(v, simd_make_float3(0, 0.95f,  0.1f), simd_make_float3(2.0f, 0.12f, 5.2f), wood); // deck
+    AddBox(v, simd_make_float3(0, 1.55f,  0.8f), simd_make_float3(1.5f, 1.1f, 1.8f), white); // cabin
+    AddBox(v, simd_make_float3(0, 2.15f,  0.8f), simd_make_float3(1.7f, 0.12f, 2.0f), dark); // roof
+    AddBox(v, simd_make_float3(0, 2.00f,  2.1f), simd_make_float3(0.6f, 1.4f, 0.6f), black); // funnel
+    AddBox(v, simd_make_float3(0, 2.75f,  2.1f), simd_make_float3(0.64f, 0.3f, 0.64f), red); // funnel stripe
     return v;
 }
 
 static std::vector<SolidVertex> MakeBuoy() {
     std::vector<SolidVertex> v;
-    const simd_float3 orange = {1.0f, 0.45f, 0.05f};
-    const simd_float3 white = {0.95f, 0.95f, 0.95f};
-    const simd_float3 light = {1.0f, 0.9f, 0.3f};
-    AddBox(v, {0, 0.25f, 0}, {1.0f, 0.5f, 1.0f}, orange);
-    AddBox(v, {0, 0.70f, 0}, {0.55f, 0.5f, 0.55f}, orange);
-    AddBox(v, {0, 1.15f, 0}, {0.30f, 0.5f, 0.30f}, white);
-    AddBox(v, {0, 1.50f, 0}, {0.18f, 0.2f, 0.18f}, light);
+    const simd_float3 orange = simd_make_float3(1.0f, 0.45f, 0.05f);
+    const simd_float3 white = simd_make_float3(0.95f, 0.95f, 0.95f);
+    const simd_float3 light = simd_make_float3(1.0f, 0.9f, 0.3f);
+    AddBox(v, simd_make_float3(0, 0.25f, 0), simd_make_float3(1.0f, 0.5f, 1.0f), orange);
+    AddBox(v, simd_make_float3(0, 0.70f, 0), simd_make_float3(0.55f, 0.5f, 0.55f), orange);
+    AddBox(v, simd_make_float3(0, 1.15f, 0), simd_make_float3(0.30f, 0.5f, 0.30f), white);
+    AddBox(v, simd_make_float3(0, 1.50f, 0), simd_make_float3(0.18f, 0.2f, 0.18f), light);
     return v;
 }
 
@@ -479,7 +479,7 @@ enum {
                           (_keys[kKeyS] || _keys[kKeyDown] ? 1.0f : 0.0f);
     _throttle = std::clamp(_throttle + throttleInput * 0.7f * dt, -0.4f, 1.0f);
     if (_keys[kKeySpace]) _throttle *= expf(-6.0f * dt);
-    if (_keys[kKeyR]) { _boatPos = {0, 0}; _heading = 0; _speed = 0; _throttle = 0; }
+    if (_keys[kKeyR]) { _boatPos = simd_make_float2(0, 0); _heading = 0; _speed = 0; _throttle = 0; }
 
     float steer = (_keys[kKeyD] || _keys[kKeyRight] ? 1.0f : 0.0f) -
                   (_keys[kKeyA] || _keys[kKeyLeft] ? 1.0f : 0.0f);
