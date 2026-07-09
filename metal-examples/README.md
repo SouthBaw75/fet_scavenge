@@ -137,8 +137,13 @@ Cavalry (charge bonus), Berserkers (glass cannons) — every character drawn
 procedurally as SDF shapes on alpha-tested billboards (depth-sorted for free,
 no art assets). Fixed 60 Hz sim with spatial-hash targeting and separation,
 blood puffs, persistent ground splats and corpses, victory hops for the
-winners. Keys 1–4 pick a unit; click/drag stamps squads (left half = RED,
-right half = BLUE); right-click erases; D deploys default armies; R clears.
+winners. Pick units from the on-screen HUD (or keys 1–5) — including the
+**Catapult**, which lobs flaming balls that explode on impact and level
+everything in the blast radius, friendly fire included. Click/drag stamps
+squads (left half = RED, right half = BLUE); right-click erases; D deploys
+default armies; R clears. Scroll to zoom; arrow keys or Q/E orbit and tilt
+the battle-cam. Melee hits knock units back with sparks and dust; catapult
+strikes shake the camera and leave scorched craters.
 
 ## Where to go from here
 

@@ -1,25 +1,27 @@
-// 08 — WAR SIM (TABS-style battle simulator, v1)
+// 08 — WAR SIM (TABS-style battle simulator, v2)
 //
-// Paint two armies on a battlefield, hit SPACE, and watch them clash until
+// Paint two armies on a battlefield, hit FIGHT, and watch them clash until
 // one side is annihilated. Thousands of little procedural soldiers — no art
-// assets, every character is SDF shapes on an instanced billboard.
+// assets; every character is SDF shapes on an instanced billboard.
 //
-//   * Four unit types with distinct silhouettes and combat behavior:
+//   * Five unit types:
 //       1 Infantry   sword & shield line troops
 //       2 Archer     ballistic arrow volleys, weak up close
 //       3 Cavalry    fast; heavy bonus damage on the charge
 //       4 Berserker  huge damage, no armor
-//   * Setup phase: pick a type (1-4), click/drag to stamp squads — LEFT half
-//     of the field paints RED, RIGHT half paints BLUE. Right-click erases.
-//   * SPACE starts the battle. R resets to an empty field. D re-deploys the
-//     default armies.
-//   * Sim: fixed 60 Hz, spatial-hash targeting and separation, melee with
-//     cooldowns, arrows on true ballistic arcs, charge bonuses, blood,
-//     corpses and ground splats. Last army standing wins.
+//       5 Catapult   lobs flaming balls that EXPLODE on impact
+//   * Real HUD: clickable unit buttons (icons are the actual sprites), a
+//     FIGHT/rematch button, and live army counters (procedural digit font).
+//   * Camera: scroll wheel zooms, LEFT/RIGHT arrows (or Q/E) orbit the
+//     field, UP/DOWN tilt. Painting works from any angle.
+//   * Juice: knockback, impact sparks, battle dust, camera shake and
+//     scorched craters on catapult hits.
 //
-// Rendering: tilted perspective battle-cam onto a ground plane; units are
-// alpha-tested camera-facing billboards (depth-correct, no sorting); shadows,
-// splats and corpses are flat decals; blood is soft particles.
+// Controls:
+//   1-5 or click HUD   select unit type
+//   Click/drag         stamp a squad (left half = RED, right half = BLUE)
+//   Right-click        erase   SPACE/FIGHT: battle   R: clear   D: defaults
+//   Scroll             zoom    Arrows / Q,E: orbit + tilt
 
 #include "../common/app.h"
 #include <simd/simd.h>
@@ -32,38 +34,48 @@
 
 // ---------------------------------------------------------------- Tuning ---
 
-static const float kFieldW = 140.0f;   // meters
+static const float kFieldW = 140.0f;
 static const float kFieldH = 80.0f;
-static const float kNoMansMin = 58.0f; // deploy zones end here...
-static const float kNoMansMax = 82.0f; // ...and resume here
+static const float kNoMansMin = 58.0f;
+static const float kNoMansMax = 82.0f;
 static const int kMaxUnits = 3000;
 static const int kMaxBillboards = 8192;
 static const int kMaxFlats = 12288;
 static const int kMaxInFlight = 3;
+static const int kUnitCap = 5800;        // billboard budget for units+arrows
+static const int kPuffCap = 2000;        // particle budget (reserved region)
 
-enum { kInfantry = 0, kArcher = 1, kCavalry = 2, kBerserker = 3, kUnitTypeCount = 4 };
+enum { kInfantry = 0, kArcher = 1, kCavalry = 2, kBerserker = 3, kCatapult = 4,
+       kUnitTypeCount = 5 };
 enum { kPhaseSetup = 0, kPhaseBattle = 1, kPhaseDone = 2 };
+enum { kPuffBlood = 0, kPuffDust = 1, kPuffSpark = 2, kPuffFire = 3, kPuffSmoke = 4 };
 
 struct UnitSpec {
     const char *name;
     float hp, damage, reach, speed, radius, cooldown;
-    float width, height;      // billboard size (m)
+    float width, height;
 };
 static const UnitSpec kSpecs[kUnitTypeCount] = {
     {"Infantry",  100, 22, 0.9f, 2.6f, 0.35f, 1.00f, 1.15f, 1.45f},
     {"Archer",     55,  8, 0.8f, 2.8f, 0.30f, 1.20f, 1.00f, 1.40f},
     {"Cavalry",   160, 30, 1.2f, 7.5f, 0.55f, 1.10f, 2.10f, 1.90f},
     {"Berserker", 140, 45, 1.0f, 3.4f, 0.40f, 0.90f, 1.30f, 1.55f},
+    {"Catapult",  220,  6, 1.4f, 0.9f, 1.00f, 1.30f, 2.60f, 2.00f},
 };
 static const float kArcherRange = 26.0f;
 static const float kArcherReload = 2.4f;
 static const float kArrowDamage = 28.0f;
-static const float kChargeSpeed = 5.5f;   // cavalry above this speed => charge hit
+static const float kChargeSpeed = 5.5f;
 static const float kChargeMult = 3.0f;
+static const float kCatMinRange = 14.0f;
+static const float kCatMaxRange = 70.0f;
+static const float kCatReload = 6.0f;
+static const float kBoomRadius = 4.5f;
+static const float kBoomKill = 1.9f;      // instakill radius
 
 static const simd_float4 kArmyColor[2] = {
-    {0.80f, 0.16f, 0.12f, 1.0f},   // RED
-    {0.15f, 0.35f, 0.85f, 1.0f},   // BLUE
+    {0.80f, 0.16f, 0.12f, 1.0f},
+    {0.15f, 0.35f, 0.85f, 1.0f},
 };
 
 // ---------------------------------------------------------------- Shaders ---
@@ -76,7 +88,9 @@ struct Uni {
     float4x4 viewProj;
     float2 resolution;
     float time;
-    float phase;      // 0 setup, 1 battle, 2 done
+    float phase;
+    float2 camRight;     // world-space xz of the camera right axis
+    float2 pad2;
 };
 
 float hash21(float2 p) {
@@ -100,14 +114,16 @@ float fbm(float2 p) {
 
 float3 gammaOut(float3 c) { return pow(max(c, 0.0), float3(0.4545)); }
 
-// ---------------- Ground ----------------
-// One big quad; fragment paints grass, the worn battle strip, and (during
-// setup) the two deploy zones. Board coords: x 0..140, z 0..80 -> world
-// (x, 0, -z).
+float sdSeg(float2 p, float2 a, float2 b) {
+    float2 ab = b - a;
+    float t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
+    return length(p - a - ab * t);
+}
 
+// ---------------- Ground ----------------
 struct GroundVSOut {
     float4 position [[position]];
-    float2 w;          // board coords (x, z)
+    float2 w;
 };
 
 constant float2 kGroundCorners[6] = {
@@ -127,26 +143,21 @@ vertex GroundVSOut ground_vertex(uint vid [[vertex_id]],
 fragment float4 ground_fragment(GroundVSOut in [[stage_in]],
                                 constant Uni &u [[buffer(0)]]) {
     float2 w = in.w;
-
-    // Grass with large + small mottling.
     float n1 = fbm(w * 0.05);
     float n2 = fbm(w * 0.35 + 17.0);
     float3 grass = mix(float3(0.13, 0.24, 0.08), float3(0.22, 0.34, 0.12), n1);
     grass *= 0.85 + 0.3 * n2;
 
-    // Worn dirt strip where the armies meet, plus scattered bare patches.
     float mid = smoothstep(18.0, 4.0, abs(w.x - 70.0));
     float patches = smoothstep(0.62, 0.75, fbm(w * 0.13 + 41.0));
     float dirtAmt = max(mid * 0.7, patches * 0.5);
     float3 dirt = float3(0.30, 0.24, 0.15) * (0.8 + 0.3 * n2);
     float3 col = mix(grass, dirt, dirtAmt);
 
-    // Field boundary: fade to darker wilds outside.
     float2 bd = max(float2(0.0, 0.0) - w, w - float2(140.0, 80.0));
     float outside = max(max(bd.x, bd.y), 0.0);
     col *= 1.0 / (1.0 + outside * 0.12);
 
-    // Deploy zones during setup: faint team tint + boundary lines.
     if (u.phase < 0.5) {
         float inField = step(0.0, w.y) * step(w.y, 80.0);
         float red = step(0.0, w.x) * step(w.x, 58.0);
@@ -157,22 +168,18 @@ fragment float4 ground_fragment(GroundVSOut in [[stage_in]],
         float lineB = smoothstep(0.5, 0.1, abs(w.x - 82.0));
         col += float3(0.25) * (lineA + lineB) * inField;
     }
-
-    // Simple sun falloff + vignette toward far edges.
     col *= 0.9 + 0.2 * smoothstep(120.0, 0.0, length(w - float2(70.0, 30.0)));
-
     return float4(gammaOut(col), 1.0);
 }
 
-// ---------------- Flat decals (shadows, splats, corpses) ----------------
-
+// ---------------- Flat decals ----------------
 struct FInst {
-    packed_float2 center;    // board coords
+    packed_float2 center;
     packed_float2 half2;
     float rot;
-    float shape;             // 0 soft ellipse, 1 blood splat, 2 corpse
+    float shape;             // 0 shadow, 1 splat, 2 corpse
     packed_float4 color;
-    packed_float4 params;    // x seed
+    packed_float4 params;
 };
 
 struct FOut {
@@ -210,13 +217,13 @@ fragment float4 flat_fragment(FOut in [[stage_in]]) {
     float2 p = in.lp;
     float a = 0.0;
     int shape = int(in.shape + 0.5);
-    if (shape == 0) {                      // soft ellipse (contact shadow)
+    if (shape == 0) {
         a = smoothstep(1.0, 0.35, length(p));
-    } else if (shape == 1) {               // blood splat: noisy blob
+    } else if (shape == 1) {
         float r = length(p);
         float n = fbm(p * 2.5 + in.params.x * 19.0);
         a = smoothstep(0.9, 0.25, r + (n - 0.5) * 0.8);
-    } else if (shape == 2) {               // corpse: lumpy lozenge
+    } else if (shape == 2) {
         float2 q = float2(p.x, p.y * 2.2);
         float n = fbm(p * 3.0 + in.params.x * 7.0);
         a = smoothstep(1.0, 0.6, length(q) + (n - 0.5) * 0.35);
@@ -225,19 +232,16 @@ fragment float4 flat_fragment(FOut in [[stage_in]]) {
     return float4(gammaOut(in.color.rgb) * alpha, alpha);
 }
 
-// ---------------- Unit billboards ----------------
-// Camera-facing quads standing on the ground. Alpha-tested (discard) so the
-// depth buffer sorts them — no CPU sorting needed.
-
+// ---------------- Billboards (units, arrows, particles) + HUD ----------------
 struct BInst {
-    float px, pz;        // feet position (board coords)
-    float yoff;          // bob / sink
-    float w, h;          // billboard size
-    float rot;           // in-plane rotation (death fall)
-    float shape;         // unit type, 4 = arrow, 5 = blood puff
-    float facing;        // +1 faces +x, -1 faces -x
-    packed_float4 color; // army color
-    float flash;         // attack flash 0..1
+    float px, pz;
+    float yoff;
+    float w, h;
+    float rot;
+    float shape;
+    float facing;
+    packed_float4 color;
+    float flash;
     float seed;
     float pad0, pad1;
 };
@@ -261,9 +265,10 @@ vertex BOut unit_vertex(uint vid [[vertex_id]],
     float2 q = lp * float2(inst.w, inst.h) * 0.5;
     float cs = cos(inst.rot), sn = sin(inst.rot);
     q = float2(q.x * cs - q.y * sn, q.x * sn + q.y * cs);
-    float3 wp = float3(inst.px + q.x,
+    // Cylindrical billboard: horizontal axis follows the camera's right.
+    float3 wp = float3(inst.px + u.camRight.x * q.x,
                        inst.h * 0.5 + q.y + inst.yoff,
-                       -inst.pz);
+                       -inst.pz + u.camRight.y * q.x);
     BOut o;
     o.position = u.viewProj * float4(wp, 1.0);
     o.lp = lp;
@@ -275,116 +280,173 @@ vertex BOut unit_vertex(uint vid [[vertex_id]],
     return o;
 }
 
-float sdSeg(float2 p, float2 a, float2 b) {
-    float2 ab = b - a;
-    float t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
-    return length(p - a - ab * t);
+// HUD: instances in NDC directly (px,pz = center; w,h = half sizes).
+vertex BOut hud_vertex(uint vid [[vertex_id]],
+                       uint iid [[instance_id]],
+                       const device BInst *insts [[buffer(0)]],
+                       constant Uni &u [[buffer(1)]]) {
+    BInst inst = insts[iid];
+    float2 lp = kCorners[vid];
+    BOut o;
+    o.position = float4(inst.px + lp.x * inst.w, inst.pz + lp.y * inst.h, 0.0, 1.0);
+    o.lp = lp;
+    o.color = float4(inst.color);
+    o.shape = inst.shape;
+    o.facing = inst.facing;
+    o.flash = inst.flash;
+    o.seed = inst.seed;
+    return o;
 }
 
-// Layered little characters. p is -1..1 with feet at y=-1, head at y=+1.
+// 5x7 digit bitmaps (5 bits per row, MSB left).
+constant ushort kDigitRows[10][7] = {
+    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E},
+    {0x0E,0x11,0x01,0x06,0x08,0x10,0x1F}, {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E},
+    {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E},
+    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, {0x1F,0x01,0x02,0x04,0x08,0x08,0x08},
+    {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C},
+};
+
 fragment float4 unit_fragment(BOut in [[stage_in]],
                               constant Uni &u [[buffer(0)]]) {
     float2 p = in.lp;
-    p.x *= in.facing;                    // mirror to face the enemy
+    p.x *= in.facing;
     int shape = int(in.shape + 0.5);
     float3 army = in.color.rgb;
     const float3 skin = float3(0.85, 0.62, 0.45);
     const float3 steel = float3(0.55, 0.58, 0.62);
-    const float3 dark = float3(0.13, 0.10, 0.08);
     const float3 wood = float3(0.35, 0.22, 0.10);
+    const float3 darkwood = float3(0.22, 0.13, 0.06);
 
-    float cov = 0.0;
-    float3 col = army;
-
-    if (shape == 5) {                    // blood puff (soft; drawn additively)
+    // ---- particles ----
+    if (shape == 5) {
+        // Soft puff. color = tint, color.a = fade, flash = occlusion
+        // (1 solid smoke ... 0 pure additive fire/spark).
         float r = length(p);
         float a = smoothstep(1.0, 0.0, r);
         a *= a * in.color.a;
-        return float4(gammaOut(float3(0.45, 0.02, 0.01)) * a, a * 0.85);
+        return float4(in.color.rgb * a, a * in.flash);
     }
 
-    if (shape == 4) {                    // arrow
+    // ---- HUD widgets ----
+    if (shape == 10) {                    // rounded panel (button)
+        float2 q = abs(p) - float2(0.78, 0.78);
+        float d = length(max(q, 0.0)) - 0.22;
+        float aa = fwidth(d) * 1.5;
+        float body = smoothstep(aa, -aa, d);
+        float border = smoothstep(aa, -aa, abs(d) - 0.06);
+        float3 bcol = mix(float3(0.35, 0.38, 0.42), float3(1.0, 0.95, 0.7), in.flash);
+        float3 rgb = float3(0.06, 0.07, 0.09) * body * 0.85
+                   + bcol * border * (0.6 + 0.6 * in.flash);
+        float alpha = max(body * 0.82, border);
+        return float4(rgb, alpha * in.color.a);
+    }
+    if (shape == 11) {                    // play triangle (FIGHT)
+        float d1 = p.x * 0.5 + abs(p.y) * 0.9 - 0.42;
+        float cov = step(d1, 0.0) * step(-0.55, p.x);
+        if (cov < 0.5) discard_fragment();
+        return float4(in.color.rgb, 1.0);
+    }
+    if (shape == 12) {                    // digit (seed = 0..9)
+        int d = clamp(int(in.seed + 0.5), 0, 9);
+        int cx = clamp(int((p.x * 0.5 + 0.5) * 5.0), 0, 4);
+        int cy = clamp(int((1.0 - (p.y * 0.5 + 0.5)) * 7.0), 0, 6);
+        uint bit = (uint(kDigitRows[d][cy]) >> uint(4 - cx)) & 1u;
+        if (bit == 0u) discard_fragment();
+        return float4(in.color.rgb, in.color.a);
+    }
+
+    if (shape == 4) {                     // arrow
         float sh = sdSeg(p, float2(-0.9, 0.0), float2(0.7, 0.0));
         float head = sdSeg(p, float2(0.7, 0.0), float2(0.95, 0.0));
-        cov = step(sh, 0.10) + step(head, 0.18);
-        col = mix(wood, steel, step(0.5, p.x));
+        float cov = step(sh, 0.10) + step(head, 0.18);
         if (cov < 0.5) discard_fragment();
-        return float4(gammaOut(col * 0.9), 1.0);
+        return float4(gammaOut(mix(wood, steel, step(0.5, p.x)) * 0.9), 1.0);
     }
 
-    // --- soldiers ---
-    float body = 0.0, headC = 0.0, gear = 0.0, gearC = 0.0;
-    float3 gearCol = steel;
+    // ---- soldiers & catapult ----
+    float cov = 0.0;
+    float3 col = army;
 
-    if (shape == 2) {                    // CAVALRY: horse + rider
-        // horse body
+    if (shape == 2) {                     // CAVALRY
         float horse = step(sdSeg(p, float2(-0.45, -0.42), float2(0.35, -0.42)), 0.30);
-        // neck + head
         horse += step(sdSeg(p, float2(0.35, -0.35), float2(0.62, -0.05)), 0.14);
         horse += step(length((p - float2(0.70, 0.02)) * float2(1.0, 1.4)), 0.16);
-        // legs
         horse += step(sdSeg(p, float2(-0.42, -0.55), float2(-0.45, -0.98)), 0.06);
         horse += step(sdSeg(p, float2(0.30, -0.55), float2(0.33, -0.98)), 0.06);
         horse += step(sdSeg(p, float2(-0.15, -0.55), float2(-0.16, -0.95)), 0.055);
         horse += step(sdSeg(p, float2(0.08, -0.55), float2(0.09, -0.95)), 0.055);
-        // rider torso + head
-        body = step(sdSeg(p, float2(-0.10, -0.15), float2(-0.10, 0.38)), 0.17);
-        headC = step(length(p - float2(-0.10, 0.58)), 0.15);
-        // lance
-        gear = step(sdSeg(p, float2(-0.05, 0.05), float2(0.85, 0.42)), 0.045);
-        gearCol = wood;
         float horseCov = min(horse, 1.0);
-        cov = max(max(horseCov, body), max(headC, gear));
-        col = float3(0.24, 0.16, 0.10);                       // horse coat
-        col = mix(col, army, body);                            // rider tunic
+        float body = step(sdSeg(p, float2(-0.10, -0.15), float2(-0.10, 0.38)), 0.17);
+        float headC = step(length(p - float2(-0.10, 0.58)), 0.15);
+        float lance = step(sdSeg(p, float2(-0.05, 0.05), float2(0.85, 0.42)), 0.045);
+        cov = max(max(horseCov, body), max(headC, lance));
+        col = float3(0.24, 0.16, 0.10);
+        col = mix(col, army, body);
         col = mix(col, skin, headC);
-        col = mix(col, gearCol, gear * (1.0 - body));
-        // saddle blanket in army color
-        float blanket = step(sdSeg(p, float2(-0.28, -0.40), float2(0.10, -0.40)), 0.20)
-                      * step(horseCov, 1.5);
-        col = mix(col, army * 0.8, blanket * horseCov * (1.0 - body) * (1.0 - gear));
-    } else {
-        // biped: torso capsule
-        float tw = (shape == 3) ? 0.30 : 0.24;                 // berserker broader
-        body = step(sdSeg(p, float2(0.0, -0.30), float2(0.0, 0.28)), tw);
-        // legs
+        col = mix(col, wood, lance * (1.0 - body));
+        float blanket = step(sdSeg(p, float2(-0.28, -0.40), float2(0.10, -0.40)), 0.20);
+        col = mix(col, army * 0.8, blanket * horseCov * (1.0 - body) * (1.0 - lance));
+    } else if (shape == 6) {              // CATAPULT
+        // wheels
+        float wheels = step(length(p - float2(-0.48, -0.72)), 0.20)
+                     + step(length(p - float2(0.42, -0.72)), 0.20);
+        // base beam + upright
+        float frame = step(sdSeg(p, float2(-0.62, -0.55), float2(0.60, -0.55)), 0.10);
+        frame += step(sdSeg(p, float2(0.18, -0.5), float2(0.30, -0.02)), 0.08);
+        // throwing arm, rotating around the axle with the attack flash
+        float ang = -1.15 + 1.75 * in.flash;     // cocked -> flung
+        float2 tip = float2(0.30, -0.02) + float2(cos(ang), sin(ang)) * -0.85;
+        float arm = step(sdSeg(p, float2(0.30, -0.02), tip), 0.07);
+        float bucket = step(length(p - tip), 0.13);
+        // army banner on the upright
+        float pole = step(sdSeg(p, float2(0.30, -0.02), float2(0.30, 0.55)), 0.035);
+        float flag = step(max(abs(p.x - 0.44) - 0.14, abs(p.y - 0.44) - 0.10), 0.0);
+        cov = max(max(min(wheels, 1.0), min(frame, 1.0)),
+                  max(max(arm, bucket), max(pole, flag)));
+        col = darkwood;
+        col = mix(col, wood, min(frame, 1.0));
+        col = mix(col, wood, arm);
+        col = mix(col, float3(0.15, 0.13, 0.11), bucket);
+        col = mix(col, wood * 0.8, pole);
+        col = mix(col, army, flag);
+    } else {                              // bipeds
+        float tw = (shape == 3) ? 0.30 : 0.24;
+        float body = step(sdSeg(p, float2(0.0, -0.30), float2(0.0, 0.28)), tw);
         body = max(body, step(sdSeg(p, float2(-0.10, -0.35), float2(-0.14, -0.95)), 0.09));
         body = max(body, step(sdSeg(p, float2(0.10, -0.35), float2(0.14, -0.95)), 0.09));
-        headC = step(length(p - float2(0.0, 0.52)), 0.18);
-
-        if (shape == 0) {                // INFANTRY: shield + sword
+        float headC = step(length(p - float2(0.0, 0.52)), 0.18);
+        float gear = 0.0, gearC = 0.0;
+        float3 gearCol = steel;
+        if (shape == 0) {
             gear = step(max(abs(p.x - 0.34) - 0.10, abs(p.y - 0.02) - 0.30), 0.0);
-            gearCol = steel;
             gearC = step(sdSeg(p, float2(0.18, 0.30), float2(0.62, 0.78)), 0.05);
-        } else if (shape == 1) {         // ARCHER: bow arc
+        } else if (shape == 1) {
             float r = length(p - float2(0.42, 0.05));
             gear = step(abs(r - 0.38), 0.045) * step(-0.15, p.x - 0.42);
             gearCol = wood;
             gearC = step(sdSeg(p, float2(0.42, -0.33), float2(0.42, 0.43)), 0.028);
-        } else {                         // BERSERKER: axe
+        } else {
             gearC = step(sdSeg(p, float2(0.22, 0.10), float2(0.58, 0.66)), 0.055);
             gear = step(length((p - float2(0.66, 0.72)) * float2(1.0, 1.6)), 0.20);
-            gearCol = steel;
         }
         cov = max(max(body, headC), max(gear, gearC));
         col = army;
         col = mix(col, skin, headC);
-        // helmet for infantry/berserker
         if (shape != 1) {
             float helm = step(length(p - float2(0.0, 0.58)), 0.17) * step(0.52, p.y);
             col = mix(col, steel * 0.9, helm);
         }
-        col = mix(col, gearCol, max(gear, 0.0) * (1.0 - body * 0.0));
+        col = mix(col, gearCol, gear);
         col = mix(col, (shape == 1) ? wood : steel, gearC);
     }
 
     if (cov < 0.5) discard_fragment();
 
-    // Cheap shading: darker at feet, sun from upper-left, attack flash.
     float shade = 0.72 + 0.28 * smoothstep(-1.0, 1.0, p.y);
     shade *= 1.0 - 0.15 * smoothstep(0.0, 0.8, p.x * in.facing);
     col *= shade;
-    col += float3(1.0, 0.95, 0.8) * in.flash * 0.6;
+    col += float3(1.0, 0.95, 0.8) * in.flash * ((shape == 6) ? 0.15 : 0.6);
     return float4(gammaOut(col), 1.0);
 }
 )METAL";
@@ -406,34 +468,37 @@ struct Unit {
     simd_float2 pos, vel;
     int army, type;
     float hp;
-    float cooldown;        // melee swing / arrow reload
-    float retarget;        // time until next target search
-    int target;            // index into units, -1 none
-    float attackAnim;      // 0..1 flash after a swing
+    float cooldown;
+    float retarget;
+    int target;
+    float attackAnim;
     float bobPhase;
-    float deathT;          // >0 once dying; grows
+    float deathT;
     float seed;
     bool alive;
 };
 
-struct Arrow {
-    simd_float3 pos, vel;
+struct Shot {                      // arrow or flaming catapult ball
+    simd_float3 pos, vel;          // (x, height, boardY)
     int army;
+    int kind;                      // 0 arrow, 1 fireball
     bool alive;
 };
 
-struct Blood {
+struct Puff {
     simd_float2 pos;
     float y;
     simd_float2 vel;
     float vy;
     float age, life, size;
-    bool ground;           // splat spawned?
+    int kind;
 };
 
 struct Splat {
     simd_float2 pos;
     float size, seed, age;
+    float r, g, b;
+    float alpha;
 };
 
 // --------------------------------------------------------------- Matrices ---
@@ -465,24 +530,28 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 @implementation WarSimRenderer {
     id<MTLCommandQueue> _queue;
     id<MTLRenderPipelineState> _groundPipeline;
-    id<MTLRenderPipelineState> _flatPipeline;    // decals: over, no depth write
-    id<MTLRenderPipelineState> _unitPipeline;    // alpha-test billboards
+    id<MTLRenderPipelineState> _flatPipeline;
+    id<MTLRenderPipelineState> _unitPipeline;
+    id<MTLRenderPipelineState> _hudPipeline;
     id<MTLDepthStencilState> _depthWrite;
     id<MTLDepthStencilState> _depthTest;
+    id<MTLDepthStencilState> _depthNone;
 
     id<MTLBuffer> _flatBuffers[kMaxInFlight];
     id<MTLBuffer> _unitBuffers[kMaxInFlight];
+    id<MTLBuffer> _hudBuffers[kMaxInFlight];
     int _frameIndex;
     dispatch_semaphore_t _frameSemaphore;
     std::vector<FInstC> _flatScratch;
     std::vector<BInstC> _unitScratch;
+    std::vector<BInstC> _hudScratch;
 
     // Game
     std::vector<Unit> _units;
-    std::vector<Arrow> _arrows;
-    std::vector<Blood> _blood;
+    std::vector<Shot> _shots;
+    std::vector<Puff> _puffs;
     std::vector<Splat> _splats;
-    std::vector<std::vector<int>> _grid;   // spatial hash buckets
+    std::vector<std::vector<int>> _grid;
     int _gridW, _gridH;
     float _cellSize;
     int _phase;
@@ -490,9 +559,16 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     int _winner;
     std::mt19937 _rng;
 
+    // Camera
+    float _camYaw, _camPitch, _camZoom, _shake;
     simd_float4x4 _viewProj;
+    simd_float2 _camRightBoard;
     bool _haveVP;
     simd_float2 _lastPaint;
+
+    // HUD hit rects, in view points (y-up): 0..4 unit buttons, 5 = FIGHT.
+    CGRect _btnRects[6];
+    float _hudTop;          // everything below this y is HUD
 
     double _startTime, _lastFrameTime;
     double _simAccum;
@@ -505,7 +581,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     id<MTLDevice> device = view.device;
     _queue = [device newCommandQueue];
     view.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
-    view.clearColor = MTLClearColorMake(0.35, 0.42, 0.50, 1.0);   // haze past field
+    view.clearColor = MTLClearColorMake(0.35, 0.42, 0.50, 1.0);
 
     id<MTLLibrary> library = CompileLibrary(device, kShaderSource);
     if (!library) return nil;
@@ -520,8 +596,6 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     _groundPipeline = [device newRenderPipelineStateWithDescriptor:d error:&error];
     if (!_groundPipeline) { fprintf(stderr, "ground: %s\n", error.localizedDescription.UTF8String); return nil; }
 
-    d.vertexFunction = [library newFunctionWithName:@"flat_vertex"];
-    d.fragmentFunction = [library newFunctionWithName:@"flat_fragment"];
     d.colorAttachments[0].blendingEnabled = YES;
     d.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
     d.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
@@ -529,6 +603,9 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
     d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
     d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+
+    d.vertexFunction = [library newFunctionWithName:@"flat_vertex"];
+    d.fragmentFunction = [library newFunctionWithName:@"flat_fragment"];
     _flatPipeline = [device newRenderPipelineStateWithDescriptor:d error:&error];
     if (!_flatPipeline) { fprintf(stderr, "flat: %s\n", error.localizedDescription.UTF8String); return nil; }
 
@@ -537,6 +614,10 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     _unitPipeline = [device newRenderPipelineStateWithDescriptor:d error:&error];
     if (!_unitPipeline) { fprintf(stderr, "unit: %s\n", error.localizedDescription.UTF8String); return nil; }
 
+    d.vertexFunction = [library newFunctionWithName:@"hud_vertex"];
+    _hudPipeline = [device newRenderPipelineStateWithDescriptor:d error:&error];
+    if (!_hudPipeline) { fprintf(stderr, "hud: %s\n", error.localizedDescription.UTF8String); return nil; }
+
     MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new];
     ds.depthCompareFunction = MTLCompareFunctionLess;
     ds.depthWriteEnabled = YES;
@@ -544,17 +625,22 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     ds.depthWriteEnabled = NO;
     ds.depthCompareFunction = MTLCompareFunctionLessEqual;
     _depthTest = [device newDepthStencilStateWithDescriptor:ds];
+    ds.depthCompareFunction = MTLCompareFunctionAlways;
+    _depthNone = [device newDepthStencilStateWithDescriptor:ds];
 
     for (int i = 0; i < kMaxInFlight; i++) {
         _flatBuffers[i] = [device newBufferWithLength:kMaxFlats * sizeof(FInstC)
                                               options:MTLResourceStorageModeShared];
         _unitBuffers[i] = [device newBufferWithLength:kMaxBillboards * sizeof(BInstC)
                                               options:MTLResourceStorageModeShared];
+        _hudBuffers[i] = [device newBufferWithLength:256 * sizeof(BInstC)
+                                             options:MTLResourceStorageModeShared];
     }
     _frameIndex = 0;
     _frameSemaphore = dispatch_semaphore_create(kMaxInFlight);
     _flatScratch.reserve(kMaxFlats);
     _unitScratch.reserve(kMaxBillboards);
+    _hudScratch.reserve(256);
 
     _cellSize = 2.5f;
     _gridW = (int)ceilf(kFieldW / _cellSize);
@@ -565,8 +651,13 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     _selectedType = kInfantry;
     _winner = -1;
     _rng.seed(20250709);
+    _camYaw = 0;
+    _camPitch = 47.0f * (float)M_PI / 180.0f;
+    _camZoom = 1.0f;
+    _shake = 0;
     _haveVP = false;
     _lastPaint = simd_make_float2(-1000, -1000);
+    _hudTop = 0;
     [self deployDefaultArmies];
 
     __unsafe_unretained WarSimRenderer *weakSelf = self;
@@ -574,10 +665,22 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                                           handler:^NSEvent *(NSEvent *event) {
         if (event.modifierFlags & NSEventModifierFlagCommand) return event;
         unsigned short c = event.keyCode;
-        if (c >= 18 && c <= 21) { weakSelf->_selectedType = c - 18; return nil; }  // 1..4
-        if (c == 49) { [weakSelf pressedSpace]; return nil; }                      // space
-        if (c == 15) { [weakSelf resetField:YES]; return nil; }                    // R
+        if (c == 18 || c == 19 || c == 20 || c == 21) { weakSelf->_selectedType = c - 18; return nil; }
+        if (c == 23) { weakSelf->_selectedType = kCatapult; return nil; }   // '5'
+        if (c == 49) { [weakSelf pressedFight]; return nil; }               // space
+        if (c == 15) { [weakSelf resetField:YES]; return nil; }             // R
         if (c == 2)  { [weakSelf resetField:NO]; [weakSelf deployDefaultArmies]; return nil; } // D
+        if (c == 123 || c == 12) { weakSelf->_camYaw -= 0.12f; return nil; } // left / Q
+        if (c == 124 || c == 14) { weakSelf->_camYaw += 0.12f; return nil; } // right / E
+        if (c == 126) { weakSelf->_camPitch = std::min(weakSelf->_camPitch + 0.07f, 1.20f); return nil; }
+        if (c == 125) { weakSelf->_camPitch = std::max(weakSelf->_camPitch - 0.07f, 0.45f); return nil; }
+        return event;
+    }];
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel
+                                          handler:^NSEvent *(NSEvent *event) {
+        weakSelf->_camZoom = std::clamp(
+            weakSelf->_camZoom * expf((float)event.scrollingDeltaY * -0.004f),
+            0.30f, 1.75f);
         return event;
     }];
     [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown |
@@ -589,21 +692,32 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         MTKView *v = (MTKView *)event.window.contentView;
         if (![v isKindOfClass:[MTKView class]] || !weakSelf->_haveVP) return event;
         NSPoint pt = [v convertPoint:event.locationInWindow fromView:nil];
+        if (event.type == NSEventTypeLeftMouseDown) {
+            for (int b = 0; b < 6; b++) {
+                if (CGRectContainsPoint(weakSelf->_btnRects[b], NSPointToCGPoint(pt))) {
+                    if (b < 5) weakSelf->_selectedType = b;
+                    else [weakSelf pressedFight];
+                    return nil;
+                }
+            }
+        }
+        if (pt.y < weakSelf->_hudTop) return nil;   // clicks on the HUD bar never paint
         simd_float2 ndc = simd_make_float2((float)(pt.x / v.bounds.size.width) * 2.0f - 1.0f,
                                            (float)(pt.y / v.bounds.size.height) * 2.0f - 1.0f);
         simd_float2 board = [weakSelf unproject:ndc];
         BOOL erase = (event.type == NSEventTypeRightMouseDown ||
                       event.type == NSEventTypeRightMouseDragged);
         if (event.type == NSEventTypeLeftMouseDown)
-            weakSelf->_lastPaint = simd_make_float2(-1000, -1000);   // fresh click always stamps
+            weakSelf->_lastPaint = simd_make_float2(-1000, -1000);
         [weakSelf paintAt:board erase:erase];
         return event;
     }];
 
-    printf("WAR SIM\n"
-           "  1-4 select unit: Infantry / Archer / Cavalry / Berserker\n"
-           "  Click/drag: stamp a squad (left half = RED, right half = BLUE)\n"
-           "  Right-click: erase   SPACE: battle!   R: clear   D: default armies\n");
+    printf("WAR SIM v2\n"
+           "  HUD or 1-5: Infantry / Archer / Cavalry / Berserker / Catapult\n"
+           "  Click/drag: stamp squads (left half = RED, right half = BLUE)\n"
+           "  Right-click erase · SPACE/FIGHT battle · R clear · D defaults\n"
+           "  Scroll zoom · Arrows or Q/E orbit · Up/Down tilt\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -616,8 +730,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 
 - (void)resetField:(BOOL)full {
     _units.clear();
-    _arrows.clear();
-    _blood.clear();
+    _shots.clear();
+    _puffs.clear();
     if (full) _splats.clear();
     _phase = kPhaseSetup;
     _winner = -1;
@@ -628,7 +742,6 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
     Unit un = {};
     un.pos = pos;
-    un.vel = simd_make_float2(0, 0);
     un.army = army;
     un.type = type;
     un.hp = kSpecs[type].hp;
@@ -642,7 +755,6 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 }
 
 - (void)deployDefaultArmies {
-    // Symmetric classic setup: infantry line, archers behind, cavalry wings.
     for (int army = 0; army < 2; army++) {
         float sgn = army == 0 ? 1.0f : -1.0f;
         float front = army == 0 ? 46.0f : 94.0f;
@@ -660,6 +772,9 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                     [self spawnUnit:kCavalry army:army
                                  at:simd_make_float2(front - sgn * (2.0f + r * 1.8f),
                                                      (w == 0 ? 5.0f : 66.0f) + c * 1.3f)];
+        for (int c = 0; c < 3; c++)
+            [self spawnUnit:kCatapult army:army
+                         at:simd_make_float2(front - sgn * 12.0f, 25.0f + c * 15.0f)];
     }
 }
 
@@ -682,14 +797,22 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                      [](const Unit &u) { return !u.alive; }), _units.end());
         return;
     }
-    if (simd_distance(board, _lastPaint) < 2.5f) return;   // rate-limit drag stamps
+    if (simd_distance(board, _lastPaint) < 2.5f) return;
     _lastPaint = board;
-    // Which army? Left half of the field = RED, right half = BLUE.
     int army = board.x < 70.0f ? 0 : 1;
-    // Clamp the stamp into the army's deploy zone.
     float minX = army == 0 ? 2.0f : kNoMansMax;
     float maxX = army == 0 ? kNoMansMin : kFieldW - 2.0f;
     std::uniform_real_distribution<float> jit(-0.25f, 0.25f);
+    // Catapults stamp a battery of 2; troops stamp a 4x4 squad.
+    if (_selectedType == kCatapult) {
+        for (int k = 0; k < 2; k++) {
+            simd_float2 p = board + simd_make_float2(0, (k - 0.5f) * 3.2f);
+            p.x = std::clamp(p.x, minX, maxX);
+            p.y = std::clamp(p.y, 3.0f, kFieldH - 3.0f);
+            [self spawnUnit:kCatapult army:army at:p];
+        }
+        return;
+    }
     for (int r = 0; r < 4; r++) {
         for (int c = 0; c < 4; c++) {
             simd_float2 p = board + simd_make_float2((r - 1.5f) * 0.95f, (c - 1.5f) * 0.95f);
@@ -701,7 +824,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     }
 }
 
-- (void)pressedSpace {
+- (void)pressedFight {
     if (_phase == kPhaseSetup) {
         int have[2] = {0, 0};
         for (const Unit &u : _units) if (u.alive) have[u.army]++;
@@ -729,7 +852,6 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     }
 }
 
-// Nearest living enemy via expanding ring search over the grid.
 - (int)findEnemyFor:(int)idx {
     const Unit &u = _units[idx];
     int cx = std::clamp((int)(u.pos.x / _cellSize), 0, _gridW - 1);
@@ -758,59 +880,102 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     return best;
 }
 
-- (void)spawnBloodAt:(simd_float2)pos big:(BOOL)big {
+- (void)spawnPuffs:(simd_float2)pos y:(float)y kind:(int)kind count:(int)n
+             speed:(float)spd size:(float)size {
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
-    int n = big ? 10 : 4;
     for (int k = 0; k < n; k++) {
-        Blood b;
+        if (_puffs.size() >= (size_t)kPuffCap - 1)
+            _puffs.erase(_puffs.begin(), _puffs.begin() + 200);
+        Puff b;
         float ang = u01(_rng) * 6.2831853f;
-        float spd = 1.0f + 2.5f * u01(_rng);
+        float s = spd * (0.4f + u01(_rng));
         b.pos = pos;
-        b.y = 0.8f + 0.5f * u01(_rng);
-        b.vel = simd_make_float2(cosf(ang), sinf(ang)) * spd;
-        b.vy = 1.5f + 2.0f * u01(_rng);
+        b.y = y + 0.4f * u01(_rng);
+        b.vel = simd_make_float2(cosf(ang), sinf(ang)) * s;
+        b.vy = (kind == kPuffSmoke || kind == kPuffFire)
+                   ? 1.2f + 2.0f * u01(_rng)
+                   : 1.5f + 2.0f * u01(_rng);
         b.age = 0;
-        b.life = 0.5f + 0.4f * u01(_rng);
-        b.size = big ? 0.30f : 0.18f;
-        b.ground = false;
-        _blood.push_back(b);
+        b.life = (kind == kPuffSmoke) ? 1.4f + 0.8f * u01(_rng)
+                                      : 0.4f + 0.4f * u01(_rng);
+        b.size = size * (0.7f + 0.6f * u01(_rng));
+        b.kind = kind;
+        _puffs.push_back(b);
     }
 }
 
-- (void)hurtUnit:(int)idx damage:(float)dmg {
+- (void)hurtUnit:(int)idx damage:(float)dmg knock:(simd_float2)knock {
     Unit &u = _units[idx];
     if (!u.alive) return;
     u.hp -= dmg;
+    u.vel += knock;
     if (u.hp <= 0) {
         u.alive = false;
         u.deathT = 0.0001f;
-        [self spawnBloodAt:u.pos big:YES];
+        [self spawnPuffs:u.pos y:0.8f kind:kPuffBlood count:10 speed:2.4f size:0.30f];
         std::uniform_real_distribution<float> u01(0.0f, 1.0f);
         Splat s;
         s.pos = u.pos;
         s.size = 0.5f + 0.5f * u01(_rng) + kSpecs[u.type].radius;
         s.seed = u01(_rng);
         s.age = 0;
+        s.r = 0.30f; s.g = 0.02f; s.b = 0.01f;
+        s.alpha = 0.55f;
         _splats.push_back(s);
         if (_splats.size() > 1600) _splats.erase(_splats.begin(), _splats.begin() + 200);
     } else {
-        [self spawnBloodAt:u.pos big:NO];
+        [self spawnPuffs:u.pos y:0.8f kind:kPuffBlood count:3 speed:1.8f size:0.18f];
     }
 }
 
+- (void)explodeAt:(simd_float2)pos {
+    // Area devastation, friendly fire included.
+    for (size_t j = 0; j < _units.size(); j++) {
+        if (!_units[j].alive) continue;
+        float dd = simd_distance(_units[j].pos, pos);
+        if (dd < kBoomKill) {
+            [self hurtUnit:(int)j damage:9999
+                     knock:(_units[j].pos - pos) * 3.0f];
+        } else if (dd < kBoomRadius) {
+            float f = 1.0f - (dd - kBoomKill) / (kBoomRadius - kBoomKill);
+            simd_float2 dir = (_units[j].pos - pos) / dd;
+            [self hurtUnit:(int)j damage:30.0f + 90.0f * f knock:dir * (6.0f * f)];
+        }
+    }
+    [self spawnPuffs:pos y:0.6f kind:kPuffFire count:22 speed:5.0f size:0.85f];
+    [self spawnPuffs:pos y:0.8f kind:kPuffSmoke count:14 speed:2.2f size:1.30f];
+    [self spawnPuffs:pos y:0.5f kind:kPuffSpark count:14 speed:8.0f size:0.22f];
+    [self spawnPuffs:pos y:0.3f kind:kPuffDust count:12 speed:4.0f size:0.60f];
+    std::uniform_real_distribution<float> u01(0.0f, 1.0f);
+    Splat s;
+    s.pos = pos;
+    s.size = kBoomRadius * 0.75f;
+    s.seed = u01(_rng);
+    s.age = 0;
+    s.r = 0.05f; s.g = 0.045f; s.b = 0.04f;
+    s.alpha = 0.75f;
+    _splats.push_back(s);
+    _shake = std::min(_shake + 0.55f, 1.2f);
+}
+
 - (void)simStep:(float)dt {
-    // Death/corpse timers and blood always run so the field settles.
     for (Unit &u : _units) if (!u.alive && u.deathT > 0) u.deathT += dt;
-    for (Blood &b : _blood) {
+    for (Puff &b : _puffs) {
         b.age += dt;
         b.pos += b.vel * dt;
         b.y += b.vy * dt;
-        b.vy -= 9.8f * dt;
+        if (b.kind == kPuffSmoke) {
+            b.vy += 1.5f * dt;                     // smoke rises
+            b.vel *= expf(-1.5f * dt);
+        } else {
+            b.vy -= 9.8f * dt;
+        }
         if (b.y < 0.02f) b.y = 0.02f;
     }
-    _blood.erase(std::remove_if(_blood.begin(), _blood.end(),
-                 [](const Blood &b) { return b.age >= b.life; }), _blood.end());
+    _puffs.erase(std::remove_if(_puffs.begin(), _puffs.end(),
+                 [](const Puff &b) { return b.age >= b.life; }), _puffs.end());
     for (Splat &s : _splats) s.age += dt;
+    _shake *= expf(-3.2f * dt);
 
     if (_phase != kPhaseBattle) return;
 
@@ -822,56 +987,63 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         if (!u.alive) continue;
         const UnitSpec &spec = kSpecs[u.type];
         u.cooldown -= dt;
-        u.attackAnim = std::max(0.0f, u.attackAnim - dt * 4.0f);
+        u.attackAnim = std::max(0.0f, u.attackAnim - dt * ((u.type == kCatapult) ? 1.2f : 4.0f));
         u.retarget -= dt;
         if (u.retarget <= 0 ||
             u.target < 0 || u.target >= (int)_units.size() || !_units[u.target].alive) {
             u.target = [self findEnemyFor:(int)i];
             u.retarget = 0.25f + 0.1f * u01(_rng);
         }
-        if (u.target < 0) continue;   // no enemies left (win check below)
+        if (u.target < 0) continue;
         Unit &tgt = _units[u.target];
         simd_float2 d = tgt.pos - u.pos;
         float dist = simd_length(d);
         simd_float2 dir = dist > 1e-4f ? d / dist : simd_make_float2(1, 0);
         float reach = spec.reach + spec.radius + kSpecs[tgt.type].radius;
 
-        // Archers hold position and volley when in range (unless cornered).
         bool archerShooting = (u.type == kArcher && dist < kArcherRange && dist > 4.0f);
+        bool catShooting = (u.type == kCatapult && dist < kCatMaxRange && dist > kCatMinRange);
 
         simd_float2 want = simd_make_float2(0, 0);
-        if (archerShooting) {
+        if (archerShooting || catShooting) {
             if (u.cooldown <= 0) {
-                u.cooldown = kArcherReload * (0.9f + 0.2f * u01(_rng));
+                bool cat = (u.type == kCatapult);
+                u.cooldown = (cat ? kCatReload : kArcherReload) * (0.9f + 0.2f * u01(_rng));
                 u.attackAnim = 1.0f;
-                // Ballistic arc that lands on the target's predicted position.
-                float T = std::clamp(dist / 28.0f, 0.45f, 1.6f);
+                float flightSpeed = cat ? 16.0f : 28.0f;
+                float T = std::clamp(dist / flightSpeed, cat ? 1.1f : 0.45f, cat ? 2.6f : 1.6f);
                 simd_float2 aim = tgt.pos + tgt.vel * (T * 0.85f);
-                aim += simd_make_float2(u01(_rng) - 0.5f, u01(_rng) - 0.5f) * (dist * 0.12f);
-                Arrow ar;
-                ar.pos = simd_make_float3(u.pos.x, 1.3f, u.pos.y);
+                float scatter = cat ? dist * 0.06f : dist * 0.12f;
+                aim += simd_make_float2(u01(_rng) - 0.5f, u01(_rng) - 0.5f) * scatter;
+                Shot sh;
+                sh.pos = simd_make_float3(u.pos.x, cat ? 1.8f : 1.3f, u.pos.y);
                 simd_float2 flat = (aim - u.pos) / T;
-                ar.vel = simd_make_float3(flat.x, 0.5f * 9.8f * T, flat.y);
-                ar.army = u.army;
-                ar.alive = true;
-                _arrows.push_back(ar);
+                sh.vel = simd_make_float3(flat.x, 0.5f * 9.8f * T, flat.y);
+                sh.army = u.army;
+                sh.kind = cat ? 1 : 0;
+                sh.alive = true;
+                _shots.push_back(sh);
             }
         } else if (dist > reach) {
             want = dir * spec.speed;
         } else {
-            // In reach: swing.
             if (u.cooldown <= 0) {
                 u.cooldown = spec.cooldown * (0.9f + 0.2f * u01(_rng));
                 u.attackAnim = 1.0f;
-                float dmg = (u.type == kArcher) ? spec.damage : spec.damage;
-                if (u.type == kCavalry && simd_length(u.vel) > kChargeSpeed)
+                float dmg = spec.damage;
+                float knock = 2.0f;
+                if (u.type == kCavalry && simd_length(u.vel) > kChargeSpeed) {
                     dmg *= kChargeMult;
+                    knock = 5.0f;
+                }
                 dmg *= 0.85f + 0.3f * u01(_rng);
-                [self hurtUnit:u.target damage:dmg];
+                [self hurtUnit:u.target damage:dmg knock:dir * knock];
+                // impact juice at the victim
+                [self spawnPuffs:tgt.pos y:0.9f kind:kPuffSpark count:3 speed:3.5f size:0.14f];
+                [self spawnPuffs:tgt.pos y:0.3f kind:kPuffDust count:2 speed:1.5f size:0.30f];
             }
         }
 
-        // Separation from neighbors (same grid cell + adjacent).
         int cx = std::clamp((int)(u.pos.x / _cellSize), 0, _gridW - 1);
         int cy = std::clamp((int)(u.pos.y / _cellSize), 0, _gridH - 1);
         simd_float2 push = simd_make_float2(0, 0);
@@ -883,11 +1055,10 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                     float dl = simd_length(dd);
                     float minD = spec.radius + kSpecs[_units[j].type].radius + 0.12f;
                     if (dl < minD && dl > 1e-4f)
-                        push += dd / dl * ((minD - dl) / minD) * 6.0f;
+                        push += dd / dl * ((minD - dl) / minD) * 7.0f;
                 }
         want += push;
 
-        // Smooth accel toward desired velocity.
         u.vel += (want - u.vel) * std::min(6.0f * dt, 1.0f);
         u.pos += u.vel * dt;
         u.pos.x = std::clamp(u.pos.x, 0.5f, kFieldW - 0.5f);
@@ -895,15 +1066,23 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         u.bobPhase += simd_length(u.vel) * dt * 6.0f;
     }
 
-    // Arrows.
-    for (Arrow &a : _arrows) {
+    // Shots: arrows + flaming balls.
+    std::uniform_real_distribution<float> u01b(0.0f, 1.0f);
+    for (Shot &a : _shots) {
         if (!a.alive) continue;
         a.vel.y -= 9.8f * dt;
         a.pos += a.vel * dt;
+        if (a.kind == 1 && u01b(_rng) < dt * 22.0f) {   // flame trail
+            [self spawnPuffs:simd_make_float2(a.pos.x, a.pos.z) y:a.pos.y
+                        kind:kPuffFire count:1 speed:0.4f size:0.35f];
+        }
         if (a.pos.y <= 0.0f) {
             a.alive = false;
             simd_float2 hit = simd_make_float2(a.pos.x, a.pos.z);
-            // Damage the closest enemy within the landing circle.
+            if (a.kind == 1) {
+                [self explodeAt:hit];
+                continue;
+            }
             int cx = std::clamp((int)(hit.x / _cellSize), 0, _gridW - 1);
             int cy = std::clamp((int)(hit.y / _cellSize), 0, _gridH - 1);
             int best = -1;
@@ -915,13 +1094,19 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                         float dd = simd_distance(_units[j].pos, hit);
                         if (dd < bestD) { bestD = dd; best = j; }
                     }
-            if (best >= 0) [self hurtUnit:best damage:kArrowDamage];
+            if (best >= 0) {
+                simd_float2 kd = simd_make_float2(a.vel.x, a.vel.z);
+                float kl = simd_length(kd);
+                [self hurtUnit:best damage:kArrowDamage
+                         knock:(kl > 1e-4f ? kd / kl : simd_make_float2(0, 0)) * 1.2f];
+            } else {
+                [self spawnPuffs:hit y:0.1f kind:kPuffDust count:2 speed:1.0f size:0.22f];
+            }
         }
     }
-    _arrows.erase(std::remove_if(_arrows.begin(), _arrows.end(),
-                  [](const Arrow &a) { return !a.alive; }), _arrows.end());
+    _shots.erase(std::remove_if(_shots.begin(), _shots.end(),
+                 [](const Shot &a) { return !a.alive; }), _shots.end());
 
-    // Win check.
     int alive[2] = {0, 0};
     for (const Unit &u : _units) if (u.alive) alive[u.army]++;
     if (alive[0] == 0 || alive[1] == 0) {
@@ -933,6 +1118,81 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         else
             printf("*** MUTUAL ANNIHILATION ***\n");
     }
+}
+
+// ------------------------------------------------------------------- HUD ---
+
+- (void)pushHud:(float)cx cy:(float)cy hw:(float)hw hh:(float)hh
+          shape:(float)shape color:(simd_float4)col flash:(float)flash
+           seed:(float)seed facing:(float)facing {
+    _hudScratch.push_back({cx, cy, 0, hw, hh, 0, shape, facing,
+                           col.x, col.y, col.z, col.w, flash, seed, 0, 0});
+}
+
+// Converts a rect in view points (origin bottom-left) to NDC and pushes.
+- (void)buildHUD:(MTKView *)view aliveRed:(int)red aliveBlue:(int)blue {
+    _hudScratch.clear();
+    float bw = (float)view.bounds.size.width;
+    float bh = (float)view.bounds.size.height;
+    auto toNDC = [&](float x, float y, float w, float h, float *ocx, float *ocy,
+                     float *ohw, float *ohh) {
+        *ocx = (x + w * 0.5f) / bw * 2.0f - 1.0f;
+        *ocy = (y + h * 0.5f) / bh * 2.0f - 1.0f;
+        *ohw = w / bw;
+        *ohh = h / bh;
+    };
+
+    // Bottom bar: 5 unit buttons + FIGHT.
+    const float btn = 74, gap = 12, fightW = 110;
+    float totalW = 5 * btn + 4 * gap + 24 + fightW;
+    float x0 = (bw - totalW) * 0.5f;
+    float y0 = 14;
+    _hudTop = y0 + btn + 10;
+
+    for (int i = 0; i < 5; i++) {
+        float x = x0 + i * (btn + gap);
+        _btnRects[i] = CGRectMake(x, y0, btn, btn);
+        float cx, cy, hw, hh;
+        toNDC(x, y0, btn, btn, &cx, &cy, &hw, &hh);
+        BOOL sel = (_selectedType == i);
+        [self pushHud:cx cy:cy hw:hw hh:hh shape:10
+                color:simd_make_float4(1, 1, 1, 1) flash:sel ? 1.0f : 0.0f
+                 seed:0 facing:1];
+        // The unit's own sprite as the icon (neutral grey army color).
+        float iconScale = (i == kCavalry || i == kCatapult) ? 0.62f : 0.72f;
+        [self pushHud:cx cy:cy hw:hw * iconScale hh:hh * iconScale
+                shape:(float)i color:simd_make_float4(0.75f, 0.72f, 0.68f, 1)
+                flash:(i == kCatapult) ? 0.0f : 0.0f seed:0 facing:1];
+    }
+    // FIGHT / rematch button.
+    float fx = x0 + 5 * (btn + gap) + 24 - gap;
+    _btnRects[5] = CGRectMake(fx, y0, fightW, btn);
+    float cx, cy, hw, hh;
+    toNDC(fx, y0, fightW, btn, &cx, &cy, &hw, &hh);
+    BOOL battle = (_phase == kPhaseBattle);
+    [self pushHud:cx cy:cy hw:hw hh:hh shape:10
+            color:simd_make_float4(1, 1, 1, battle ? 0.35f : 1.0f)
+            flash:(_phase != kPhaseBattle) ? 0.6f : 0.0f seed:0 facing:1];
+    [self pushHud:cx cy:cy hw:hw * 0.45f hh:hh * 0.45f shape:11
+            color:simd_make_float4(0.55f, 0.95f, 0.45f, battle ? 0.3f : 1.0f)
+            flash:0 seed:0 facing:1];
+
+    // Army counters, top corners, color-coded digit strips.
+    auto pushNumber = [&](int value, float xRight, float y, simd_float4 col, bool leftAlign) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d", value);
+        int n = (int)strlen(buf);
+        const float dw = 18, dh = 26, dgap = 4;
+        float x = leftAlign ? xRight : xRight - n * (dw + dgap);
+        for (int i = 0; i < n; i++) {
+            float ccx, ccy, chw, chh;
+            toNDC(x + i * (dw + dgap), y, dw, dh, &ccx, &ccy, &chw, &chh);
+            [self pushHud:ccx cy:ccy hw:chw hh:chh shape:12 color:col
+                    flash:0 seed:(float)(buf[i] - '0') facing:1];
+        }
+    };
+    pushNumber(aliveRed, 24, bh - 46, kArmyColor[0] * 1.1f, true);
+    pushNumber(aliveBlue, bw - 24, bh - 46, kArmyColor[1] * 1.3f, false);
 }
 
 // ---------------------------------------------------------------- Render ---
@@ -955,21 +1215,31 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         _simAccum -= kStep;
     }
 
-    // Battle-cam: fixed, raised, looking down the field.
+    // Orbit battle-cam with zoom and shake.
     float aspect = (float)(view.drawableSize.width / view.drawableSize.height);
-    float pitch = 47.0f * (float)M_PI / 180.0f;
     float fovy = 33.0f * (float)M_PI / 180.0f;
     float tanH = tanf(fovy * 0.5f);
     float distX = (kFieldW * 0.5f + 6.0f) / (tanH * aspect);
-    float distZ = (kFieldH * 0.5f * sinf(pitch) + 10.0f) / tanH;
-    float dist = std::max(distX, distZ);
+    float distZ = (kFieldH * 0.5f * sinf(_camPitch) + 10.0f) / tanH;
+    float dist = std::max(distX, distZ) * _camZoom;
     simd_float3 target = simd_make_float3(kFieldW * 0.5f, 0, -kFieldH * 0.5f);
-    simd_float3 eye = target + simd_make_float3(0, sinf(pitch), cosf(pitch)) * dist;
+    simd_float3 orbit = simd_make_float3(sinf(_camYaw) * cosf(_camPitch),
+                                         sinf(_camPitch),
+                                         cosf(_camYaw) * cosf(_camPitch));
+    simd_float3 eye = target + orbit * dist;
     simd_float3 fwd = simd_normalize(target - eye);
     simd_float3 right = simd_normalize(simd_cross(fwd, simd_make_float3(0, 1, 0)));
     simd_float3 up = simd_cross(right, fwd);
-    simd_float4x4 proj = Perspective(fovy, aspect, 1.0f, dist * 3.0f);
+    if (_shake > 0.003f) {
+        eye += right * (sinf(t * 51.0f) * _shake * 0.35f);
+        eye += up * (cosf(t * 47.0f) * _shake * 0.25f);
+        fwd = simd_normalize(target - eye);
+        right = simd_normalize(simd_cross(fwd, simd_make_float3(0, 1, 0)));
+        up = simd_cross(right, fwd);
+    }
+    simd_float4x4 proj = Perspective(fovy, aspect, 1.0f, dist * 4.0f + 100.0f);
     _viewProj = simd_mul(proj, LookAt(eye, right, up, fwd));
+    _camRightBoard = simd_make_float2(right.x, -right.z);
     _haveVP = true;
 
     struct {
@@ -977,25 +1247,30 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         simd_float2 resolution;
         float time;
         float phase;
+        simd_float2 camRight;
+        simd_float2 pad2;
     } uni = {
         _viewProj,
         simd_make_float2((float)view.drawableSize.width, (float)view.drawableSize.height),
         t,
         (float)_phase,
+        simd_make_float2(right.x, right.z),
+        simd_make_float2(0, 0),
     };
 
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
     _flatScratch.clear();
     _unitScratch.clear();
 
-    // ---- Flat decals: splats first, then shadows, then corpses on top.
+    // ---- Flat decals.
     for (const Splat &s : _splats) {
         float fade = 1.0f - std::min(s.age / 30.0f, 1.0f);
         if (fade <= 0) continue;
         _flatScratch.push_back({s.pos.x, s.pos.y, s.size, s.size * 0.8f,
                                 s.seed * 6.28f, 1,
-                                0.30f, 0.02f, 0.01f, 0.55f * fade,
+                                s.r, s.g, s.b, s.alpha * fade,
                                 s.seed, 0, 0, 0});
+        if (_flatScratch.size() >= (size_t)kMaxFlats - 8) break;
     }
     for (const Unit &u : _units) {
         const UnitSpec &spec = kSpecs[u.type];
@@ -1013,75 +1288,97 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                                     c.x, c.y, c.z, 0.85f * fade,
                                     u.seed, 0, 0, 0});
         }
-        if (_flatScratch.size() >= (size_t)kMaxFlats - 4) break;
+        if (_flatScratch.size() >= (size_t)kMaxFlats - 8) break;
     }
 
-    // ---- Billboards: living units, dying units, arrows, blood.
+    // ---- Unit + shot billboards.
     for (const Unit &u : _units) {
         if (!u.alive && (u.deathT <= 0 || u.deathT > 0.55f)) continue;
         const UnitSpec &spec = kSpecs[u.type];
         float speed = simd_length(u.vel);
         float bob = (u.alive && speed > 0.3f) ? fabsf(sinf(u.bobPhase)) * 0.07f : 0.0f;
         if (_phase == kPhaseDone && u.alive && _winner == u.army)
-            bob = fabsf(sinf(t * 6.0f + u.bobPhase)) * 0.25f;   // victory hops
+            bob = fabsf(sinf(t * 6.0f + u.bobPhase)) * 0.25f;
         float rot = 0, sink = 0;
-        if (!u.alive) {   // death fall
+        if (!u.alive) {
             float f = std::min(u.deathT / 0.55f, 1.0f);
             rot = (u.seed > 0.5f ? 1.0f : -1.0f) * f * 1.45f;
             sink = f * 0.25f;
         }
-        float facing = 1.0f;
+        // Face along the camera's screen-right axis toward the target.
+        float facing;
         if (u.target >= 0 && u.target < (int)_units.size())
-            facing = (_units[u.target].pos.x >= u.pos.x) ? 1.0f : -1.0f;
-        else facing = (u.army == 0) ? 1.0f : -1.0f;
+            facing = simd_dot(_units[u.target].pos - u.pos, _camRightBoard) >= 0 ? 1.0f : -1.0f;
+        else
+            facing = simd_dot(simd_make_float2(u.army == 0 ? 1.0f : -1.0f, 0),
+                              _camRightBoard) >= 0 ? 1.0f : -1.0f;
         simd_float4 c = kArmyColor[u.army];
         _unitScratch.push_back({u.pos.x, u.pos.y, bob - sink,
                                 spec.width, spec.height, rot,
                                 (float)u.type, facing,
                                 c.x, c.y, c.z, 1.0f,
                                 u.attackAnim, u.seed, 0, 0});
-        if (_unitScratch.size() >= 5800) break;   // keep clear of the blood region
+        if ((int)_unitScratch.size() >= kUnitCap) break;
     }
-    for (const Arrow &a : _arrows) {
-        // Screen-plane rotation approximated from world velocity.
-        float sx = a.vel.x;
-        float sy = a.vel.y * 0.68f - a.vel.z * 0.73f;
+    for (const Shot &a : _shots) {
+        if ((int)_unitScratch.size() >= kUnitCap) break;
+        simd_float3 v3 = simd_make_float3(a.vel.x, a.vel.y, -a.vel.z);
+        float sx = simd_dot(v3, right);
+        float sy = simd_dot(v3, up);
         float rot = atan2f(sy, sx);
-        _unitScratch.push_back({a.pos.x, a.pos.z, a.pos.y - 0.35f,
-                                0.7f, 0.7f, rot, 4, 1,
-                                0.4f, 0.3f, 0.2f, 1.0f,
-                                0, 0, 0, 0});
-        if (_unitScratch.size() >= 5800) break;
+        if (a.kind == 0) {
+            _unitScratch.push_back({a.pos.x, a.pos.z, a.pos.y - 0.35f,
+                                    0.7f, 0.7f, rot, 4, 1,
+                                    0.4f, 0.3f, 0.2f, 1.0f, 0, 0, 0, 0});
+        } else {
+            // Flaming ball: hot additive core + halo.
+            _unitScratch.push_back({a.pos.x, a.pos.z, a.pos.y - 0.45f,
+                                    0.9f, 0.9f, 0, 5, 1,
+                                    1.6f, 0.65f, 0.15f, 0.9f, 0.0f, 0, 0, 0});
+            _unitScratch.push_back({a.pos.x, a.pos.z, a.pos.y - 0.2f,
+                                    0.4f, 0.4f, 0, 5, 1,
+                                    1.9f, 1.5f, 0.9f, 1.0f, 0.0f, 0, 0, 0});
+        }
     }
 
     id<MTLBuffer> flatBuf = _flatBuffers[_frameIndex];
     id<MTLBuffer> unitBuf = _unitBuffers[_frameIndex];
+    id<MTLBuffer> hudBuf = _hudBuffers[_frameIndex];
     NSUInteger flatCount = _flatScratch.size();
     NSUInteger unitCount = _unitScratch.size();
     if (flatCount) memcpy([flatBuf contents], _flatScratch.data(), flatCount * sizeof(FInstC));
     if (unitCount) memcpy([unitBuf contents], _unitScratch.data(), unitCount * sizeof(BInstC));
 
-    // Blood puffs go in a second, non-depth-writing draw of the unit pipeline?
-    // No — they need soft blending; reuse the flat pipeline as billboards is
-    // wrong. Simplest: blood as unit-shape 5 in a separate small buffer drawn
-    // with the flat blend states. Build it now (reusing scratch after copy).
+    // ---- Particle billboards into the reserved tail of the unit buffer.
     _unitScratch.clear();
-    for (const Blood &b : _blood) {
+    for (const Puff &b : _puffs) {
         float f = 1.0f - b.age / b.life;
-        _unitScratch.push_back({b.pos.x, b.pos.y, b.y - b.size,
-                                b.size * 2.0f, b.size * 2.0f, 0, 5, 1,
-                                1, 1, 1, f,
-                                0, 0, 0, 0});
-        if (_unitScratch.size() >= 2000) break;
+        float size = b.size * (b.kind == kPuffSmoke ? (1.0f + 2.0f * (1.0f - f)) : 1.0f);
+        float occl, r, g, bl;
+        switch (b.kind) {
+            case kPuffBlood: r = 0.45f; g = 0.02f; bl = 0.01f; occl = 0.85f; break;
+            case kPuffDust:  r = 0.42f; g = 0.36f; bl = 0.27f; occl = 0.55f; break;
+            case kPuffSpark: r = 1.60f; g = 1.30f; bl = 0.55f; occl = 0.0f;  break;
+            case kPuffFire:  r = 1.80f; g = 0.75f; bl = 0.18f; occl = 0.0f;  break;
+            default:         r = 0.13f; g = 0.12f; bl = 0.11f; occl = 0.75f; break;
+        }
+        _unitScratch.push_back({b.pos.x, b.pos.y, b.y - size,
+                                size * 2.0f, size * 2.0f, 0, 5, 1,
+                                r, g, bl, f, occl, 0, 0, 0});
+        if ((int)_unitScratch.size() >= kPuffCap) break;
     }
-    NSUInteger bloodCount = _unitScratch.size();
-    id<MTLBuffer> bloodBuf = nil;
-    static const NSUInteger kBloodOffset = (NSUInteger)(kMaxBillboards - 2100) * sizeof(BInstC);
-    if (bloodCount) {
-        bloodBuf = unitBuf;
-        memcpy((char *)[unitBuf contents] + kBloodOffset,
-               _unitScratch.data(), bloodCount * sizeof(BInstC));
-    }
+    NSUInteger puffCount = _unitScratch.size();
+    const NSUInteger kPuffOffset = (NSUInteger)(kMaxBillboards - kPuffCap - 64) * sizeof(BInstC);
+    if (puffCount)
+        memcpy((char *)[unitBuf contents] + kPuffOffset,
+               _unitScratch.data(), puffCount * sizeof(BInstC));
+
+    // ---- HUD.
+    int alive[2] = {0, 0};
+    for (const Unit &u : _units) if (u.alive) alive[u.army]++;
+    [self buildHUD:view aliveRed:alive[0] aliveBlue:alive[1]];
+    NSUInteger hudCount = _hudScratch.size();
+    if (hudCount) memcpy([hudBuf contents], _hudScratch.data(), hudCount * sizeof(BInstC));
 
     id<MTLCommandBuffer> commands = [_queue commandBuffer];
     id<MTLRenderCommandEncoder> enc = [commands renderCommandEncoderWithDescriptor:pass];
@@ -1100,7 +1397,6 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
                 vertexCount:6 instanceCount:flatCount];
     }
-
     if (unitCount) {
         [enc setRenderPipelineState:_unitPipeline];
         [enc setDepthStencilState:_depthWrite];
@@ -1110,19 +1406,24 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
                 vertexCount:6 instanceCount:unitCount];
     }
-
-    if (bloodCount) {
-        // Soft blood puffs: same unit pipeline (blending is enabled on it),
-        // but depth-test-only so soft edges never punch holes in the depth.
+    if (puffCount) {
         [enc setRenderPipelineState:_unitPipeline];
         [enc setDepthStencilState:_depthTest];
-        [enc setVertexBuffer:bloodBuf offset:kBloodOffset atIndex:0];
+        [enc setVertexBuffer:unitBuf offset:kPuffOffset atIndex:0];
         [enc setVertexBytes:&uni length:sizeof(uni) atIndex:1];
         [enc setFragmentBytes:&uni length:sizeof(uni) atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
-                vertexCount:6 instanceCount:bloodCount];
+                vertexCount:6 instanceCount:puffCount];
     }
-
+    if (hudCount) {
+        [enc setRenderPipelineState:_hudPipeline];
+        [enc setDepthStencilState:_depthNone];
+        [enc setVertexBuffer:hudBuf offset:0 atIndex:0];
+        [enc setVertexBytes:&uni length:sizeof(uni) atIndex:1];
+        [enc setFragmentBytes:&uni length:sizeof(uni) atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0
+                vertexCount:6 instanceCount:hudCount];
+    }
     [enc endEncoding];
 
     dispatch_semaphore_t sem = _frameSemaphore;
@@ -1134,18 +1435,14 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     [commands commit];
     _frameIndex = (_frameIndex + 1) % kMaxInFlight;
 
-    int alive[2] = {0, 0};
-    for (const Unit &u : _units) if (u.alive) alive[u.army]++;
     NSString *state;
     if (_phase == kPhaseSetup)
-        state = [NSString stringWithFormat:@"SETUP — painting %s (1-4) — SPACE to fight",
-                 kSpecs[_selectedType].name];
+        state = [NSString stringWithFormat:@"SETUP — %s", kSpecs[_selectedType].name];
     else if (_phase == kPhaseBattle)
         state = @"BATTLE";
     else
-        state = _winner >= 0
-            ? [NSString stringWithFormat:@"%@ WINS — SPACE for rematch", _winner == 0 ? @"RED" : @"BLUE"]
-            : @"MUTUAL ANNIHILATION — SPACE for rematch";
+        state = _winner >= 0 ? (_winner == 0 ? @"RED WINS" : @"BLUE WINS")
+                             : @"MUTUAL ANNIHILATION";
     view.window.title = [NSString stringWithFormat:
         @"08 — WAR SIM ▸ RED %d vs BLUE %d ▸ %@ ▸ %.0f fps",
         alive[0], alive[1], state, _smoothedFPS];
