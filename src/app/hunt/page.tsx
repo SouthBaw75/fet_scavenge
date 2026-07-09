@@ -39,6 +39,7 @@ export default function HuntPage() {
     itemId: string;
     correct: boolean;
     correctAnswer: string | null;
+    comment: string | null;
   } | null>(null);
 
   useEffect(() => {
@@ -164,6 +165,10 @@ export default function HuntPage() {
         itemId: currentItem.id,
         correct: result.is_correct,
         correctAnswer: result.correct_answer,
+        comment:
+          currentItem.type === "multiple_choice"
+            ? currentItem.reveal_message
+            : null,
       });
       return;
     }
@@ -310,6 +315,11 @@ export default function HuntPage() {
                 <p className="mt-3 text-lg leading-relaxed text-brand-navy">
                   The correct answer was{" "}
                   <strong>{feedback.correctAnswer}</strong>.
+                </p>
+              )}
+              {feedback.comment && (
+                <p className="mt-3 text-base leading-relaxed text-brand-navy/70">
+                  {feedback.comment}
                 </p>
               )}
               <button

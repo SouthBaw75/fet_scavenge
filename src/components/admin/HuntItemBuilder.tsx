@@ -138,7 +138,8 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
       correct_answer: form.type === "qr" ? null : form.correct_answer.trim(),
       qr_value: form.type === "qr" ? form.qr_value.trim() : null,
       reveal_message:
-        form.type === "qr" && form.reveal_message.trim()
+        (form.type === "qr" || form.type === "multiple_choice") &&
+        form.reveal_message.trim()
           ? form.reveal_message.trim()
           : null,
       image_url:
@@ -311,6 +312,20 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
                 placeholder="Correct choice (must match one exactly)"
                 className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
               />
+              <div>
+                <label className="text-xs font-semibold text-brand-navy/70">
+                  Comment shown with the answer (optional)
+                </label>
+                <textarea
+                  value={form.reveal_message}
+                  onChange={(e) =>
+                    setForm({ ...form, reveal_message: e.target.value })
+                  }
+                  placeholder="e.g. This lathe has been on the floor since 1998!"
+                  rows={2}
+                  className="mt-1 w-full rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
+                />
+              </div>
             </>
           )}
 
