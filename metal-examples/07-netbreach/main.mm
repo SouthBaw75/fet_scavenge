@@ -261,41 +261,30 @@ float neon(float d, float px, float aa) {
     return smoothstep(px * aa, max((px - 1.6) * aa, 0.0), d);
 }
 
+// Key light direction for the faceted bodies (matches the floor's key light).
+constant float2 kLightDir = float2(-0.4961, 0.8682);   // normalized (-0.4, 0.7)
+
 fragment float4 entity_fragment(EOut in [[stage_in]],
                                 constant Uni &u [[buffer(0)]]) {
     float2 p = in.lp;
-    float a = 0.0;
     int shape = int(in.shape + 0.5);
 
+    // Pure-glow shapes: emissive only (alpha 0 -> additive under "over").
+    float a = -1.0;
     if (shape == 0) {                       // soft glow dot (particles, cores)
         float r = length(p);
         a = smoothstep(1.0, 0.0, r);
         a *= a;
-    } else if (shape == 1) {                // hard ring + faint interior
+    } else if (shape == 1) {                // glowing ring
         float r = length(p);
         float aa = fwidth(r);
         a = neon(abs(r - 0.82), 2.2, aa) + 0.06 * smoothstep(0.82, 0.0, r);
-    } else if (shape == 2) {                // diamond: hard edge, dim body
-        float d = abs(p.x) + abs(p.y);
-        float aa = fwidth(d);
-        a = neon(abs(d - 0.88), 2.2, aa)
-          + 0.10 * smoothstep(aa, -aa, d - 0.88);
-    } else if (shape == 3) {                // hex: hard outline, dim body
+    } else if (shape == 3) {                // glowing hex outline (the Core)
         float2 q = abs(p);
         float d = max(q.x * 0.866 + q.y * 0.5, q.y) - 0.82;
         float aa = fwidth(d);
         a = neon(abs(d), 2.2, aa) + 0.08 * smoothstep(aa, -aa, d);
-    } else if (shape == 4) {                // solid, crisp-edged fill
-        float d = max(abs(p.x), abs(p.y));
-        float aa = fwidth(d);
-        a = smoothstep(aa, -aa, d - 0.96);
-    } else if (shape == 5) {                // square outline, dim body
-        float d = max(abs(p.x), abs(p.y));
-        float aa = fwidth(d);
-        a = neon(abs(d - 0.88), 2.2, aa)
-          + 0.10 * smoothstep(aa, -aa, d - 0.88);
-    } else if (shape == 6) {                // road traffic: packets of hostile data
-        // params.x = arc distance at segment start, params.y = segment length
+    } else if (shape == 6) {                // road traffic packets
         float uWorld = in.params.x + (p.x * 0.5 + 0.5) * in.params.y;
         float d = fract(uWorld * 0.55 - u.time * 1.4);
         float packet = exp(-pow((d - 0.5) * 8.0, 2.0));
@@ -314,12 +303,82 @@ fragment float4 entity_fragment(EOut in [[stage_in]],
         a = 0.85 * neon(abs(r - 0.97), 1.6, aa)
           + 0.03 * smoothstep(1.0, 0.0, r);
     }
+    if (a >= 0.0) {
+        float3 rgb = in.color.rgb * a
+                   + float3(1.0) * (pow(a, 5.0) * 0.9 * in.color.a);
+        return float4(rgb, 0.0);            // emissive: adds, never occludes
+    }
 
-    // The light-cycle look: line cores burn to white, halos stay colored.
-    // pow(a,5) only reaches the center of a line; the ACES tonemap and bloom
-    // finish the job.
-    float3 rgb = in.color.rgb * a + float3(1.0, 1.0, 1.0) * (pow(a, 5.0) * 0.9 * in.color.a);
-    return float4(rgb, a * in.color.a);
+    if (shape == 4) {                       // solid crisp fill (barrels, bars, ghosts)
+        float d = max(abs(p.x), abs(p.y));
+        float aa = fwidth(d);
+        float cov = smoothstep(aa, -aa, d - 0.96);
+        return float4(in.color.rgb * cov, cov * in.color.a);
+    }
+
+    // --- Faceted 3-D constructs: dark occluding body + neon edge lines. ---
+    float body = 0.0, edge = 0.0, shade = 1.0;
+    float3 tint = in.color.rgb;
+
+    if (shape == 2) {                       // enemy GEM: cut-diamond program
+        float d = abs(p.x) + abs(p.y);
+        float aa = fwidth(d);
+        body = smoothstep(aa, -aa, d - 0.92);
+        // side facets lit by quadrant normal
+        float2 n2 = normalize(float2(sign(p.x) + 1e-4, sign(p.y)) * 0.7071);
+        shade = 0.35 + 0.5 * (dot(n2, kLightDir) * 0.5 + 0.5);
+        // raised top face
+        float top = smoothstep(aa * 2.0, -aa * 2.0, d - 0.46);
+        shade = mix(shade, 0.85 + 0.35 * (dot(normalize(p + 0.001), kLightDir) * 0.5 + 0.5), top);
+        // geometry-defining edges: silhouette, top-face inset, facet ridges
+        edge = neon(abs(d - 0.90), 2.0, aa)
+             + 0.85 * neon(abs(d - 0.46), 1.6, aa);
+        float band = smoothstep(0.44, 0.50, d) * smoothstep(0.94, 0.88, d);
+        edge += 0.6 * band * (neon(abs(p.x), 1.4, fwidth(p.x)) +
+                              neon(abs(p.y), 1.4, fwidth(p.y)));
+    } else if (shape == 9) {                // ARC pod: domed disc
+        float r = length(p);
+        float aa = fwidth(r);
+        body = smoothstep(aa, -aa, r - 0.90);
+        float2 n2 = p / max(r, 1e-3);
+        shade = 0.35 + 0.40 * (dot(n2, kLightDir) * 0.5 + 0.5);
+        shade += 0.55 * exp(-length(p - kLightDir * 0.35) * 2.2);   // dome sheen
+        edge = neon(abs(r - 0.88), 2.0, aa)
+             + 0.8 * neon(abs(r - 0.36), 1.6, aa);
+    } else if (shape == 10) {               // CRYO pod: hex prism
+        float2 q = abs(p);
+        float d = max(q.x * 0.866 + q.y * 0.5, q.y);
+        float aa = fwidth(d);
+        body = smoothstep(aa, -aa, d - 0.88);
+        float2 n2 = (q.x * 0.866 + q.y * 0.5 > q.y)
+                    ? normalize(float2(sign(p.x) * 0.866, sign(p.y) * 0.5))
+                    : float2(0.0, sign(p.y));
+        shade = 0.35 + 0.45 * (dot(n2, kLightDir) * 0.5 + 0.5);
+        float top = smoothstep(aa * 2.0, -aa * 2.0, d - 0.48);
+        shade = mix(shade, 0.95, top);
+        edge = neon(abs(d - 0.86), 2.0, aa)
+             + 0.85 * neon(abs(d - 0.48), 1.6, aa);
+    } else if (shape == 11) {               // SENTRY pod: chamfered block
+        float ds = max(abs(p.x), abs(p.y));
+        float dc = (abs(p.x) + abs(p.y)) * 0.75;
+        float d = max(ds, dc);
+        float aa = fwidth(d);
+        body = smoothstep(aa, -aa, d - 0.92);
+        float2 n2 = (abs(p.x) > abs(p.y)) ? float2(sign(p.x), 0.0)
+                                          : float2(0.0, sign(p.y));
+        shade = 0.35 + 0.45 * (dot(n2, kLightDir) * 0.5 + 0.5);
+        float top = smoothstep(aa * 2.0, -aa * 2.0, ds - 0.52);
+        shade = mix(shade, 0.95, top);
+        edge = neon(abs(d - 0.90), 2.0, aa)
+             + 0.85 * neon(abs(ds - 0.52), 1.6, aa);
+    }
+
+    // Dark glossy body, faintly tinted by the entity color, plus HDR edges
+    // that burn white at their core.
+    float3 bodyCol = (tint * 0.055 + float3(0.006, 0.009, 0.015)) * shade * body;
+    float e = min(edge, 1.2);
+    float3 rgb = bodyCol + tint * e + float3(1.0) * (pow(min(e, 1.0), 5.0) * 0.9);
+    return float4(rgb, body * in.color.a);
 }
 
 // ---------- bloom chain ----------
@@ -520,13 +579,16 @@ struct Puff {
 
     d.vertexFunction = [library newFunctionWithName:@"entity_vertex"];
     d.fragmentFunction = [library newFunctionWithName:@"entity_fragment"];
-    d.colorAttachments[0].blendingEnabled = YES;      // additive neon
+    // Premultiplied-alpha "over": lets shapes carry DARK occluding bodies
+    // (alpha = coverage) with emissive neon edges, while pure-glow shapes
+    // write alpha 0 and degrade to plain additive.
+    d.colorAttachments[0].blendingEnabled = YES;
     d.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
     d.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
     d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
     d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
-    d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
-    d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+    d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
     _entityPipeline = [device newRenderPipelineStateWithDescriptor:d error:&error];
     if (!_entityPipeline) { fprintf(stderr, "entity pipeline: %s\n", error.localizedDescription.UTF8String); return nil; }
 
@@ -1031,10 +1093,13 @@ struct Puff {
              shape:1 color:simd_make_float4(2.0f, 0.8f, 0.15f, 1.0f) * pulse
             params:simd_make_float4(0, 0, 0, 0)];
     simd_float2 core = _waypoints.back();
-    [self pushInst:core half:simd_make_float2(0.95f, 0.95f) rot:t * 0.35f
+    [self pushInst:core half:simd_make_float2(0.85f, 0.85f) rot:0
+             shape:10 color:simd_make_float4(0.6f, 1.4f, 2.0f, 1.0f)
+            params:simd_make_float4(0, 0, 0, 0)];
+    [self pushInst:core half:simd_make_float2(0.98f, 0.98f) rot:t * 0.35f
              shape:3 color:simd_make_float4(0.9f, 1.8f, 2.2f, 1.0f) * pulse
             params:simd_make_float4(0, 0, 0, 0)];
-    [self pushInst:core half:simd_make_float2(0.45f, 0.45f) rot:0
+    [self pushInst:core half:simd_make_float2(0.34f, 0.34f) rot:0
              shape:0 color:simd_make_float4(1.2f, 1.7f, 2.0f, 1.0f)
             params:simd_make_float4(0, 0, 0, 0)];
 
@@ -1043,19 +1108,24 @@ struct Puff {
         const TowerSpec &spec = kTowers[tw.type];
         simd_float2 tp = simd_make_float2(tw.tx + 0.5f, tw.ty + 0.5f);
         if (tw.type == kTowerSentry) {
-            [self pushInst:tp half:simd_make_float2(0.34f, 0.34f) rot:0
-                     shape:5 color:spec.color * 1.1f params:simd_make_float4(0, 0, 0, 0)];
-            [self pushInst:tp half:simd_make_float2(0.34f, 0.07f) rot:tw.aim
+            // Chamfered turret block with a bright barrel tracking the target.
+            [self pushInst:tp half:simd_make_float2(0.38f, 0.38f) rot:0
+                     shape:11 color:spec.color params:simd_make_float4(0, 0, 0, 0)];
+            [self pushInst:tp half:simd_make_float2(0.34f, 0.06f) rot:tw.aim
                      shape:4 color:spec.color * 1.5f params:simd_make_float4(0, 0, 0, 0)];
         } else if (tw.type == kTowerArc) {
-            [self pushInst:tp half:simd_make_float2(0.36f, 0.36f) rot:t * 1.5f
-                     shape:1 color:spec.color params:simd_make_float4(0, 0, 0, 0)];
-            [self pushInst:tp half:simd_make_float2(0.14f, 0.14f) rot:0
+            // Domed capacitor pod with a rotating charge ring above it.
+            [self pushInst:tp half:simd_make_float2(0.38f, 0.38f) rot:0
+                     shape:9 color:spec.color params:simd_make_float4(0, 0, 0, 0)];
+            [self pushInst:tp half:simd_make_float2(0.30f, 0.30f) rot:t * 1.5f
+                     shape:1 color:spec.color * 0.8f params:simd_make_float4(0, 0, 0, 0)];
+            [self pushInst:tp half:simd_make_float2(0.10f, 0.10f) rot:0
                      shape:0 color:spec.color * (1.1f + 0.5f * sinf(t * 7.0f))
                     params:simd_make_float4(0, 0, 0, 0)];
         } else {
-            [self pushInst:tp half:simd_make_float2(0.36f, 0.36f) rot:t * 0.6f
-                     shape:3 color:spec.color params:simd_make_float4(0, 0, 0, 0)];
+            // Hex-prism cryo housing; the aura ring pulses around it.
+            [self pushInst:tp half:simd_make_float2(0.40f, 0.40f) rot:t * 0.3f
+                     shape:10 color:spec.color params:simd_make_float4(0, 0, 0, 0)];
             const TowerTier &tier = spec.tiers[tw.tier];
             float ap = 0.55f + 0.45f * sinf(t * 2.2f);
             [self pushInst:tp half:simd_make_float2(tier.range, tier.range) rot:0
