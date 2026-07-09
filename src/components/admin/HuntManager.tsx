@@ -96,7 +96,10 @@ export function HuntManager({
 
   async function updateSetting(
     hunt: Hunt,
-    key: "randomize_item_order" | "show_leaderboard_to_teams",
+    key:
+      | "randomize_item_order"
+      | "show_leaderboard_to_teams"
+      | "show_immediate_feedback",
     value: boolean,
   ) {
     const settings = { ...hunt.settings, [key]: value };
@@ -228,6 +231,21 @@ export function HuntManager({
                   }
                 />
                 Show leaderboard to teams after they finish
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={!!hunt.settings.show_immediate_feedback}
+                  onChange={(e) =>
+                    updateSetting(
+                      hunt,
+                      "show_immediate_feedback",
+                      e.target.checked,
+                    )
+                  }
+                />
+                Show CORRECT!/INCORRECT right after each answer (off = reveal
+                only at the end)
               </label>
             </div>
 

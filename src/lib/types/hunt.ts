@@ -20,6 +20,9 @@ export interface Hunt {
 export interface HuntSettings {
   randomize_item_order?: boolean;
   show_leaderboard_to_teams?: boolean;
+  /** Tell each team CORRECT!/INCORRECT (with the right answer) right after
+   *  they answer, instead of staying silent until the hunt is complete. */
+  show_immediate_feedback?: boolean;
 }
 
 export interface HuntItem {

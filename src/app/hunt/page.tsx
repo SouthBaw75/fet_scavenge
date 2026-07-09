@@ -8,7 +8,7 @@ import { seededShuffle } from "@/lib/shuffle";
 import { SiteHeader } from "@/components/SiteHeader";
 import { HuntTimer } from "@/components/HuntTimer";
 import { QrScannerView } from "@/components/QrScanner";
-import { playTap, playEffect } from "@/lib/sound";
+import { playTap, playEffect, playIncorrect } from "@/lib/sound";
 import { burstConfetti } from "@/lib/celebrate";
 import { Fetch } from "@/components/Fetch";
 import type { Hunt, PublicHuntItem, Team } from "@/lib/types/hunt";
@@ -23,6 +23,7 @@ export default function HuntPage() {
 
   const [state, setState] = useState<LoadState>("loading");
   const [team, setTeam] = useState<Team | null>(null);
+  const [hunt, setHunt] = useState<Hunt | null>(null);
   const [items, setItems] = useState<PublicHuntItem[]>([]);
   const [answeredIds, setAnsweredIds] = useState<Set<string>>(new Set());
   const [textAnswer, setTextAnswer] = useState("");
@@ -32,6 +33,13 @@ export default function HuntPage() {
   const [reveal, setReveal] = useState<{ message: string; itemId: string } | null>(
     null,
   );
+  // When the hunt has instant feedback on, hold the just-submitted result
+  // here and pause on a CORRECT!/INCORRECT card until the team taps Continue.
+  const [feedback, setFeedback] = useState<{
+    itemId: string;
+    correct: boolean;
+    correctAnswer: string | null;
+  } | null>(null);
 
   useEffect(() => {
     // localStorage is only readable on the client, so the session lookup has
@@ -97,6 +105,7 @@ export default function HuntPage() {
       }
 
       setTeam(currentTeam);
+      setHunt(huntRow as Hunt | null);
       setItems(orderedItems);
       setAnsweredIds(
         new Set(
@@ -128,15 +137,38 @@ export default function HuntPage() {
     setSubmitting(true);
     playEffect("submit");
 
-    await supabase.rpc("submit_answer", {
-      p_team_id: team.id,
-      p_hunt_item_id: currentItem.id,
-      p_answer: answer,
-    });
+    const { data } = await supabase
+      .rpc("submit_answer", {
+        p_team_id: team.id,
+        p_hunt_item_id: currentItem.id,
+        p_answer: answer,
+      })
+      .single();
+    const result = data as {
+      is_correct: boolean;
+      correct_answer: string | null;
+    } | null;
 
-    burstConfetti();
     setTextAnswer("");
     setSubmitting(false);
+
+    // With instant feedback on, pause on a CORRECT!/INCORRECT card instead of
+    // advancing straight away — the QR reveal (if any) still comes after.
+    if (hunt?.settings.show_immediate_feedback && result) {
+      if (result.is_correct) {
+        burstConfetti();
+      } else {
+        playIncorrect();
+      }
+      setFeedback({
+        itemId: currentItem.id,
+        correct: result.is_correct,
+        correctAnswer: result.correct_answer,
+      });
+      return;
+    }
+
+    burstConfetti();
 
     // For a QR stop with a reveal message, pause on the message before
     // advancing. Otherwise mark answered immediately (moves to the next stop).
@@ -144,6 +176,18 @@ export default function HuntPage() {
       setReveal({ message: currentItem.reveal_message, itemId: currentItem.id });
     } else {
       setAnsweredIds((prev) => new Set(prev).add(currentItem.id));
+    }
+  }
+
+  function dismissFeedback() {
+    if (!feedback) return;
+    const item = items.find((i) => i.id === feedback.itemId);
+    const { itemId } = feedback;
+    setFeedback(null);
+    if (item?.type === "qr" && item.reveal_message) {
+      setReveal({ message: item.reveal_message, itemId });
+    } else {
+      setAnsweredIds((prev) => new Set(prev).add(itemId));
     }
   }
 
@@ -242,7 +286,41 @@ export default function HuntPage() {
           />
         </div>
 
-        {reveal ? (
+        {feedback ? (
+          <div className="animate-pop-in">
+            <div className="relative z-10 -mb-10 flex justify-center">
+              <Fetch
+                pose={feedback.correct ? "celebrate" : "confused"}
+                width={180}
+              />
+            </div>
+            <div
+              className={`rounded-3xl border-2 bg-white p-6 pt-14 text-center shadow-xl shadow-brand-navy/5 ${
+                feedback.correct ? "border-brand-green/40" : "border-red-300"
+              }`}
+            >
+              <h2
+                className={`mt-2 font-display text-3xl font-bold ${
+                  feedback.correct ? "text-brand-green" : "text-red-500"
+                }`}
+              >
+                {feedback.correct ? "CORRECT! 🎉" : "INCORRECT"}
+              </h2>
+              {!feedback.correct && feedback.correctAnswer && (
+                <p className="mt-3 text-lg leading-relaxed text-brand-navy">
+                  The correct answer was{" "}
+                  <strong>{feedback.correctAnswer}</strong>.
+                </p>
+              )}
+              <button
+                onClick={dismissFeedback}
+                className="btn-springy mt-6 h-14 w-full rounded-full bg-brand-navy font-display text-lg font-bold text-white shadow-lg"
+              >
+                Next Stop →
+              </button>
+            </div>
+          </div>
+        ) : reveal ? (
           <div className="animate-pop-in">
             <div className="relative z-10 -mb-10 flex justify-center">
               <Fetch pose="celebrate" width={180} />

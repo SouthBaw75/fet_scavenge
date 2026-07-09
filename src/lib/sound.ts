@@ -78,6 +78,14 @@ export function playSubmit() {
   ]);
 }
 
+/** Gentle descending "womp" — instant feedback marked an answer wrong. */
+export function playIncorrect() {
+  play([
+    { freq: 330, at: 0, dur: 0.14, type: "sine", gain: 0.11 },
+    { freq: 247, at: 0.12, dur: 0.22, type: "sine", gain: 0.11 },
+  ]);
+}
+
 /** Cheerful ta-da for milestones (team created, QR found). */
 export function playSuccess() {
   play([
