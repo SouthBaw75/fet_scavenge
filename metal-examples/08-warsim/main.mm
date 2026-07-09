@@ -1145,7 +1145,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 }
 
 // Converts a rect in view points (origin bottom-left) to NDC and pushes.
-- (void)buildHUD:(MTKView *)view aliveRed:(int)red aliveBlue:(int)blue {
+- (void)buildHUD:(MTKView *)view aliveRed:(int)aliveRed aliveBlue:(int)aliveBlue {
     _hudScratch.clear();
     float bw = (float)view.bounds.size.width;
     float bh = (float)view.bounds.size.height;
