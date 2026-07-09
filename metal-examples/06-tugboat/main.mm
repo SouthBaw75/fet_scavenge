@@ -45,6 +45,16 @@ static const float kBoatYawDeg = 90.0f;         // spin the model to face forwar
 static const float kBoatPitchDeg = 0.0f;        // tilt (use -90 if the model is Z-up, not Y-up)
 static const float kBoatDraft = 0.5f;           // how far the hull bottom sits below the waterline
 
+// --- Hull physics: how the boat sits in the water. A bulky hull bridges
+// across short waves (buoyancy averaged over its footprint) and responds
+// slowly (inertia), rather than bobbing on every wavelet. ---
+static const float kBoatSampleLength = 5.0f;    // half the hull length sampled for buoyancy (m)
+static const float kBoatSampleWidth  = 2.2f;    // half the beam sampled (m)
+static const float kBoatHeaveResponse = 2.0f;   // vertical-bob responsiveness (lower = heavier)
+static const float kBoatTiltResponse  = 1.5f;   // pitch/roll responsiveness (lower = stiffer)
+static const float kBoatTiltGain      = 0.45f;  // <1 keeps a bulky hull flatter than a cork
+static const float kBoatSink          = 0.25f;  // how deep the origin rides below the mean surface
+
 static const int kGrid = 360;        // water quads per side (wide enough that the
 static const float kSpacing = 0.5f;  // grid edges sit past the horizon haze)
 static const int kBuoyCount = 8;
@@ -548,6 +558,11 @@ enum {
     float _wakeAccum;
     simd_float3 _boatRight, _boatUp, _boatBack, _boatWorldPos;
 
+    // Inertial hull state (low-pass filtered toward the wave surface).
+    float _boatHeight;
+    float _boatTiltFwd;
+    float _boatTiltRight;
+
     double _startTime;
     double _lastFrameTime;
     float _smoothedFPS;
@@ -693,6 +708,9 @@ enum {
     _heading = 0;
     _speed = 0;
     _throttle = 0;
+    _boatHeight = 0;
+    _boatTiltFwd = 0;
+    _boatTiltRight = 0;
     _score = 0;
     _rng.seed(7);
     for (int i = 0; i < kBuoyCount; i++) [self respawnBuoy:i];
@@ -896,6 +914,7 @@ enum {
     if (_keys[kKeySpace]) _throttle *= expf(-6.0f * dt);
     if (_keys[kKeyR]) {
         _boatPos = simd_make_float2(0, 0); _heading = 0; _speed = 0; _throttle = 0;
+        _boatTiltFwd = 0; _boatTiltRight = 0;
         _particles.clear();
     }
 
@@ -912,15 +931,36 @@ enum {
     simd_float2 fwd = simd_make_float2(sinf(_heading), -cosf(_heading));
     _boatPos += fwd * _speed * dt;
 
-    // Cache the boat's floating transform so rendering and particle emission
-    // agree on where the funnel and stern are this frame.
-    WaveSample ws = SampleWaves(_boatPos, t);
+    // Buoyancy sampled across the whole hull footprint, not one point: a big
+    // hull spans several wavelengths, so short chop averages out instead of
+    // tossing it. Fore/aft and port/stbd differences give pitch and roll.
+    simd_float2 fwdXZ = simd_make_float2(sinf(_heading), -cosf(_heading));
+    simd_float2 rightXZ = simd_make_float2(cosf(_heading), sinf(_heading));
+    float hC = SampleWaves(_boatPos, t).height;
+    float hF = SampleWaves(_boatPos + fwdXZ * kBoatSampleLength, t).height;
+    float hA = SampleWaves(_boatPos - fwdXZ * kBoatSampleLength, t).height;
+    float hP = SampleWaves(_boatPos - rightXZ * kBoatSampleWidth, t).height;
+    float hS = SampleWaves(_boatPos + rightXZ * kBoatSampleWidth, t).height;
+    float targetH = (hC + hF + hA + hP + hS) * 0.2f;
+    float slopeFwd = (hF - hA) / (2.0f * kBoatSampleLength);   // rise per metre forward
+    float slopeRight = (hS - hP) / (2.0f * kBoatSampleWidth);
+
+    // Heavy hull: ease toward the wave rather than snapping to it (inertia).
+    float kH = 1.0f - expf(-kBoatHeaveResponse * dt);
+    float kT = 1.0f - expf(-kBoatTiltResponse * dt);
+    _boatHeight     += (targetH - _boatHeight) * kH;
+    _boatTiltFwd    += (slopeFwd - _boatTiltFwd) * kT;
+    _boatTiltRight  += (slopeRight - _boatTiltRight) * kT;
+
+    simd_float3 fwd3 = simd_make_float3(fwdXZ.x, 0, fwdXZ.y);
+    simd_float3 right3 = simd_make_float3(rightXZ.x, 0, rightXZ.y);
     simd_float3 worldUp = simd_make_float3(0, 1, 0);
-    _boatUp = simd_normalize(worldUp + (ws.normal - worldUp) * 0.5f);
-    simd_float3 bFwd0 = simd_make_float3(sinf(_heading), 0, -cosf(_heading));
-    _boatRight = simd_normalize(simd_cross(bFwd0, _boatUp));
+    _boatUp = simd_normalize(worldUp
+              - fwd3 * (_boatTiltFwd * kBoatTiltGain)
+              - right3 * (_boatTiltRight * kBoatTiltGain));
+    _boatRight = simd_normalize(simd_cross(fwd3, _boatUp));
     _boatBack = simd_cross(_boatRight, _boatUp);
-    _boatWorldPos = simd_make_float3(_boatPos.x, ws.height - 0.25f, _boatPos.y);
+    _boatWorldPos = simd_make_float3(_boatPos.x, _boatHeight - kBoatSink, _boatPos.y);
 
     [self emitSmoke:dt];
     [self emitWake:dt time:t];
