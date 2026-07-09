@@ -1,10 +1,11 @@
 // 06 — Tugboat
 //
-// A tiny game: drive a tugboat across a top-down Gerstner-wave ocean and
-// collect the orange buoys. Everything is procedural — the boat and buoys are
-// colored boxes, the water is the same wave math as example 05 viewed from
-// above, and both the boat and the buoys sample the SAME wave function on the
-// CPU so they genuinely ride the swells (bob, pitch, and roll).
+// A tiny game: drive a tugboat across a Gerstner-wave ocean, viewed from a
+// chase camera angled 30° down, and collect the orange buoys. Everything is
+// procedural — the boat and buoys are colored boxes, the water is the same
+// wave math as example 05, and both the boat and the buoys sample the SAME
+// wave function on the CPU so they genuinely ride the swells (bob, pitch,
+// and roll). Distance haze blends the water edge into the sky at the horizon.
 //
 // Two billboard particle systems add life: dark smoke puffing from the funnel
 // (heavier under throttle) and white foam churning off the stern into a wake.
@@ -29,8 +30,8 @@
 #include <string>
 #include <vector>
 
-static const int kGrid = 240;        // water quads per side
-static const float kSpacing = 0.5f;  // meters per quad
+static const int kGrid = 360;        // water quads per side (wide enough that the
+static const float kSpacing = 0.5f;  // grid edges sit past the horizon haze)
 static const int kBuoyCount = 8;
 static const float kCollectRadius = 2.5f;
 static const int kMaxParticles = 1400;  // smoke + wake combined
@@ -174,6 +175,11 @@ fragment float4 water_fragment(WaterVSOut in [[stage_in]],
     float foam = smoothstep(0.45, 0.85, in.crest) *
                  smoothstep(0.35, 0.75, foamMask + 0.25 * in.crest);
     color = mix(color, float3(0.90, 0.93, 0.95), foam * 0.6);
+
+    // Distance haze: blends the far edge of the water grid into the sky so
+    // the oblique camera angle doesn't reveal a hard seam at the grid border.
+    float dist = length(u.camPos.xyz - in.world);
+    color = mix(color, float3(0.55, 0.68, 0.82), smoothstep(60.0, 95.0, dist));
 
     return float4(pow(color, float3(0.4545)), 1.0);
 }
@@ -463,7 +469,9 @@ enum {
     id<MTLDevice> device = view.device;
     _queue = [device newCommandQueue];
     view.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
-    view.clearColor = MTLClearColorMake(0.03, 0.16, 0.22, 1.0);
+    // Pale haze that the water fogs into at the horizon (gamma-encoded to match
+    // the water shader's manual gamma, so the grid edge blends seamlessly).
+    view.clearColor = MTLClearColorMake(0.76, 0.84, 0.91, 1.0);
 
     // Generate the shader's wave table from the C++ table so the CPU
     // buoyancy math and the GPU water can never drift apart.
@@ -752,9 +760,12 @@ enum {
 
     [self stepGame:dt time:t];
 
-    // Mostly top-down camera, tilted a touch so the boat reads as 3D.
-    simd_float3 eye = simd_make_float3(_boatPos.x, 40.0f, _boatPos.y + 14.0f);
-    simd_float3 target = simd_make_float3(_boatPos.x, 0.0f, _boatPos.y);
+    // Chase camera looking down at the boat at a 30° angle above the water.
+    const float depression = 30.0f * (float)M_PI / 180.0f;
+    const float camDist = 42.0f;
+    simd_float3 target = simd_make_float3(_boatPos.x, 0.6f, _boatPos.y);
+    simd_float3 eye = target +
+        simd_make_float3(0.0f, sinf(depression), cosf(depression)) * camDist;
     simd_float3 fwd = simd_normalize(target - eye);
     simd_float3 right = simd_normalize(simd_cross(fwd, simd_make_float3(0, 1, 0)));
     simd_float3 up = simd_cross(right, fwd);

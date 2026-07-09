@@ -70,12 +70,13 @@ and distance fog into the horizon. The sky is a second bufferless fullscreen
 pass. No textures or assets — every pixel is math.
 
 ### 06 — Tugboat (a game!)
-Drive a tugboat across a top-down ocean and collect the floating buoys. The
-water is the same Gerstner-wave surface as example 05 seen from above, and the
-key trick is that the **boat and buoys sample the exact same wave function on
-the CPU** — the shader's wave table is generated from one C++ table at startup,
-so the game logic and the GPU water can never disagree. Everything rides the
-swell: the boat bobs, pitches, and rolls, and the buoys spin and bounce.
+Drive a tugboat across the ocean — seen from a chase camera angled 30° down —
+and collect the floating buoys. The water is the same Gerstner-wave surface as
+example 05, and the key trick is that the **boat and buoys sample the exact
+same wave function on the CPU** — the shader's wave table is generated from one
+C++ table at startup, so the game logic and the GPU water can never disagree.
+Everything rides the swell: the boat bobs, pitches, and rolls, and the buoys
+spin and bounce. Distance haze fades the far water into the sky at the horizon.
 
 Physics feel like a boat, not a car — throttle is persistent, drag brakes you,
 and the rudder only bites when water is flowing past it, so you can't spin in
