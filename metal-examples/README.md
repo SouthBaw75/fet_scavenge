@@ -128,6 +128,18 @@ integrity. Keys 1/2/3 pick a tower; left-click builds or upgrades;
 right-click sells. The 10-wave table with Golem/Wisp and the Black ICE boss
 land next.
 
+### 08 — WAR SIM (battle simulator)
+A TABS-style battle simulator: paint two armies on a grassy battlefield, hit
+SPACE, and watch hundreds of little soldiers charge, volley, and hack it out
+until one side is annihilated. Four unit types with distinct silhouettes and
+behavior — Infantry (sword & shield), Archers (true ballistic arrow arcs),
+Cavalry (charge bonus), Berserkers (glass cannons) — every character drawn
+procedurally as SDF shapes on alpha-tested billboards (depth-sorted for free,
+no art assets). Fixed 60 Hz sim with spatial-hash targeting and separation,
+blood puffs, persistent ground splats and corpses, victory hops for the
+winners. Keys 1–4 pick a unit; click/drag stamps squads (left half = RED,
+right half = BLUE); right-click erases; D deploys default armies; R clears.
+
 ## Where to go from here
 
 - **Textures & samplers** — `MTLTexture`, `MTKTextureLoader`
