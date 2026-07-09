@@ -153,6 +153,18 @@ rolls individual **skill** at spawn — HP, damage, attack speed, and archery
 accuracy all vary man to man (veterans stand slightly taller), so even
 identical squads fight like real, uneven troops.
 
+The simulation-depth pack (v6) adds **morale & routing** — soldiers lose
+courage as friends die around them, break below the threshold, and flee the
+field with a white flag overhead (fleeing men are cut down from behind, can
+rally in safety, and victory goes to whoever still *holds the field*, not
+total annihilation) — plus **line-holding formations**, five new units
+(**Pikemen** whose braced walls gore charging cavalry, **Ballistae** firing
+bolts that skewer a whole file of men, **Healers**, a hulking **Champion**
+who cleaves three men a swing, and a mounted **Commander** whose banner aura
+emboldens nearby troops — and whose death sends a shock through the whole
+army), and a **weapon-vs-armor matrix**: arrows bounce off shields, axes
+crush them, pikes and bolts punch through heavy armor.
+
 ## Where to go from here
 
 - **Textures & samplers** — `MTLTexture`, `MTKTextureLoader`

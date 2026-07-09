@@ -46,23 +46,48 @@ static const int kUnitCap = 5800;        // billboard budget for units+arrows
 static const int kPuffCap = 2000;        // particle budget (reserved region)
 
 enum { kInfantry = 0, kArcher = 1, kCavalry = 2, kBerserker = 3, kCatapult = 4,
-       kUnitTypeCount = 5 };
+       kPikeman = 5, kBallista = 6, kHealer = 7, kChampion = 8, kCommander = 9,
+       kUnitTypeCount = 10 };
 enum { kPhaseSetup = 0, kPhaseBattle = 1, kPhaseDone = 2 };
 enum { kPuffBlood = 0, kPuffDust = 1, kPuffSpark = 2, kPuffFire = 3, kPuffSmoke = 4,
-       kPuffSplash = 5 };
+       kPuffSplash = 5, kPuffHeal = 6 };
+
+// Weapon vs armor: attacks and defenses interact beyond raw stats.
+enum { kAtkSlash = 0, kAtkPierce = 1, kAtkCrush = 2, kAtkArrow = 3, kAtkBolt = 4,
+       kAtkBlast = 5 };
+enum { kArNone = 0, kArShield = 1, kArHeavy = 2 };
+// kDmgMatrix[attack][armor]
+static const float kDmgMatrix[6][3] = {
+    /* slash  */ {1.00f, 0.85f, 0.75f},   // swords blunted by shields & plate
+    /* pierce */ {1.00f, 0.90f, 1.10f},   // pikes/lances/bolts punch armor
+    /* crush  */ {1.00f, 1.15f, 1.00f},   // axes & maces smash shields
+    /* arrow  */ {1.15f, 0.65f, 0.80f},   // arrows bounce off shields
+    /* bolt   */ {1.00f, 0.95f, 1.15f},   // ballista bolts skewer anything
+    /* blast  */ {1.00f, 1.00f, 0.90f},
+};
 
 struct UnitSpec {
     const char *name;
     float hp, damage, reach, speed, radius, cooldown;
     float width, height;
+    int atk;       // melee attack type
+    int armor;     // armor class
 };
 static const UnitSpec kSpecs[kUnitTypeCount] = {
-    {"Infantry",  100, 22, 0.9f, 2.6f, 0.35f, 1.00f, 1.15f, 1.45f},
-    {"Archer",     55,  8, 0.8f, 2.8f, 0.30f, 1.20f, 1.00f, 1.40f},
-    {"Cavalry",   160, 30, 1.2f, 7.5f, 0.55f, 1.10f, 2.10f, 1.90f},
-    {"Berserker", 140, 45, 1.0f, 3.4f, 0.40f, 0.90f, 1.30f, 1.55f},
-    {"Catapult",  220,  6, 1.4f, 0.9f, 1.00f, 1.30f, 2.60f, 2.00f},
+    {"Infantry",  100, 22, 0.9f, 2.6f, 0.35f, 1.00f, 1.15f, 1.45f, kAtkSlash,  kArShield},
+    {"Archer",     55,  8, 0.8f, 2.8f, 0.30f, 1.20f, 1.00f, 1.40f, kAtkSlash,  kArNone},
+    {"Cavalry",   160, 30, 1.2f, 7.5f, 0.55f, 1.10f, 2.10f, 1.90f, kAtkPierce, kArHeavy},
+    {"Berserker", 140, 45, 1.0f, 3.4f, 0.40f, 0.90f, 1.30f, 1.55f, kAtkCrush,  kArNone},
+    {"Catapult",  220,  6, 1.4f, 0.9f, 1.00f, 1.30f, 2.60f, 2.00f, kAtkSlash,  kArNone},
+    {"Pikeman",   110, 18, 1.7f, 2.3f, 0.35f, 1.20f, 1.15f, 1.50f, kAtkPierce, kArShield},
+    {"Ballista",  150,  4, 1.4f, 0.8f, 0.90f, 1.30f, 2.20f, 1.80f, kAtkSlash,  kArNone},
+    {"Healer",     60,  0, 0.8f, 2.9f, 0.30f, 1.50f, 1.00f, 1.45f, kAtkSlash,  kArNone},
+    {"Champion",  900, 70, 1.3f, 3.2f, 0.55f, 0.70f, 1.70f, 1.90f, kAtkCrush,  kArHeavy},
+    {"Commander", 250, 25, 1.2f, 5.0f, 0.55f, 1.00f, 2.10f, 1.95f, kAtkPierce, kArHeavy},
 };
+
+// Sprite shape ids in the shader per unit type.
+static const float kSpriteFor[kUnitTypeCount] = {0, 1, 2, 3, 6, 7, 8, 9, 16, 17};
 static const float kArcherRange = 26.0f;
 static const float kArcherReload = 2.4f;
 static const float kArrowDamage = 28.0f;
@@ -73,6 +98,29 @@ static const float kCatMaxRange = 70.0f;
 static const float kCatReload = 6.0f;
 static const float kBoomRadius = 4.5f;
 static const float kBoomKill = 1.9f;      // instakill radius
+
+// Ballista: flat-shooting bolt that pierces a file of men.
+static const float kBallMinRange = 8.0f;
+static const float kBallMaxRange = 50.0f;
+static const float kBallReload = 4.5f;
+static const float kBoltDamage = 60.0f;
+static const float kBoltSpeed = 34.0f;
+static const int kBoltMaxHits = 6;
+
+// Healer
+static const float kHealRadius = 5.0f;
+static const float kHealRate = 7.0f;      // hp/s to each wounded ally in radius
+
+// Commander aura
+static const float kAuraRadius = 9.0f;
+static const float kAuraDamageMult = 1.15f;
+
+// Morale: units break and run instead of fighting to the last man.
+static const float kRoutThreshold = 0.25f;
+static const float kRallyThreshold = 0.55f;
+static const float kFleeSpeedMult = 1.15f;
+static const float kFleeingHitMult = 1.30f;   // cut down from behind
+static const float kCommanderDeathShock = 0.35f;
 
 static const simd_float4 kArmyColor[2] = {
     {0.80f, 0.16f, 0.12f, 1.0f},
@@ -472,6 +520,25 @@ fragment float4 unit_fragment(BOut in [[stage_in]],
         col = mix(col, wood, lance * (1.0 - body));
         float blanket = step(sdSeg(p, float2(-0.28, -0.40), float2(0.10, -0.40)), 0.20);
         col = mix(col, army * 0.8, blanket * horseCov * (1.0 - body) * (1.0 - lance));
+    } else if (shape == 17) {             // COMMANDER: mounted, tall banner
+        float horse = step(sdSeg(p, float2(-0.40, -0.45), float2(0.30, -0.45)), 0.26);
+        horse += step(sdSeg(p, float2(0.30, -0.38), float2(0.54, -0.12)), 0.12);
+        horse += step(length((p - float2(0.60, -0.06)) * float2(1.0, 1.4)), 0.14);
+        horse += step(sdSeg(p, float2(-0.36, -0.58), float2(-0.39, -0.98)), 0.055);
+        horse += step(sdSeg(p, float2(0.26, -0.58), float2(0.28, -0.98)), 0.055);
+        float horseCov = min(horse, 1.0);
+        float body = step(sdSeg(p, float2(-0.10, -0.20), float2(-0.10, 0.24)), 0.16);
+        float headC = step(length(p - float2(-0.10, 0.42)), 0.14);
+        float plume = step(sdSeg(p, float2(-0.10, 0.52), float2(-0.24, 0.66)), 0.06);
+        float pole = step(sdSeg(p, float2(-0.34, -0.30), float2(-0.34, 0.92)), 0.035);
+        float flag = step(max(abs(p.x + 0.16) - 0.18, abs(p.y - 0.80) - 0.12), 0.0);
+        cov = max(max(horseCov, max(body, headC)), max(pole, max(flag, plume)));
+        col = float3(0.16, 0.12, 0.09);
+        col = mix(col, steel * 1.05, body);
+        col = mix(col, skin, headC);
+        col = mix(col, army * 1.2, plume);
+        col = mix(col, wood * 0.8, pole * (1.0 - body));
+        col = mix(col, army * 1.25, flag);
     } else if (shape == 6) {              // CATAPULT
         // wheels
         float wheels = step(length(p - float2(-0.48, -0.72)), 0.20)
@@ -495,6 +562,36 @@ fragment float4 unit_fragment(BOut in [[stage_in]],
         col = mix(col, float3(0.15, 0.13, 0.11), bucket);
         col = mix(col, wood * 0.8, pole);
         col = mix(col, army, flag);
+    } else if (shape == 8) {              // BALLISTA: giant crossbow on a frame
+        float legs = step(sdSeg(p, float2(-0.45, -0.95), float2(0.0, -0.35)), 0.08)
+                   + step(sdSeg(p, float2(0.45, -0.95), float2(0.0, -0.35)), 0.08);
+        float rail = step(sdSeg(p, float2(-0.62, -0.20), float2(0.62, -0.20)), 0.08);
+        // bow arms flex with the reload (flash = just fired)
+        float flex = 0.35 - 0.25 * in.flash;
+        float arms = step(sdSeg(p, float2(-0.55, -0.15), float2(-0.85, -0.15 + flex)), 0.06)
+                   + step(sdSeg(p, float2(0.55, -0.15), float2(0.85, -0.15 + flex)), 0.06);
+        float bolt = step(sdSeg(p, float2(-0.35, -0.10), float2(0.45, -0.10)), 0.045)
+                   * (1.0 - in.flash);
+        float flag = step(max(abs(p.x) - 0.10, abs(p.y - 0.35) - 0.10), 0.0);
+        cov = max(max(min(legs, 1.0), rail), max(min(arms, 1.0), max(bolt, flag)));
+        col = darkwood;
+        col = mix(col, wood, rail);
+        col = mix(col, wood * 1.1, min(arms, 1.0));
+        col = mix(col, steel, bolt);
+        col = mix(col, army, flag);
+    } else if (shape == 16) {             // CHAMPION: hulking knight, greatsword
+        float body = step(sdSeg(p, float2(0.0, -0.28), float2(0.0, 0.30)), 0.34);
+        body = max(body, step(sdSeg(p, float2(-0.14, -0.35), float2(-0.18, -0.95)), 0.11));
+        body = max(body, step(sdSeg(p, float2(0.14, -0.35), float2(0.18, -0.95)), 0.11));
+        float headC = step(length(p - float2(0.0, 0.55)), 0.19);
+        float crown = step(max(abs(p.x) - 0.16, abs(p.y - 0.74) - 0.06), 0.0);
+        float sword = step(sdSeg(p, float2(0.30, -0.10), float2(0.72, 0.86)), 0.07);
+        float guard = step(sdSeg(p, float2(0.28, 0.16), float2(0.52, 0.05)), 0.045);
+        cov = max(max(body, headC), max(crown, max(sword, guard)));
+        col = mix(army, float3(0.85, 0.72, 0.25), 0.35);   // gilded armor
+        col = mix(col, steel * 1.1, headC);
+        col = mix(col, float3(1.0, 0.85, 0.3), crown);
+        col = mix(col, steel * 1.15, max(sword, guard));
     } else {                              // bipeds
         float tw = (shape == 3) ? 0.30 : 0.24;
         float body = step(sdSeg(p, float2(0.0, -0.30), float2(0.0, 0.28)), tw);
@@ -511,19 +608,39 @@ fragment float4 unit_fragment(BOut in [[stage_in]],
             gear = step(abs(r - 0.38), 0.045) * step(-0.15, p.x - 0.42);
             gearCol = wood;
             gearC = step(sdSeg(p, float2(0.42, -0.33), float2(0.42, 0.43)), 0.028);
+        } else if (shape == 7) {          // PIKEMAN: long levelled pike + buckler
+            gearC = step(sdSeg(p, float2(-0.30, 0.02), float2(0.95, 0.30)), 0.035);
+            gear = step(length(p - float2(0.26, -0.02)), 0.14);   // buckler
+        } else if (shape == 9) {          // HEALER: robe, staff, white sash
+            gearC = step(sdSeg(p, float2(0.34, -0.85), float2(0.34, 0.55)), 0.035);
+            gear = step(length(p - float2(0.34, 0.60)), 0.09);    // staff orb
+            gearCol = float3(0.95, 0.95, 0.90);
         } else {
             gearC = step(sdSeg(p, float2(0.22, 0.10), float2(0.58, 0.66)), 0.055);
             gear = step(length((p - float2(0.66, 0.72)) * float2(1.0, 1.6)), 0.20);
         }
+        // Healer wears robes: widen the lower body into a skirt.
+        if (shape == 9) {
+            float robe = step(abs(p.x), 0.30 * (0.4 - p.y)) * step(-0.95, p.y) * step(p.y, 0.1);
+            body = max(body, robe);
+        }
         cov = max(max(body, headC), max(gear, gearC));
         col = army;
+        if (shape == 9) col = mix(float3(0.88, 0.88, 0.84), army, 0.25);   // pale robes
         col = mix(col, skin, headC);
-        if (shape != 1) {
+        if (shape != 1 && shape != 9) {
             float helm = step(length(p - float2(0.0, 0.58)), 0.17) * step(0.52, p.y);
             col = mix(col, steel * 0.9, helm);
         }
+        if (shape == 9) {                 // white cross on the chest
+            float crossM = step(min(max(abs(p.x) - 0.035, abs(p.y - 0.05) - 0.13),
+                                    max(abs(p.x) - 0.10, abs(p.y - 0.05) - 0.045)), 0.0)
+                         * body;
+            col = mix(col, float3(1.0, 1.0, 1.0), crossM);
+        }
         col = mix(col, gearCol, gear);
-        col = mix(col, (shape == 1) ? wood : steel, gearC);
+        col = mix(col, (shape == 1) ? wood : ((shape == 9) ? wood : steel), gearC);
+        if (shape == 7) col = mix(col, steel, gearC);   // pike shaft steel tip look
     }
 
     if (cov < 0.5) discard_fragment();
@@ -552,9 +669,12 @@ struct BInstC {
 struct Unit {
     simd_float2 pos, vel;
     int army, type;
-    float hp;
+    float hp, maxHp;
     float skill;       // ~1.0; individual competence, rolled at spawn
     float sizeMul;     // veterans stand a little taller
+    float morale;      // 0..1; below the rout threshold the unit flees
+    bool fleeing;
+    bool aura;         // inside a friendly commander's banner radius
     float cooldown;
     float retarget;
     int target;
@@ -565,10 +685,12 @@ struct Unit {
     bool alive;
 };
 
-struct Shot {                      // arrow or flaming catapult ball
+struct Shot {                      // arrow, flaming ball, or ballista bolt
     simd_float3 pos, vel;          // (x, height, boardY)
     int army;
-    int kind;                      // 0 arrow, 1 fireball
+    int kind;                      // 0 arrow, 1 fireball, 2 bolt
+    float traveled;                // bolt: distance flown
+    int hitsLeft;                  // bolt: remaining pierces
     bool alive;
 };
 
@@ -667,8 +789,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     bool _haveVP;
     simd_float2 _lastPaint;
 
-    // HUD hit rects, in view points (y-up): 0..4 unit buttons, 5 = FIGHT.
-    CGRect _btnRects[6];
+    // HUD hit rects, in view points (y-up): 0..9 unit buttons, 10 = FIGHT.
+    CGRect _btnRects[11];
     float _hudTop;          // everything below this y is HUD
 
     double _startTime, _lastFrameTime;
@@ -788,6 +910,11 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         unsigned short c = event.keyCode;
         if (c == 18 || c == 19 || c == 20 || c == 21) { weakSelf->_selectedType = c - 18; return nil; }
         if (c == 23) { weakSelf->_selectedType = kCatapult; return nil; }   // '5'
+        if (c == 22) { weakSelf->_selectedType = kPikeman; return nil; }    // '6'
+        if (c == 26) { weakSelf->_selectedType = kBallista; return nil; }   // '7'
+        if (c == 28) { weakSelf->_selectedType = kHealer; return nil; }     // '8'
+        if (c == 25) { weakSelf->_selectedType = kChampion; return nil; }   // '9'
+        if (c == 29) { weakSelf->_selectedType = kCommander; return nil; }  // '0'
         if (c == 49) { [weakSelf pressedFight]; return nil; }               // space
         if (c == 15) { [weakSelf resetField:YES]; return nil; }             // R
         if (c == 2)  { [weakSelf resetField:NO]; [weakSelf deployDefaultArmies]; return nil; } // D
@@ -829,9 +956,9 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         if (![v isKindOfClass:[MTKView class]] || !weakSelf->_haveVP) return event;
         NSPoint pt = [v convertPoint:event.locationInWindow fromView:nil];
         if (event.type == NSEventTypeLeftMouseDown) {
-            for (int b = 0; b < 6; b++) {
+            for (int b = 0; b < 11; b++) {
                 if (CGRectContainsPoint(weakSelf->_btnRects[b], NSPointToCGPoint(pt))) {
-                    if (b < 5) weakSelf->_selectedType = b;
+                    if (b < 10) weakSelf->_selectedType = b;
                     else [weakSelf pressedFight];
                     return nil;
                 }
@@ -849,12 +976,13 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         return event;
     }];
 
-    printf("WAR SIM v5\n"
-           "  HUD or 1-5: Infantry / Archer / Cavalry / Berserker / Catapult\n"
+    printf("WAR SIM v6\n"
+           "  HUD or 1-9,0: Infantry Archer Cavalry Berserker Catapult\n"
+           "                Pikeman Ballista Healer Champion Commander\n"
            "  Click/drag: stamp squads (left half = RED, right half = BLUE)\n"
            "  Right-click erase · SPACE/FIGHT battle · R clear · D defaults\n"
-           "  T: reroll terrain (lakes/forests/boulders, setup only)\n"
-           "  Pinch or scroll: zoom · Arrows or Q/E: orbit · Up/Down: tilt\n");
+           "  T: reroll terrain · Pinch/scroll zoom · Arrows/QE orbit+tilt\n"
+           "  Armies now BREAK AND ROUT — victory goes to who holds the field.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1006,7 +1134,10 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     // speed, and archer accuracy; veterans render slightly bigger.
     un.skill = 0.8f + 0.2f * (u01(_rng) + u01(_rng));
     un.sizeMul = 0.88f + 0.35f * (un.skill - 0.8f);
-    un.hp = kSpecs[type].hp * un.skill;
+    un.hp = un.maxHp = kSpecs[type].hp * un.skill;
+    un.morale = 1.0f;
+    un.fleeing = false;
+    un.aura = false;
     un.cooldown = u01(_rng) * 0.5f;
     un.retarget = u01(_rng) * 0.3f;
     un.target = -1;
@@ -1037,6 +1168,22 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         for (int c = 0; c < 3; c++)
             [self spawnUnit:kCatapult army:army
                          at:simd_make_float2(front - sgn * 12.0f, 25.0f + c * 15.0f)];
+        // Pike blocks guarding both flanks of the infantry line.
+        for (int w = 0; w < 2; w++)
+            for (int r = 0; r < 2; r++)
+                for (int c = 0; c < 10; c++)
+                    [self spawnUnit:kPikeman army:army
+                                 at:simd_make_float2(front + sgn * (1.2f - r * 1.2f),
+                                                     (w == 0 ? 9.0f : 57.0f) + c * 1.2f)];
+        // Support: healers behind the archers, a ballista pair, the commander.
+        for (int c = 0; c < 2; c++)
+            [self spawnUnit:kHealer army:army
+                         at:simd_make_float2(front - sgn * 8.0f, 34.0f + c * 8.0f)];
+        for (int c = 0; c < 2; c++)
+            [self spawnUnit:kBallista army:army
+                         at:simd_make_float2(front - sgn * 10.5f, 30.0f + c * 16.0f)];
+        [self spawnUnit:kCommander army:army
+                     at:simd_make_float2(front - sgn * 6.0f, 40.0f)];
     }
 }
 
@@ -1072,13 +1219,22 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     float minX = army == 0 ? 2.0f : kNoMansMax;
     float maxX = army == 0 ? kNoMansMin : kFieldW - 2.0f;
     std::uniform_real_distribution<float> jit(-0.25f, 0.25f);
-    // Catapults stamp a battery of 2; troops stamp a 4x4 squad.
-    if (_selectedType == kCatapult) {
+    // Champions and commanders stamp singly; war machines and healers as a
+    // pair; troops as a 4x4 squad.
+    if (_selectedType == kChampion || _selectedType == kCommander) {
+        simd_float2 p = board;
+        p.x = std::clamp(p.x, minX, maxX);
+        p.y = std::clamp(p.y, 2.0f, kFieldH - 2.0f);
+        [self spawnUnit:_selectedType army:army at:p];
+        return;
+    }
+    if (_selectedType == kCatapult || _selectedType == kBallista ||
+        _selectedType == kHealer) {
         for (int k = 0; k < 2; k++) {
             simd_float2 p = board + simd_make_float2(0, (k - 0.5f) * 3.2f);
             p.x = std::clamp(p.x, minX, maxX);
             p.y = std::clamp(p.y, 3.0f, kFieldH - 3.0f);
-            [self spawnUnit:kCatapult army:army at:p];
+            [self spawnUnit:_selectedType army:army at:p];
         }
         return;
     }
@@ -1149,6 +1305,22 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     return best;
 }
 
+- (void)resolveTerrain:(Unit &)u {
+    float r = kSpecs[u.type].radius;
+    for (const Lake &l : _lakes) {
+        float R = l.radius * 0.92f + r;
+        simd_float2 dl = u.pos - l.pos;
+        float dd = simd_length(dl);
+        if (dd < R) u.pos = l.pos + (dd > 1e-4f ? dl / dd : simd_make_float2(1, 0)) * R;
+    }
+    for (const Boulder &b : _boulders) {
+        float R = b.radius + r;
+        simd_float2 dl = u.pos - b.pos;
+        float dd = simd_length(dl);
+        if (dd < R) u.pos = b.pos + (dd > 1e-4f ? dl / dd : simd_make_float2(1, 0)) * R;
+    }
+}
+
 - (void)spawnPuffs:(simd_float2)pos y:(float)y kind:(int)kind count:(int)n
              speed:(float)spd size:(float)size {
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
@@ -1174,11 +1346,17 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     }
 }
 
-- (void)hurtUnit:(int)idx damage:(float)dmg knock:(simd_float2)knock {
+- (void)hurtUnit:(int)idx damage:(float)dmg knock:(simd_float2)knock atk:(int)atkType {
     Unit &u = _units[idx];
     if (!u.alive) return;
+    // Weapon-vs-armor matrix, and fleeing men are cut down from behind.
+    dmg *= kDmgMatrix[atkType][kSpecs[u.type].armor];
+    if (u.fleeing) dmg *= kFleeingHitMult;
     u.hp -= dmg;
     u.vel += knock;
+    // Pain shakes courage (champions and commanders don't rattle).
+    if (u.type != kChampion && u.type != kCommander)
+        u.morale -= (dmg / u.maxHp) * 0.20f;
     if (u.hp <= 0) {
         u.alive = false;
         u.deathT = 0.0001f;
@@ -1193,6 +1371,32 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         s.alpha = 0.55f;
         _splats.push_back(s);
         if (_splats.size() > 1600) _splats.erase(_splats.begin(), _splats.begin() + 200);
+
+        // Watching a friend die nearby is terrifying.
+        int cx = std::clamp((int)(u.pos.x / _cellSize), 0, _gridW - 1);
+        int cy = std::clamp((int)(u.pos.y / _cellSize), 0, _gridH - 1);
+        for (int yy = std::max(cy - 2, 0); yy <= std::min(cy + 2, _gridH - 1); yy++)
+            for (int xx = std::max(cx - 2, 0); xx <= std::min(cx + 2, _gridW - 1); xx++)
+                for (int j : _grid[(size_t)yy * _gridW + xx]) {
+                    Unit &w = _units[j];
+                    if (!w.alive || w.army != u.army || j == idx) continue;
+                    if (w.type == kChampion || w.type == kCommander) continue;
+                    float dd = simd_distance(w.pos, u.pos);
+                    if (dd < 6.0f) {
+                        float brave = (w.type == kBerserker) ? 0.5f : 1.0f;
+                        w.morale -= 0.10f * (1.0f - dd / 6.0f) * brave / w.skill;
+                    }
+                }
+
+        // The banner falls: army-wide shock.
+        if (u.type == kCommander) {
+            printf("*** %s COMMANDER SLAIN — the army wavers! ***\n",
+                   u.army == 0 ? "RED" : "BLUE");
+            for (Unit &w : _units)
+                if (w.alive && w.army == u.army &&
+                    w.type != kChampion && w.type != kCommander)
+                    w.morale -= kCommanderDeathShock;
+        }
     } else {
         [self spawnPuffs:u.pos y:0.8f kind:kPuffBlood count:3 speed:1.8f size:0.18f];
     }
@@ -1205,11 +1409,12 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         float dd = simd_distance(_units[j].pos, pos);
         if (dd < kBoomKill) {
             [self hurtUnit:(int)j damage:9999
-                     knock:(_units[j].pos - pos) * 3.0f];
+                     knock:(_units[j].pos - pos) * 3.0f atk:kAtkBlast];
         } else if (dd < kBoomRadius) {
             float f = 1.0f - (dd - kBoomKill) / (kBoomRadius - kBoomKill);
             simd_float2 dir = (_units[j].pos - pos) / dd;
-            [self hurtUnit:(int)j damage:30.0f + 90.0f * f knock:dir * (6.0f * f)];
+            [self hurtUnit:(int)j damage:30.0f + 90.0f * f knock:dir * (6.0f * f)
+                       atk:kAtkBlast];
         }
     }
     [self spawnPuffs:pos y:0.6f kind:kPuffFire count:22 speed:5.0f size:0.85f];
@@ -1253,20 +1458,118 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     [self rebuildGrid];
     std::uniform_real_distribution<float> u01(0.0f, 1.0f);
 
+    // Commander banners: mark who stands under a friendly aura.
+    for (Unit &w : _units) w.aura = false;
+    for (const Unit &c : _units) {
+        if (!c.alive || c.type != kCommander || c.fleeing) continue;
+        for (Unit &w : _units) {
+            if (!w.alive || w.army != c.army) continue;
+            if (simd_distance(w.pos, c.pos) < kAuraRadius) w.aura = true;
+        }
+    }
+
     for (size_t i = 0; i < _units.size(); i++) {
         Unit &u = _units[i];
         if (!u.alive) continue;
         const UnitSpec &spec = kSpecs[u.type];
         u.cooldown -= dt;
-        u.attackAnim = std::max(0.0f, u.attackAnim - dt * ((u.type == kCatapult) ? 1.2f : 4.0f));
+        u.attackAnim = std::max(0.0f, u.attackAnim - dt *
+            ((u.type == kCatapult || u.type == kBallista) ? 1.2f : 4.0f));
         u.retarget -= dt;
         if (u.retarget <= 0 ||
             u.target < 0 || u.target >= (int)_units.size() || !_units[u.target].alive) {
             u.target = [self findEnemyFor:(int)i];
             u.retarget = 0.25f + 0.1f * u01(_rng);
         }
+
+        // ---- Morale: courage regenerates in safety and under the banner,
+        // and drains beside fleeing friends. Break below the threshold.
+        if (u.type != kChampion && u.type != kCommander) {
+            float nearestEnemyD = 1e9f;
+            if (u.target >= 0) nearestEnemyD = simd_distance(u.pos, _units[u.target].pos);
+            float regen = (nearestEnemyD > 14.0f) ? 0.10f : 0.02f;
+            if (u.aura) regen += 0.06f;
+            int fleeingNear = 0;
+            int cx0 = std::clamp((int)(u.pos.x / _cellSize), 0, _gridW - 1);
+            int cy0 = std::clamp((int)(u.pos.y / _cellSize), 0, _gridH - 1);
+            for (int yy = std::max(cy0 - 1, 0); yy <= std::min(cy0 + 1, _gridH - 1) && fleeingNear < 3; yy++)
+                for (int xx = std::max(cx0 - 1, 0); xx <= std::min(cx0 + 1, _gridW - 1); xx++)
+                    for (int j : _grid[(size_t)yy * _gridW + xx])
+                        if (j != (int)i && _units[j].alive && _units[j].army == u.army &&
+                            _units[j].fleeing && fleeingNear < 3) fleeingNear++;
+            u.morale += (regen - 0.045f * fleeingNear) * dt;
+            u.morale = std::clamp(u.morale, 0.0f, 1.0f);
+            if (!u.fleeing && u.morale < kRoutThreshold) u.fleeing = true;
+            if (u.fleeing && u.morale > kRallyThreshold) u.fleeing = false;   // rallied!
+        }
+
+        // ---- Fleeing: drop everything and run away from the nearest enemy.
+        if (u.fleeing) {
+            simd_float2 away = simd_make_float2(u.army == 0 ? -1.0f : 1.0f, 0.0f);
+            if (u.target >= 0) {
+                simd_float2 d0 = u.pos - _units[u.target].pos;
+                float dl = simd_length(d0);
+                if (dl > 1e-4f) away = d0 / dl;
+            }
+            simd_float2 want = away * spec.speed * kFleeSpeedMult;
+            u.vel += (want - u.vel) * std::min(6.0f * dt, 1.0f);
+            u.pos += u.vel * dt;
+            [self resolveTerrain:u];
+            u.bobPhase += simd_length(u.vel) * dt * 8.0f;
+            // Escaped off the field: gone for good.
+            if (u.pos.x < -2.0f || u.pos.x > kFieldW + 2.0f ||
+                u.pos.y < -2.0f || u.pos.y > kFieldH + 2.0f) {
+                u.alive = false;
+                u.deathT = 0;   // no corpse — he ran
+            }
+            continue;
+        }
+
         if (u.target < 0) continue;
         Unit &tgt = _units[u.target];
+
+        // ---- Healers don't fight: they follow the wounded and mend them.
+        if (u.type == kHealer) {
+            int woundedIdx = -1;
+            float bestD = 22.0f;
+            for (size_t j = 0; j < _units.size(); j++) {
+                const Unit &w = _units[j];
+                if (!w.alive || w.army != u.army || j == i) continue;
+                if (w.hp > w.maxHp * 0.85f) continue;
+                float dd = simd_distance(w.pos, u.pos);
+                if (dd < bestD) { bestD = dd; woundedIdx = (int)j; }
+            }
+            simd_float2 want = simd_make_float2(0, 0);
+            float enemyD = simd_distance(u.pos, tgt.pos);
+            if (enemyD < 7.0f) {          // too close — back away
+                simd_float2 d0 = u.pos - tgt.pos;
+                want = simd_normalize(d0) * spec.speed;
+            } else if (woundedIdx >= 0 && bestD > 3.5f) {
+                want = simd_normalize(_units[woundedIdx].pos - u.pos) * spec.speed;
+            }
+            if (u.cooldown <= 0) {        // heal pulse
+                u.cooldown = 0.5f;
+                for (size_t j = 0; j < _units.size(); j++) {
+                    Unit &w = _units[j];
+                    if (!w.alive || w.army != u.army || j == i) continue;
+                    if (simd_distance(w.pos, u.pos) > kHealRadius) continue;
+                    if (w.hp < w.maxHp) {
+                        w.hp = std::min(w.hp + kHealRate * 0.5f * u.skill, w.maxHp);
+                        w.morale = std::min(w.morale + 0.02f, 1.0f);
+                        if (u01(_rng) < 0.3f)
+                            [self spawnPuffs:w.pos y:1.0f kind:kPuffHeal count:1
+                                       speed:0.5f size:0.16f];
+                    }
+                }
+            }
+            u.vel += (want - u.vel) * std::min(6.0f * dt, 1.0f);
+            u.pos += u.vel * dt;
+            [self resolveTerrain:u];
+            u.pos.x = std::clamp(u.pos.x, 0.5f, kFieldW - 0.5f);
+            u.pos.y = std::clamp(u.pos.y, 0.5f, kFieldH - 0.5f);
+            u.bobPhase += simd_length(u.vel) * dt * 6.0f;
+            continue;
+        }
         simd_float2 d = tgt.pos - u.pos;
         float dist = simd_length(d);
         simd_float2 dir = dist > 1e-4f ? d / dist : simd_make_float2(1, 0);
@@ -1280,9 +1583,26 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         }
         bool archerShooting = (u.type == kArcher && dist < archerReach && dist > 4.0f);
         bool catShooting = (u.type == kCatapult && dist < kCatMaxRange && dist > kCatMinRange);
+        bool ballShooting = (u.type == kBallista && dist < kBallMaxRange && dist > kBallMinRange);
 
         simd_float2 want = simd_make_float2(0, 0);
-        if (archerShooting || catShooting) {
+        if (ballShooting) {
+            if (u.cooldown <= 0) {
+                u.cooldown = kBallReload * (1.6f - 0.6f * u.skill) * (0.9f + 0.2f * u01(_rng));
+                u.attackAnim = 1.0f;
+                simd_float2 aim = tgt.pos + tgt.vel * (dist / kBoltSpeed);
+                simd_float2 fdir = simd_normalize(aim - u.pos);
+                Shot sh = {};
+                sh.pos = simd_make_float3(u.pos.x, [self heightAt:u.pos] + 1.0f, u.pos.y);
+                sh.vel = simd_make_float3(fdir.x * kBoltSpeed, 0.0f, fdir.y * kBoltSpeed);
+                sh.army = u.army;
+                sh.kind = 2;
+                sh.traveled = 0;
+                sh.hitsLeft = kBoltMaxHits;
+                sh.alive = true;
+                _shots.push_back(sh);
+            }
+        } else if (archerShooting || catShooting) {
             if (u.cooldown <= 0) {
                 bool cat = (u.type == kCatapult);
                 u.cooldown = (cat ? kCatReload : kArcherReload)
@@ -1306,7 +1626,17 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                 _shots.push_back(sh);
             }
         } else if (dist > reach) {
-            want = dir * spec.speed;
+            // March: while closing at range, hold the line — advance without
+            // drifting sideways, so armies meet as fronts instead of blobs.
+            if (dist > 12.0f) {
+                simd_float2 mdir = dir;
+                mdir.y *= 0.30f;
+                float ml = simd_length(mdir);
+                if (ml > 1e-4f) mdir /= ml;
+                want = mdir * spec.speed;
+            } else {
+                want = dir * spec.speed;
+            }
         } else {
             if (u.cooldown <= 0) {
                 // Skill: better men swing harder and faster.
@@ -1314,13 +1644,44 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                              * (0.9f + 0.2f * u01(_rng));
                 u.attackAnim = 1.0f;
                 float dmg = spec.damage * u.skill;
+                if (u.aura) dmg *= kAuraDamageMult;   // fighting under the banner
                 float knock = 2.0f;
-                if (u.type == kCavalry && simd_length(u.vel) > kChargeSpeed) {
+                bool charging = (u.type == kCavalry || u.type == kCommander) &&
+                                simd_length(u.vel) > kChargeSpeed;
+                // BRACED PIKES: a set pike wall gores chargers before they land.
+                if (charging && tgt.type == kPikeman && !tgt.fleeing &&
+                    simd_length(tgt.vel) < 0.8f) {
+                    float counter = kSpecs[kPikeman].damage * 2.5f * tgt.skill;
+                    u.vel *= 0.15f;   // the charge dies on the pike wall
+                    [self spawnPuffs:u.pos y:1.0f kind:kPuffSpark count:6 speed:4.0f size:0.16f];
+                    [self hurtUnit:(int)i damage:counter knock:dir * -3.0f atk:kAtkPierce];
+                    if (!u.alive) continue;
+                    charging = false;
+                }
+                if (charging) {
                     dmg *= kChargeMult;
                     knock = 5.0f;
                 }
                 dmg *= 0.85f + 0.3f * u01(_rng);
-                [self hurtUnit:u.target damage:dmg knock:dir * knock];
+                [self hurtUnit:u.target damage:dmg knock:dir * knock atk:spec.atk];
+                // CHAMPION CLEAVE: the greatsword carries through two more men.
+                if (u.type == kChampion) {
+                    int extra = 2;
+                    int cx1 = std::clamp((int)(u.pos.x / _cellSize), 0, _gridW - 1);
+                    int cy1 = std::clamp((int)(u.pos.y / _cellSize), 0, _gridH - 1);
+                    for (int yy = std::max(cy1 - 1, 0); yy <= std::min(cy1 + 1, _gridH - 1) && extra > 0; yy++)
+                        for (int xx = std::max(cx1 - 1, 0); xx <= std::min(cx1 + 1, _gridW - 1) && extra > 0; xx++)
+                            for (int j : _grid[(size_t)yy * _gridW + xx]) {
+                                if (extra <= 0) break;
+                                if (j == (int)i || j == u.target) continue;
+                                Unit &e2 = _units[j];
+                                if (!e2.alive || e2.army == u.army) continue;
+                                if (simd_distance(e2.pos, u.pos) > reach + 0.4f) continue;
+                                simd_float2 kd = simd_normalize(e2.pos - u.pos);
+                                [self hurtUnit:j damage:dmg * 0.6f knock:kd * 4.0f atk:spec.atk];
+                                extra--;
+                            }
+                }
                 // impact juice at the victim
                 [self spawnPuffs:tgt.pos y:0.9f kind:kPuffSpark count:3 speed:3.5f size:0.14f];
                 [self spawnPuffs:tgt.pos y:0.3f kind:kPuffDust count:2 speed:1.5f size:0.30f];
@@ -1383,6 +1744,37 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     std::uniform_real_distribution<float> u01b(0.0f, 1.0f);
     for (Shot &a : _shots) {
         if (!a.alive) continue;
+        if (a.kind == 2) {
+            // Ballista bolt: flat, fast, skewers everyone along its line.
+            simd_float2 from = simd_make_float2(a.pos.x, a.pos.z);
+            float step = kBoltSpeed * dt;
+            a.pos += a.vel * dt;
+            a.traveled += step;
+            simd_float2 to = simd_make_float2(a.pos.x, a.pos.z);
+            simd_float2 seg = to - from;
+            float segLen = simd_length(seg);
+            simd_float2 sdir = segLen > 1e-4f ? seg / segLen : simd_make_float2(1, 0);
+            for (size_t j = 0; j < _units.size() && a.hitsLeft > 0; j++) {
+                Unit &e = _units[j];
+                if (!e.alive || e.army == a.army) continue;
+                simd_float2 rel = e.pos - from;
+                float along = simd_dot(rel, sdir);
+                if (along < -0.2f || along > segLen + 0.2f) continue;
+                float lateral = fabsf(rel.x * sdir.y - rel.y * sdir.x);
+                if (lateral > kSpecs[e.type].radius + 0.30f) continue;
+                a.hitsLeft--;
+                [self hurtUnit:(int)j damage:kBoltDamage knock:sdir * 4.5f atk:kAtkBolt];
+                [self spawnPuffs:e.pos y:0.9f kind:kPuffSpark count:3 speed:3.0f size:0.14f];
+            }
+            float groundH = [self heightAt:to];
+            if (a.hitsLeft <= 0 || a.traveled > kBallMaxRange + 6.0f ||
+                a.pos.y < groundH - 0.5f || [self inLake:to]) {
+                if ([self inLake:to])
+                    [self spawnPuffs:to y:0.2f kind:kPuffSplash count:3 speed:2.0f size:0.25f];
+                a.alive = false;
+            }
+            continue;
+        }
         a.vel.y -= 9.8f * dt;
         a.pos += a.vel * dt;
         if (a.kind == 1 && u01b(_rng) < dt * 22.0f) {   // flame trail
@@ -1419,7 +1811,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                 simd_float2 kd = simd_make_float2(a.vel.x, a.vel.z);
                 float kl = simd_length(kd);
                 [self hurtUnit:best damage:kArrowDamage
-                         knock:(kl > 1e-4f ? kd / kl : simd_make_float2(0, 0)) * 1.2f];
+                         knock:(kl > 1e-4f ? kd / kl : simd_make_float2(0, 0)) * 1.2f
+                           atk:kAtkArrow];
             } else {
                 [self spawnPuffs:hit y:0.1f kind:kPuffDust count:2 speed:1.0f size:0.22f];
             }
@@ -1428,16 +1821,29 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     _shots.erase(std::remove_if(_shots.begin(), _shots.end(),
                  [](const Shot &a) { return !a.alive; }), _shots.end());
 
-    int alive[2] = {0, 0};
-    for (const Unit &u : _units) if (u.alive) alive[u.army]++;
-    if (alive[0] == 0 || alive[1] == 0) {
+    // Victory = the other side has nobody left WILLING to fight. A routed
+    // army (all survivors fleeing) has lost the field.
+    int fighting[2] = {0, 0}, alive[2] = {0, 0};
+    for (const Unit &u : _units) {
+        if (!u.alive) continue;
+        alive[u.army]++;
+        if (!u.fleeing) fighting[u.army]++;
+    }
+    if (fighting[0] == 0 || fighting[1] == 0) {
         _phase = kPhaseDone;
-        _winner = alive[0] > 0 ? 0 : (alive[1] > 0 ? 1 : -1);
-        if (_winner >= 0)
-            printf("*** %s ARMY WINS — %d survivors ***\n",
-                   _winner == 0 ? "RED" : "BLUE", alive[_winner]);
-        else
+        _winner = fighting[0] > 0 ? 0 : (fighting[1] > 0 ? 1 : -1);
+        if (_winner >= 0) {
+            int loser = 1 - _winner;
+            if (alive[loser] > 0)
+                printf("*** %s ARMY ROUTED — %s holds the field! (%d put to flight) ***\n",
+                       loser == 0 ? "RED" : "BLUE", _winner == 0 ? "RED" : "BLUE",
+                       alive[loser]);
+            else
+                printf("*** %s ARMY WINS — %d survivors ***\n",
+                       _winner == 0 ? "RED" : "BLUE", alive[_winner]);
+        } else {
             printf("*** MUTUAL ANNIHILATION ***\n");
+        }
     }
 }
 
@@ -1463,14 +1869,14 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         *ohh = h / bh;
     };
 
-    // Bottom bar: 5 unit buttons + FIGHT.
-    const float btn = 74, gap = 12, fightW = 110;
-    float totalW = 5 * btn + 4 * gap + 24 + fightW;
+    // Bottom bar: 10 unit buttons + FIGHT.
+    const float btn = 58, gap = 8, fightW = 100;
+    float totalW = 10 * btn + 9 * gap + 20 + fightW;
     float x0 = (bw - totalW) * 0.5f;
     float y0 = 14;
     _hudTop = y0 + btn + 10;
 
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 10; i++) {
         float x = x0 + i * (btn + gap);
         _btnRects[i] = CGRectMake(x, y0, btn, btn);
         float cx, cy, hw, hh;
@@ -1479,16 +1885,16 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         [self pushHud:cx cy:cy hw:hw hh:hh shape:10
                 color:simd_make_float4(1, 1, 1, 1) flash:sel ? 1.0f : 0.0f
                  seed:0 facing:1];
-        // The unit's own sprite as the icon (neutral grey army color).
-        float iconScale = (i == kCavalry || i == kCatapult) ? 0.62f : 0.72f;
-        float iconShape = (i == kCatapult) ? 6.0f : (float)i;
+        BOOL wide = (i == kCavalry || i == kCatapult || i == kBallista ||
+                     i == kCommander);
+        float iconScale = wide ? 0.62f : 0.72f;
         [self pushHud:cx cy:cy hw:hw * iconScale hh:hh * iconScale
-                shape:iconShape color:simd_make_float4(0.75f, 0.72f, 0.68f, 1)
+                shape:kSpriteFor[i] color:simd_make_float4(0.75f, 0.72f, 0.68f, 1)
                 flash:0 seed:0 facing:1];
     }
     // FIGHT / rematch button.
-    float fx = x0 + 5 * (btn + gap) + 24 - gap;
-    _btnRects[5] = CGRectMake(fx, y0, fightW, btn);
+    float fx = x0 + 10 * (btn + gap) + 20 - gap;
+    _btnRects[10] = CGRectMake(fx, y0, fightW, btn);
     float cx, cy, hw, hh;
     toNDC(fx, y0, fightW, btn, &cx, &cy, &hw, &hh);
     BOOL battle = (_phase == kPhaseBattle);
@@ -1703,14 +2109,19 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
             facing = simd_dot(simd_make_float2(u.army == 0 ? 1.0f : -1.0f, 0),
                               _camRightBoard) >= 0 ? 1.0f : -1.0f;
         simd_float4 c = kArmyColor[u.army];
-        // Sprite id: types 0-3 match shapes 0-3; the catapult sprite is 6.
-        float sprite = (u.type == kCatapult) ? 6.0f : (float)u.type;
         _unitScratch.push_back({u.pos.x, u.pos.y, bob - sink,
                                 spec.width * u.sizeMul, spec.height * u.sizeMul, rot,
-                                sprite, facing,
+                                kSpriteFor[u.type], facing,
                                 c.x, c.y, c.z, 1.0f,
                                 u.attackAnim, u.seed, 0, 0});
-        if ((int)_unitScratch.size() >= kUnitCap) break;
+        // A little white flag over anyone who has broken and run.
+        if (u.alive && u.fleeing) {
+            _unitScratch.push_back({u.pos.x, u.pos.y,
+                                    bob + spec.height * 0.62f,
+                                    0.28f, 0.20f, 0.15f, 13, 1,
+                                    0.95f, 0.95f, 0.92f, 0.9f, 0, 0, 0, 0});
+        }
+        if ((int)_unitScratch.size() >= kUnitCap - 1) break;
     }
     for (const Shot &a : _shots) {
         if ((int)_unitScratch.size() >= kUnitCap) break;
@@ -1756,6 +2167,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
             case kPuffSpark:  r = 1.60f; g = 1.30f; bl = 0.55f; occl = 0.0f;  break;
             case kPuffFire:   r = 1.80f; g = 0.75f; bl = 0.18f; occl = 0.0f;  break;
             case kPuffSplash: r = 0.55f; g = 0.70f; bl = 0.85f; occl = 0.60f; break;
+            case kPuffHeal:   r = 0.55f; g = 1.40f; bl = 0.60f; occl = 0.0f;  break;
             default:          r = 0.13f; g = 0.12f; bl = 0.11f; occl = 0.75f; break;
         }
         float ground = [self heightAt:b.pos];
@@ -1770,9 +2182,9 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         memcpy((char *)[unitBuf contents] + kPuffOffset,
                _unitScratch.data(), puffCount * sizeof(BInstC));
 
-    // ---- HUD.
+    // ---- HUD (counts show men still willing to fight — routers don't count).
     int alive[2] = {0, 0};
-    for (const Unit &u : _units) if (u.alive) alive[u.army]++;
+    for (const Unit &u : _units) if (u.alive && !u.fleeing) alive[u.army]++;
     [self buildHUD:view aliveRed:alive[0] aliveBlue:alive[1]];
     NSUInteger hudCount = _hudScratch.size();
     if (hudCount) memcpy([hudBuf contents], _hudScratch.data(), hudCount * sizeof(BInstC));
@@ -1843,7 +2255,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         state = _winner >= 0 ? (_winner == 0 ? @"RED WINS" : @"BLUE WINS")
                              : @"MUTUAL ANNIHILATION";
     view.window.title = [NSString stringWithFormat:
-        @"08 — WAR SIM v5 ▸ RED %d vs BLUE %d ▸ %@ ▸ %.0f fps",
+        @"08 — WAR SIM v6 ▸ RED %d vs BLUE %d ▸ %@ ▸ %.0f fps",
         alive[0], alive[1], state, _smoothedFPS];
 }
 
