@@ -81,6 +81,13 @@ Physics feel like a boat, not a car — throttle is persistent, drag brakes you,
 and the rudder only bites when water is flowing past it, so you can't spin in
 place. The boat and buoys are built from procedural colored boxes (no models).
 
+Two billboard particle systems add life: dark smoke puffs from the funnel
+(heavier when you throttle up) and white foam churns off the stern into a
+wake that spreads and rides the wave surface. They're alpha-blended
+camera-facing quads, triple-buffered so the CPU builds the next frame's
+geometry while the GPU draws the current one — the wake is layered beneath
+the boat and the smoke above it.
+
 Controls:
 
 | Key | Action | Key | Action |
