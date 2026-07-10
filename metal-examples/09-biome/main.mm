@@ -605,9 +605,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return e;
     }];
 
-    printf("BIOME v1 — Everything is on the sliding control panel (right edge).\n"
-           "         Click the tab to show/hide it. Click a critter to inspect.\n"
-           "         Splice experimental dominant genes and watch them spread.\n");
+    printf("=== BIOME v2 [HUD] — if you don't see this line, you're running an "
+           "OLD BINARY (run: rm -rf build && make 09-biome) ===\n"
+           "Control panel is OPEN on the right edge at launch. Click the tab to "
+           "hide/show it. Splice experimental dominant genes and watch them spread.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1302,7 +1303,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME ▸ pop %d (%dM/%dF) ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v2 [HUD] ▸ pop %d (%dM/%dF) ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         (int)_critters.size(), males, females, _generation, _births, _deaths, sick,
         band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -1415,7 +1416,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v2 [HUD]", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
