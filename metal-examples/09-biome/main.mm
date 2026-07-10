@@ -271,7 +271,7 @@ struct InstC {
 enum {
     WA_None = 0, WA_Toggle, WA_Pause, WA_SpeedDn, WA_SpeedUp,
     WA_ClimateSlider, WA_Food, WA_FoodSlider, WA_Introduce, WA_Cull, WA_Reset,
-    WA_TraitPick, WA_ExprSlider, WA_Splice,
+    WA_TraitPick, WA_ExprSlider, WA_Splice, WA_ToggleGraph,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -379,6 +379,12 @@ constant ushort kAlpha[26][7] = {
     {0x11,0x11,0x11,0x15,0x15,0x1B,0x11},{0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, // W X
     {0x11,0x11,0x0A,0x04,0x04,0x04,0x04},{0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}, // Y Z
 };
+// A few symbols (codes 36+): '+', '-', '.'.
+constant ushort kSym[3][7] = {
+    {0x00,0x04,0x04,0x1F,0x04,0x04,0x00},   // 36 '+'
+    {0x00,0x00,0x00,0x1F,0x00,0x00,0x00},   // 37 '-'
+    {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C},   // 38 '.'
+};
 
 fragment float4 entity_fragment(EOut in [[stage_in]]) {
     float2 p = in.lp;
@@ -416,10 +422,11 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
     } else if (shape == 7) {                // heart / sick pip (small diamond)
         float d = abs(p.x)+abs(p.y); a = smoothstep(1.0,0.4,d);
     } else if (shape == 8) {                // text glyph: params.x = 0-9 digit, 10-35 A-Z
-        int code = clamp(int(in.params.x + 0.5), 0, 35);
+        int code = clamp(int(in.params.x + 0.5), 0, 38);
         int cx = clamp(int((p.x*0.5+0.5)*5.0), 0, 4);
         int cy = clamp(int((1.0-(p.y*0.5+0.5))*7.0), 0, 6);
-        ushort rowbits = (code < 10) ? kDigit[code][cy] : kAlpha[code-10][cy];
+        ushort rowbits = (code < 10) ? kDigit[code][cy]
+                       : (code < 36) ? kAlpha[code-10][cy] : kSym[code-36][cy];
         uint bit = (uint(rowbits) >> uint(4-cx)) & 1u;
         if (bit == 0u) discard_fragment();
         return float4(gammaOut(in.color.rgb), in.color.a);
@@ -488,6 +495,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float _panelT, _panelTarget;   // 0 hidden .. 1 shown
     int   _spliceGene;             // locus selected in the gene lab
     float _spliceExpr;             // engineered expression level 0..1
+    bool  _showGraph;              // evolution graph visible?
     int   _dragAct;                // slider being dragged (WA_None if none)
     float _dragX, _dragW;
 
@@ -553,6 +561,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _panelT = _panelTarget = 1.0f;   // start open so the controls are discoverable
     _spliceGene = GSize0;
     _spliceExpr = 0.9f;
+    _showGraph = true;
     _dragAct = WA_None;
     [self resetColony];
 
@@ -955,6 +964,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         if (ch >= '0' && ch <= '9') code = ch - '0';
         else if (ch >= 'A' && ch <= 'Z') code = 10 + (ch - 'A');
         else if (ch >= 'a' && ch <= 'z') code = 10 + (ch - 'a');
+        else if (ch == '+') code = 36;
+        else if (ch == '-') code = 37;
+        else if (ch == '.') code = 38;
         if (code >= 0) {
             float cx = (x + gw*0.5f)/bw*2.0f-1.0f, cy = (y + h*0.5f)/bh*2.0f-1.0f;
             [self hud:cx cy:cy hw:gw/bw hh:h/bh shape:8 color:col p0:(float)code];
@@ -1015,6 +1027,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_Reset:     [self resetColony]; break;
             case WA_TraitPick: _spliceGene = (int)wg.val; break;
             case WA_Splice:    [self spliceGene:_spliceGene expr:_spliceExpr count:4]; break;
+            case WA_ToggleGraph: _showGraph = !_showGraph; break;
             case WA_ClimateSlider:
             case WA_ExprSlider:
             case WA_FoodSlider:
@@ -1035,7 +1048,6 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 // Sliding control panel: every environmental knob and the gene lab, all
 // mouse-driven. Rebuilt each frame; widgets are registered for hit-testing.
 - (void)buildControlPanel:(float)bw bh:(float)bh {
-    _widgets.clear();
     auto rect = [&](float x, float y, float w, float h, simd_float4 c, float s) {
         float cx = (x+w*0.5f)/bw*2.0f-1.0f, cy = (y+h*0.5f)/bh*2.0f-1.0f;
         [self hud:cx cy:cy hw:w/bw hh:h/bh shape:s color:c p0:0];
@@ -1267,6 +1279,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
     // ---- HUD ----
     float bw = (float)view.bounds.size.width, bh = (float)view.bounds.size.height;
+    _widgets.clear();
     [self buildEvoGraph:bw bh:bh];
     [self buildHUD:sel bw:bw bh:bh];
     [self buildControlPanel:bw bh:bh];
@@ -1311,17 +1324,35 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 // ------------------------------------------------------------- Inspector ---
 
 // Evolution graph: the climate driver and the colony-average traits that
-// track it, scrolling over the last ~kHistLen sim-seconds. Always visible so
-// you can watch the population drift even with nothing selected.
+// track it, scrolling over the last ~kHistLen sim-seconds. Can be hidden with
+// its X button; a small GRAPH tab brings it back.
 - (void)buildEvoGraph:(float)bw bh:(float)bh {
     auto rect = [&](float x, float y, float w, float h, simd_float4 col, float shape) {
         float cx = (x + w*0.5f)/bw*2.0f-1.0f, cy = (y + h*0.5f)/bh*2.0f-1.0f;
         [self hud:cx cy:cy hw:w/bw hh:h/bh shape:shape color:col p0:0];
     };
     float gw = 360, gh = 150, gx = 16, gy = bh - 32 - gh;
+
+    // Collapsed: just a little tab in the top-left corner to reopen it.
+    if (!_showGraph) {
+        float tw = 70, th = 22, tx = 16, ty = bh - 16 - th;
+        rect(tx, ty, tw, th, simd_make_float4(0.10f,0.12f,0.16f,0.92f), 6);
+        [self hudText:"GRAPH" x:tx+10 y:ty+6 h:11 col:simd_make_float4(0.8f,0.88f,1.0f,1)
+                   bw:bw bh:bh];
+        _widgets.push_back({tx, ty, tw, th, WA_ToggleGraph, 0});
+        return;
+    }
+
     rect(gx-8, gy-8, gw+16, gh+32, simd_make_float4(0.05f,0.06f,0.08f,0.85f), 6);
     for (int k = 0; k <= 2; k++)                              // 0 / 0.5 / 1 grid
         rect(gx, gy + k*0.5f*gh, gw, 1, simd_make_float4(1,1,1,0.08f), 4);
+    // Title + hide (X) button in the top-right corner of the panel.
+    [self hudText:"EVOLUTION" x:gx y:gy+gh+6 h:11 col:simd_make_float4(0.7f,0.82f,1.0f,1)
+               bw:bw bh:bh];
+    float xb = 18, xx = gx + gw - xb, xy = gy + gh + 4;
+    rect(xx, xy, xb, xb, simd_make_float4(0.20f,0.22f,0.28f,1), 6);
+    [self hudText:"X" x:xx+5 y:xy+4 h:11 col:simd_make_float4(0.9f,0.94f,1.0f,1) bw:bw bh:bh];
+    _widgets.push_back({xx, xy, xb, xb, WA_ToggleGraph, 0});
 
     int count = _histCount, head = _histHead;
     auto plot = [&](const float *buf, simd_float4 col, float dot) {
@@ -1340,14 +1371,14 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         plot(_histSize, simd_make_float4(0.35f,0.75f,0.95f,1.0f), 2.5f);  // avg size
         plot(_histDark, simd_make_float4(0.45f,0.90f,0.50f,1.0f), 2.5f);  // coat darkness
     }
-    // Colour key across the top: climate · size · darkness · resistance · pop.
+    // Colour key along the bottom margin: climate·size·darkness·resistance·pop.
     simd_float4 key[5] = {
         simd_make_float4(1.00f,1.00f,1.00f,0.9f), simd_make_float4(0.35f,0.75f,0.95f,1),
         simd_make_float4(0.45f,0.90f,0.50f,1),    simd_make_float4(0.95f,0.70f,0.30f,1),
         simd_make_float4(0.55f,0.55f,0.62f,0.9f),
     };
     for (int k = 0; k < 5; k++)
-        rect(gx + k*26.0f, gy + gh + 6, 20, 6, key[k], 4);
+        rect(gx + k*26.0f, gy - 7, 20, 5, key[k], 4);
 }
 
 - (void)buildHUD:(Critter *)sel bw:(float)bw bh:(float)bh {

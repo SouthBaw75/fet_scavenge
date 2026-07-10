@@ -187,9 +187,10 @@ that variation into **directional natural selection**: cold favors large, dark
 bodies that hold heat, warmth favors small, pale ones (Bergmann's + Gloger's
 rules), so mismatched critters burn energy faster, breed less, and die younger —
 and the colony's average size and coloration visibly **track the environment
-over generations**. An always-on **evolution graph** plots the climate against
-the colony-average size, coat darkness, resistance, and population so you can
-watch the drift happen; the ground itself tints frosty-blue to sun-baked-tan
+over generations**. An **evolution graph** (top-left, hide it with its X
+button) plots the climate against the colony-average size, coat darkness,
+resistance, and population so you can watch the drift happen; the ground tints
+frosty-blue to sun-baked-tan
 with the temperature. Critters have procedural Verlet-spine bodies, utility-AI
 needs (hunger / energy / reproduction), forage regrowing food, court and breed,
 and catch a contagion whose spread is governed by disease-resistance genes.
