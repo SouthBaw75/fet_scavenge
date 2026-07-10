@@ -40,6 +40,17 @@ static const int kMaxInstances = 32768;
 static const int kMaxInFlight = 3;
 static const int kSpineNodes = 6;
 
+// Environmental selection. The climate drifts (gentle seasons + a slow
+// random-walk trend) and imposes a survival cost on critters whose body size
+// and coat darkness are ill-suited to it — cold favors large, dark bodies that
+// retain heat (Bergmann's + Gloger's rules), heat favors small, pale ones. So
+// the population's genome tracks the environment over generations: real,
+// visible directional selection on top of drift and mutation.
+static const float kSeasonSecs   = 120.0f;  // one seasonal cycle (sim seconds)
+static const float kThermalCost  = 0.055f;  // energy/sec drain at full mismatch
+static const int   kHistLen      = 120;     // trait-history samples (~sim minutes)
+static const float kSampleSecs   = 1.0f;    // one history sample per sim second
+
 // Genome layout: kNumGenes autosomal loci spread across kChromosomes. Related
 // genes share a chromosome so they tend to inherit together (linkage).
 static const int kNumGenes = 16;
@@ -166,6 +177,21 @@ struct Phenotype {
     simd_float3 color2; // secondary (banding) color
 };
 
+// Perceived brightness of a coat color (Rec. 601 luma); 1-this is "darkness".
+static inline float coatLuma(simd_float3 c) {
+    return 0.299f * c.x + 0.587f * c.y + 0.114f * c.z;
+}
+
+// How well a phenotype suits the current climate, 0 (lethal mismatch) .. 1
+// (ideal). want=1 in the cold (favor big + dark), want=0 in the heat.
+static inline float adaptation(const Phenotype &p, float climate) {
+    float want     = 0.5f - 0.5f * climate;                       // cold->1 hot->0
+    float sizeNorm = std::clamp((p.size - 0.6f) / 1.1f, 0.0f, 1.0f);
+    float dark     = 1.0f - coatLuma(p.color);
+    float miss     = 0.6f * fabsf(sizeNorm - want) + 0.4f * fabsf(dark - want);
+    return std::clamp(1.0f - miss, 0.0f, 1.0f);
+}
+
 static Phenotype phenotypeOf(const Genome &g) {
     auto L = [&](int i) { return locusValue(g.hom[0][i], g.hom[1][i]); };
     Phenotype p;
@@ -277,6 +303,10 @@ fragment float4 ground_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(
     float n = fbm(w * 0.08);
     float3 col = mix(float3(0.14,0.26,0.12), float3(0.20,0.34,0.15), n);
     col *= 0.9 + 0.15 * fbm(w * 0.6 + 5.0);
+    // Climate tint (u.pad = -1 cold .. +1 hot): frosty blue vs sun-baked tan.
+    float clim = clamp(u.pad, -1.0, 1.0);
+    float3 cold = float3(0.13, 0.20, 0.26), warm = float3(0.32, 0.28, 0.13);
+    col = mix(col, mix(cold, warm, clim*0.5+0.5), 0.28 * abs(clim));
     float2 bd = max(float2(0.0)-w, w-float2(120.0,72.0));
     col *= 1.0 / (1.0 + max(max(bd.x,bd.y),0.0)*0.15);
     return float4(gammaOut(col), 1.0);
@@ -396,6 +426,18 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float _timeScale;
     float _foodTimer;
 
+    // Environment + evolutionary history.
+    double _worldTime;      // accumulated sim seconds (drives seasons)
+    float _climate;         // -1 cold .. +1 hot (current)
+    float _climateTrend;    // slow-drifting climate baseline
+    float _sampleTimer;
+    int   _histCount, _histHead;
+    float _histClim[kHistLen];  // all normalized 0..1 for plotting
+    float _histSize[kHistLen];
+    float _histDark[kHistLen];
+    float _histRes[kHistLen];
+    float _histPop[kHistLen];
+
     simd_float2 _uScale, _uOffset;
     double _startTime, _lastFrameTime, _simAccum;
     float _smoothedFPS;
@@ -468,6 +510,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         if (c == 15) { [weakSelf resetColony]; return nil; }                  // R
         if (c == 33) { weakSelf->_timeScale = std::max(weakSelf->_timeScale*0.5f, 0.25f); return nil; } // [
         if (c == 30) { weakSelf->_timeScale = std::min(weakSelf->_timeScale*2.0f, 8.0f); return nil; }  // ]
+        if (c == 43) { weakSelf->_climateTrend = std::max(weakSelf->_climateTrend-0.15f, -0.75f); return nil; } // , cool
+        if (c == 47) { weakSelf->_climateTrend = std::min(weakSelf->_climateTrend+0.15f,  0.75f); return nil; } // . warm
         return e;
     }];
     [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
@@ -484,7 +528,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }];
 
     printf("BIOME v1 — Click a critter to inspect. F food · Space pause · [ ] speed\n"
-           "         K cull · I introduce · R reset.\n");
+           "         , cool · . warm · K cull · I introduce · R reset.\n"
+           "         Climate selects on size + coat: watch the colony evolve.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -549,6 +594,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _generation = 0;
     _births = _deaths = 0;
     _selected = 0;
+    _worldTime = 0;
+    _climate = 0;
+    _climateTrend = 0;
+    _sampleTimer = 0;
+    _histCount = _histHead = 0;
     for (int i = 0; i < 24; i++)
         [self spawnCritter:randomGenome(_rng, i % 2) at:[self randomPos] gen:0];
     [self scatterFood:220];
@@ -579,6 +629,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 - (void)simStep:(float)dt {
     std::uniform_real_distribution<float> u(0,1);
 
+    // --- climate: gentle seasons over a slowly wandering baseline ---
+    _worldTime += dt;
+    _climateTrend += (u(_rng) - 0.5f) * 0.03f * dt;      // slow random walk
+    _climateTrend = std::clamp(_climateTrend, -0.75f, 0.75f);
+    float season = sinf((float)_worldTime * (6.2831853f / kSeasonSecs));
+    _climate = std::clamp(0.35f * season + _climateTrend, -1.0f, 1.0f);
+
     // Food regrows / seeds slowly toward a carrying capacity.
     for (Food &f : _food) if (f.alive) f.growth = std::min(f.growth + 0.20f * dt, 1.0f);
     _foodTimer -= dt;
@@ -598,8 +655,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         float moving = simd_length(c.vel) / std::max(ph.speed, 0.1f);
         c.energy -= (0.01f + ph.metabolism * 0.012f + 0.02f * moving) * dt;
         if (c.hunger > 0.9f) c.energy -= (c.hunger - 0.9f) * 0.15f * dt;   // starving
+        // Thermal stress: bodies ill-matched to the climate burn extra energy,
+        // so they forage harder, breed less, and die younger — selection that
+        // pushes the colony's size and coloration to track the environment.
+        float adapt = adaptation(ph, _climate);
+        c.energy -= (1.0f - adapt) * kThermalCost * dt;
         if (c.age > c.maturity && c.energy > 0.45f && !c.pregnant)
-            c.urge = std::min(c.urge + ph.fertility * 0.06f * dt, 1.0f);
+            c.urge = std::min(c.urge + ph.fertility * (0.5f + 0.7f * adapt) * 0.06f * dt, 1.0f);
 
         // --- sickness ---
         if (c.sick > 0) {
@@ -757,6 +819,28 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     [](const Critter &c){ return !c.alive; }), _critters.end());
     _food.erase(std::remove_if(_food.begin(), _food.end(),
                 [](const Food &f){ return !f.alive; }), _food.end());
+
+    // --- sample colony averages for the evolution graph ---
+    _sampleTimer -= dt;
+    if (_sampleTimer <= 0) {
+        _sampleTimer = kSampleSecs;
+        float ss = 0, dd = 0, rr = 0; int n = 0;
+        for (const Critter &c : _critters) {
+            ss += std::clamp((c.ph.size - 0.6f) / 1.1f, 0.0f, 1.0f);
+            dd += 1.0f - coatLuma(c.ph.color);
+            rr += c.ph.resistance;
+            n++;
+        }
+        if (n) { ss /= n; dd /= n; rr /= n; }
+        int i = _histHead;
+        _histClim[i] = _climate * 0.5f + 0.5f;
+        _histSize[i] = ss;
+        _histDark[i] = dd;
+        _histRes[i]  = rr;
+        _histPop[i]  = std::min(n / (float)kMaxCritters * 3.0f, 1.0f);
+        _histHead = (i + 1) % kHistLen;
+        if (_histCount < kHistLen) _histCount++;
+    }
 }
 
 // ---------------------------------------------------------------- Render ---
@@ -806,7 +890,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
     struct { simd_float2 scale, offset, resolution; float time, pad; } uni = {
         _uScale, _uOffset,
-        simd_make_float2((float)view.drawableSize.width, (float)view.drawableSize.height), t, 0
+        simd_make_float2((float)view.drawableSize.width, (float)view.drawableSize.height), t,
+        _climate
     };
 
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
@@ -898,6 +983,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
     // ---- HUD ----
     float bw = (float)view.bounds.size.width, bh = (float)view.bounds.size.height;
+    [self buildEvoGraph:bw bh:bh];
     [self buildHUD:sel bw:bw bh:bh];
     id<MTLBuffer> hb = _hudBuffers[_frameIndex];
     NSUInteger hc = _hud.size();
@@ -930,13 +1016,54 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
     int males = 0, females = 0, sick = 0;
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
+    const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME ▸ pop %d (%dM/%dF) ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME ▸ pop %d (%dM/%dF) ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         (int)_critters.size(), males, females, _generation, _births, _deaths, sick,
-        _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
+        band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
 
 // ------------------------------------------------------------- Inspector ---
+
+// Evolution graph: the climate driver and the colony-average traits that
+// track it, scrolling over the last ~kHistLen sim-seconds. Always visible so
+// you can watch the population drift even with nothing selected.
+- (void)buildEvoGraph:(float)bw bh:(float)bh {
+    auto rect = [&](float x, float y, float w, float h, simd_float4 col, float shape) {
+        float cx = (x + w*0.5f)/bw*2.0f-1.0f, cy = (y + h*0.5f)/bh*2.0f-1.0f;
+        [self hud:cx cy:cy hw:w/bw hh:h/bh shape:shape color:col p0:0];
+    };
+    float gw = 360, gh = 150, gx = 16, gy = bh - 32 - gh;
+    rect(gx-8, gy-8, gw+16, gh+32, simd_make_float4(0.05f,0.06f,0.08f,0.85f), 6);
+    for (int k = 0; k <= 2; k++)                              // 0 / 0.5 / 1 grid
+        rect(gx, gy + k*0.5f*gh, gw, 1, simd_make_float4(1,1,1,0.08f), 4);
+
+    int count = _histCount, head = _histHead;
+    auto plot = [&](const float *buf, simd_float4 col, float dot) {
+        for (int k = 0; k < count; k++) {
+            int idx = (head - count + k + kHistLen) % kHistLen;
+            float v = std::clamp(buf[idx], 0.0f, 1.0f);
+            float x = gx + (float)k/(kHistLen-1) * gw;
+            float y = gy + v * gh;
+            rect(x - dot*0.5f, y - dot*0.5f, dot, dot, col, 4);
+        }
+    };
+    if (count >= 2) {
+        plot(_histPop,  simd_make_float4(0.55f,0.55f,0.62f,0.7f), 2.0f);  // population
+        plot(_histClim, simd_make_float4(1.00f,1.00f,1.00f,0.9f), 2.5f);  // climate (driver)
+        plot(_histRes,  simd_make_float4(0.95f,0.70f,0.30f,1.0f), 2.5f);  // resistance
+        plot(_histSize, simd_make_float4(0.35f,0.75f,0.95f,1.0f), 2.5f);  // avg size
+        plot(_histDark, simd_make_float4(0.45f,0.90f,0.50f,1.0f), 2.5f);  // coat darkness
+    }
+    // Colour key across the top: climate · size · darkness · resistance · pop.
+    simd_float4 key[5] = {
+        simd_make_float4(1.00f,1.00f,1.00f,0.9f), simd_make_float4(0.35f,0.75f,0.95f,1),
+        simd_make_float4(0.45f,0.90f,0.50f,1),    simd_make_float4(0.95f,0.70f,0.30f,1),
+        simd_make_float4(0.55f,0.55f,0.62f,0.9f),
+    };
+    for (int k = 0; k < 5; k++)
+        rect(gx + k*26.0f, gy + gh + 6, 20, 6, key[k], 4);
+}
 
 - (void)buildHUD:(Critter *)sel bw:(float)bw bh:(float)bh {
     auto rect = [&](float x, float y, float w, float h, simd_float4 col, float shape) {

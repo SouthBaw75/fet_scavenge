@@ -177,11 +177,24 @@ Care for a colony of critters whose every trait is read from a real, inherited
 **nucleotide genome** — built to the spec in `09-biome/DESIGN.md`. Diploid A/C/G/T
 genes on chromosomes, traits translated from the sequence, dominance read from
 the sequence, **meiosis with crossing-over + point mutation**, and X/Y sex — so
-the colony genuinely evolves across generations. Critters have procedural
-Verlet-spine bodies, utility-AI needs (hunger / energy / reproduction), forage
-regrowing food, court and breed, and catch a contagion whose spread is governed
-by disease-resistance genes. Click any critter to inspect its trait bars and its
-genome (both homologs shown as colored base ticks). F scatters food, Space
+the colony genuinely evolves across generations. Sixteen genes drive visible,
+heritable **morphology**: body size, elongation, belly girth, eye size, a snout,
+side-fins, and a two-color banding pattern, so lineages look alike and drift
+apart as mutations and recombination accumulate.
+
+A drifting **climate** (gentle seasons over a slow-wandering baseline) turns
+that variation into **directional natural selection**: cold favors large, dark
+bodies that hold heat, warmth favors small, pale ones (Bergmann's + Gloger's
+rules), so mismatched critters burn energy faster, breed less, and die younger —
+and the colony's average size and coloration visibly **track the environment
+over generations**. An always-on **evolution graph** plots the climate against
+the colony-average size, coat darkness, resistance, and population so you can
+watch the drift happen; the ground itself tints frosty-blue to sun-baked-tan
+with the temperature. Critters have procedural Verlet-spine bodies, utility-AI
+needs (hunger / energy / reproduction), forage regrowing food, court and breed,
+and catch a contagion whose spread is governed by disease-resistance genes.
+Click any critter to inspect its trait bars and its genome (both homologs shown
+as colored base ticks). F scatters food, `,`/`.` cool/warm the climate, Space
 pauses, `[`/`]` change speed, K culls, I introduces a stranger, R resets.
 
 ## Where to go from here
