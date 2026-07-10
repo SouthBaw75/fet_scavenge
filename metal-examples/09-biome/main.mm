@@ -58,17 +58,18 @@ static const float kSampleSecs   = 1.0f;    // one history sample per sim second
 
 // Genome layout: kNumGenes autosomal loci spread across kChromosomes. Related
 // genes share a chromosome so they tend to inherit together (linkage).
-static const int kNumGenes = 16;
+static const int kNumGenes = 20;
 static const int kChromosomes = 4;
-static const int kGenesPerChrom = kNumGenes / kChromosomes;   // 4
+static const int kGenesPerChrom = kNumGenes / kChromosomes;   // 5
 static const float kMutationRate = 0.04f;   // chance per gene per gamete
 
-// Gene indices -> traits.
-//   chrom 0: physiology   1: coloration   2: physique   3: features
+// Gene indices -> traits. Genes on a chromosome inherit together (linkage);
+// with 5 genes per chromosome the eye-color loci travel with the features set.
 enum { GSize0 = 0, GSize1 = 1, GSpeed = 2, GMetab = 3,
        GColR  = 4, GColG  = 5, GColB  = 6, GResist = 7,
        GAspect = 8, GGirth = 9, GEye = 10, GSnout = 11,
-       GSpikes = 12, GPattern = 13, GPatHue = 14, GFert = 15 };
+       GSpikes = 12, GPattern = 13, GPatHue = 14, GFert = 15,
+       GEyeR = 16, GEyeG = 17, GEyeB = 18, GEyeShine = 19 };
 
 // --------------------------------------------------------------- Genetics ---
 // A gene is 16 bases packed 2 bits each in a uint32 (A=0,C=1,G=2,T=3).
@@ -180,6 +181,8 @@ struct Phenotype {
     float pattern;     // 0..1 banding strength
     simd_float3 color;  // primary coat color
     simd_float3 color2; // secondary (banding) color
+    simd_float3 eyeColor; // heritable iris color
+    float eyeShine;    // 0..1 iris brightness
 };
 
 // Perceived brightness of a coat color (Rec. 601 luma); 1-this is "darkness".
@@ -231,6 +234,11 @@ static Phenotype phenotypeOf(const Genome &g) {
     float hue = L(GPatHue);
     simd_float3 comp = simd_make_float3(1.0f, 1.0f, 1.0f) - p.color;
     p.color2 = (p.color + (comp - p.color) * (0.35f + 0.55f * hue)) * 0.92f;
+    // Heritable iris color (its own loci, so it recombines independently).
+    p.eyeColor = simd_make_float3(0.12f + 0.85f * L(GEyeR),
+                                  0.12f + 0.85f * L(GEyeG),
+                                  0.12f + 0.85f * L(GEyeB));
+    p.eyeShine = L(GEyeShine);
     return p;
 }
 
@@ -503,10 +511,13 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         float tex = 0.70 + 0.5*vnoise(p*5.0 + seed);         // leaf mottling
         float3 leaf = in.color.rgb * (0.55 + 0.7*rad) * tex; // dark base, bright tips
         return float4(gammaOut(leaf)*av, av);
-    } else if (shape == 3) {                // eye
+    } else if (shape == 3) {                // eye: pupil + heritable iris + sclera
         float r = length(p);
-        float3 c = (r < 0.45) ? float3(0.05) : float3(0.98);
-        float av = smoothstep(1.0, 0.7, r);
+        float3 iris = in.color.rgb;
+        float3 c = (r < 0.28) ? float3(0.03)                 // pupil
+                 : (r < 0.60) ? iris * (0.6 + 0.5*(0.60-r))  // iris (radial shade)
+                 : float3(0.95);                             // sclera
+        float av = smoothstep(1.0, 0.72, r);
         return float4(gammaOut(c) * av, av);
     } else if (shape == 4) {                // solid rect (bars, panels, ticks)
         return float4(gammaOut(in.color.rgb) * in.color.a, in.color.a);
@@ -577,6 +588,23 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         float d = (r - 0.82) / 0.15;
         float av = exp(-d*d) * in.color.a;   // gaussian ring, no hard edge
         return float4(gammaOut(in.color.rgb)*av, av);
+    } else if (shape == 12) {               // grass / reed tuft (params.x = seed)
+        float seed = in.params.x;
+        float up = p.y*0.5 + 0.5;            // 0 base .. 1 tip
+        float av = 0.0;
+        for (int k = 0; k < 5; k++) {
+            float fk = float(k);
+            float root = (fk - 2.0) * 0.30 + 0.12*sin(seed*3.1 + fk);
+            float lean = (0.10 + 0.18*fract(sin(seed+fk)*91.7)) * up;   // bends toward tip
+            float bx = root + lean;
+            float w  = 0.09 * (1.0 - up*0.75);                          // taper to a point
+            float blade = smoothstep(w, 0.0, abs(p.x - bx));
+            blade *= step(-0.95, p.y) * smoothstep(1.0, 0.15, p.y);
+            av = max(av, blade);
+        }
+        if (av < 0.02) discard_fragment();
+        float3 g = in.color.rgb * (0.6 + 0.55*up);   // dark base, bright tips
+        return float4(gammaOut(g)*av, av);
     }
     return float4(gammaOut(in.color.rgb) * a, a * in.color.a);
 }
@@ -824,10 +852,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v7 (realistic water) — if you don't see this line you're "
-           "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Animated water surface + soft wakes. START POP / LIFESPAN sliders now "
-           "drag (bug fixed). Scroll to zoom, drag to pan.\n");
+    printf("=== BIOME v8 (eye color + pond grass) — if you don't see this line "
+           "you're running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
+           "Heritable eye color, reed grass ringing the ponds that parts as critters\n"
+           "pass, nests kept off the water, and easier population growth.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1013,6 +1041,14 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (size_t i = 0; i < _nests.size(); i++)
         if (_nests[i].alive && _nests[i].owner == owner) return (int)i;
     if ((int)_nests.size() >= kMaxNests) return -1;
+    // Keep nests off the water — nudge to the nearest dry shore if needed.
+    for (const Water &wp : _water) {
+        float d = simd_distance(pos, wp.pos);
+        if (d < wp.radius + 1.2f) {
+            simd_float2 dir = d > 1e-3f ? (pos - wp.pos) / d : simd_make_float2(1,0);
+            pos = wp.pos + dir * (wp.radius + 1.5f);
+        }
+    }
     Nest n; n.pos = pos; n.owner = owner; n.quality = 0.12f; n.alive = true;
     _nests.push_back(n);
     return (int)_nests.size() - 1;
@@ -1046,9 +1082,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // --- needs ---
         c.age += dt;
         c.hunger = std::min(c.hunger + ph.metabolism * 0.05f * dt, 1.5f);
-        c.thirst = std::min(c.thirst + (0.03f + ph.metabolism*0.03f
-                                        + std::max(_climate,0.0f)*0.03f) * dt, 1.5f);
-        if (c.thirst > 1.0f) c.energy -= (c.thirst - 1.0f) * 0.12f * dt;   // dehydration
+        c.thirst = std::min(c.thirst + (0.014f + ph.metabolism*0.016f
+                                        + std::max(_climate,0.0f)*0.02f) * dt, 1.5f);
+        if (c.thirst > 1.2f) c.energy -= (c.thirst - 1.2f) * 0.10f * dt;   // dehydration
         float moving = simd_length(c.vel) / std::max(ph.speed, 0.1f);
         c.energy -= (0.01f + ph.metabolism * 0.012f + 0.02f * moving) * dt;
         if (c.hunger > 0.9f) c.energy -= (c.hunger - 0.9f) * 0.15f * dt;   // starving
@@ -1097,11 +1133,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // --- utility AI: pick the most pressing drive ---
         float sForage = c.hunger;
         float sRest = (1.0f - c.energy) * 0.9f;
-        float sMate = (c.age > c.maturity && c.energy > 0.5f && !c.pregnant) ? c.urge : 0.0f;
+        float sMate = (c.age > c.maturity && c.energy > 0.45f && !c.pregnant) ? c.urge : 0.0f;
         float sWander = 0.15f;
         float sFlee = threatLvl * 2.0f;              // survival trumps everything
         float sNest = c.pregnant ? 0.8f : 0.0f;      // expectant mothers nest
-        float sDrink = _water.empty() ? 0.0f : c.thirst;
+        float sDrink = _water.empty() ? 0.0f : std::max(0.0f, c.thirst - 0.45f) * 2.2f;
         c.action = AWander;
         float best = sWander;
         if (sForage > best) { best = sForage; c.action = AForage; }
@@ -1135,7 +1171,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 float dd = simd_length(to);
                 if (dd < 1.0f + ph.size * 0.5f) {          // eat
                     c.hunger = std::max(c.hunger - _food[fi].growth * 0.9f, 0.0f);
-                    c.energy = std::min(c.energy + _food[fi].growth * 0.5f, 1.0f);
+                    c.energy = std::min(c.energy + _food[fi].growth * 0.7f, 1.0f);
                     _food[fi].alive = false;
                     c.targetFood = -1;
                 } else desire = to / std::max(dd, 1e-3f);
@@ -1186,9 +1222,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     if (!mom->pregnant && mom->urge > 0.5f && dad->urge > 0.4f) {
                         mom->unborn = breed(mom->genome, dad->genome, _rng);
                         mom->pregnant = true;
-                        mom->gestation = 6.0f;
+                        mom->gestation = 5.0f;
                         mom->urge = 0; dad->urge = 0;
-                        mom->energy -= 0.2f; dad->energy -= 0.1f;
+                        mom->energy -= 0.12f; dad->energy -= 0.06f;
                     }
                 } else desire = to / std::max(dd, 1e-3f);
             } else { wantSpeed *= 0.6f; desire = simd_make_float2(cosf(c.heading), sinf(c.heading)); }
@@ -1380,7 +1416,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         }
     }
     // rare spontaneous infection keeps disease in the ecosystem
-    if (!_critters.empty() && u(_rng) < 0.02f * dt * _critters.size()) {
+    if (!_critters.empty() && u(_rng) < 0.01f * dt * _critters.size()) {
         Critter &c = _critters[_rng() % _critters.size()];
         if (c.alive && c.sick == 0) c.sick = 0.2f;
     }
@@ -1744,6 +1780,36 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         [self push:rp.pos half:simd_make_float2(rad, rad) rot:0 shape:11
               color:simd_make_float4(0.85f,0.93f,1.0f, alpha) p:simd_make_float4(0,0,0,0)];
     }
+    // grassy reeds ringing each pond — they part where a critter treads/drinks
+    auto hashf = [](float n){ float s = sinf(n)*43758.5453f; return s - floorf(s); };
+    for (int wi = 0; wi < (int)_water.size(); wi++) {
+        const Water &wp = _water[wi];
+        int nT = (int)(wp.radius * 3.5f);
+        for (int i = 0; i < nT; i++) {
+            float base = wi*17.31f + i*2.399f;
+            float j0 = hashf(base), j1 = hashf(base+1.7f), j2 = hashf(base+3.3f);
+            float ang = (i/(float)nT)*6.2831853f + (j0-0.5f)*0.35f;
+            float rr = wp.radius * (1.02f + 0.13f*j1);
+            simd_float2 gp = wp.pos + simd_make_float2(cosf(ang), sinf(ang)) * rr;
+            simd_float2 push = simd_make_float2(0,0);
+            float bend = 0.0f;
+            for (const Critter &c : _critters) {
+                if (!c.alive) continue;
+                simd_float2 to = gp - c.pos;
+                float d = simd_length(to);
+                if (d < 1.7f) {
+                    float kk = (1.7f - d) / 1.7f;
+                    push += (d > 1e-3f ? to/d : simd_make_float2(0,1)) * kk;
+                    bend = std::max(bend, kk);
+                }
+            }
+            gp += push;                                        // reeds lean away
+            float sz = (0.7f + 0.4f*j2) * (1.0f - 0.45f*bend); // and flatten a bit
+            simd_float3 gcol = simd_make_float3(0.16f, 0.34f + 0.14f*j1, 0.12f);
+            [self push:gp half:simd_make_float2(sz, sz*1.2f) rot:(j0-0.5f)*0.4f shape:12
+                  color:simd_make_float4(gcol, 1.0f) p:simd_make_float4(base,0,0,0)];
+        }
+    }
 
     // Soft contact shadows — drawn first so every entity sits on top of its own
     // shadow. Offset toward lower-right so the light reads as upper-left.
@@ -1834,14 +1900,15 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             [self push:c.spine[sidx] half:simd_make_float2(rr,rr) rot:0 shape:0
                   color:simd_make_float4(srgb,1.0f) p:simd_make_float4(0,0,0,0)];
         }
-        // Eyes (size is a heritable trait).
+        // Eyes (size and iris color are both heritable traits).
         float er = ph.eyeSize * ph.size;
+        simd_float4 eyec = simd_make_float4(ph.eyeColor * (0.7f + 0.6f*ph.eyeShine), 1.0f);
         [self push:c.pos + fwd*0.18f*ph.size + perp*0.26f*ph.size
               half:simd_make_float2(er,er) rot:0 shape:3
-              color:simd_make_float4(1,1,1,1) p:simd_make_float4(0,0,0,0)];
+              color:eyec p:simd_make_float4(0,0,0,0)];
         [self push:c.pos + fwd*0.18f*ph.size - perp*0.26f*ph.size
               half:simd_make_float2(er,er) rot:0 shape:3
-              color:simd_make_float4(1,1,1,1) p:simd_make_float4(0,0,0,0)];
+              color:eyec p:simd_make_float4(0,0,0,0)];
         // Pregnancy pip.
         if (c.pregnant)
             [self push:c.pos + simd_make_float2(0, ph.size * 0.95f)
@@ -1926,7 +1993,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v7 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v8 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         (int)_critters.size(), males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2054,10 +2121,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         rect(bx, y, 150, 11, simd_make_float4(0.15f,0.16f,0.18f,1), 4);
         rect(bx, y, 150*std::clamp(bars[i].v,0.0f,1.0f), 11, bars[i].c, 4);
     }
-    // Coat swatches (primary + secondary) and the sex bar.
+    // Coat swatches (primary + secondary), an eye showing iris color, sex bar.
     rect(px+300, py+34, 44, 30, simd_make_float4(q.color, 1.0f), 4);
     rect(px+300, py+66, 44, 30, simd_make_float4(q.color2, 1.0f), 4);
-    rect(px+300, py+100, 44, 14,
+    rect(px+300, py+100, 26, 26, simd_make_float4(q.eyeColor, 1.0f), 3);  // eye icon
+    rect(px+330, py+104, 14, 18,
          sel->male ? simd_make_float4(0.4f,0.6f,1.0f,1.0f)
                    : simd_make_float4(1.0f,0.5f,0.7f,1.0f), 4);
 
@@ -2088,7 +2156,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v7", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v8", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }

@@ -178,9 +178,9 @@ Care for a colony of critters whose every trait is read from a real, inherited
 genes on chromosomes, traits translated from the sequence, dominance read from
 the sequence, **meiosis with crossing-over + point mutation**, and X/Y sex — so
 the colony genuinely evolves across generations. Sixteen genes drive visible,
-heritable **morphology**: body size, elongation, belly girth, eye size, a snout,
-side-fins, and a two-color banding pattern, so lineages look alike and drift
-apart as mutations and recombination accumulate.
+heritable **morphology**: body size, elongation, belly girth, eye size, **iris
+color**, a snout, side-fins, and a two-color banding pattern, so lineages look
+alike and drift apart as mutations and recombination accumulate.
 
 A drifting **climate** (gentle seasons over a slow-wandering baseline) turns
 that variation into **directional natural selection**: cold favors large, dark
@@ -194,8 +194,9 @@ world is a **procedural biome** — grass, dirt, sand, and rock painted from
 moisture/elevation noise with relief shading, **snow** creeping over high ground
 when it turns cold, and the whole palette shifting frosty-blue to sun-baked-tan
 with the temperature; **soft contact shadows** ground every critter, nest, and
-plant, and **pools of water** dot the map — critters build up thirst and head to
-the nearest shore to drink, dehydrating if they neglect it. **Scroll to zoom**
+plant, and **pools of animated water** (ringed by reed grass that parts as
+critters wade through) dot the map — critters build up thirst and head to the
+nearest shore to drink, dehydrating if they neglect it. **Scroll to zoom**
 (toward the cursor) and **drag to pan** around the world, or use the VIEW
 buttons; a top-center readout tracks living **organisms, total deaths, and
 net growth/decline** since the colony began. Critters have
