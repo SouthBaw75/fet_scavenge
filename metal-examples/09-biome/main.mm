@@ -566,28 +566,39 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         float3 col = mix(hollow, twig, cup);
         col += in.color.rgb * 0.30 * smoothstep(outer-0.18, outer, rad); // rim highlight
         return float4(gammaOut(col)*disc, disc);
-    } else if (shape == 10) {               // animated water (params.x=time, y=seed)
+    } else if (shape == 10) {               // realistic pond: sky reflection + algae
         float t = in.params.x, seed = in.params.y;
         float ang = atan2(p.y, p.x), rad = length(p);
-        // Irregular, softly lapping shoreline — no hard circle.
-        float edge = 0.90 + 0.06*vnoise(float2(ang*3.0,1.0)+seed)
-                          + 0.03*sin(ang*5.0 + seed*1.7 + t*0.6);
+        // Irregular shoreline (no hard circle).
+        float edge = 0.92 + 0.055*vnoise(float2(ang*3.0,1.0)+seed)
+                          + 0.03*sin(ang*4.0 + seed*1.7);
         float aa = fwidth(rad);
-        float mask = smoothstep(edge, edge-0.09-aa, rad);
+        float mask = smoothstep(edge, edge-0.10-aa, rad);
         if (mask < 0.01) discard_fragment();
-        // Depth: darker toward the middle, lighter at the shallows.
-        float depth = smoothstep(edge, 0.0, rad);
-        float3 col = mix(float3(0.22,0.46,0.60), float3(0.05,0.17,0.35), depth);
-        // Surface: layered wavelets drifting in different directions + fbm swell.
-        float2 s = p * 5.0;
-        float h = 0.5*sin(s.x*1.2 + t*1.6 + seed)
-                + 0.4*sin(s.y*1.6 - t*1.2)
-                + 0.6*fbm(p*3.2 + float2(t*0.10, -t*0.08));
-        float glint = smoothstep(0.72, 1.0, 0.5+0.5*sin(h*3.14159));
-        col += glint * 0.16;                 // soft moving sparkle
-        col += 0.05 * (h - 0.75);            // gentle light/dark shading
-        float foam = smoothstep(edge-0.05, edge, rad);      // wet, bright shore
-        col = mix(col, float3(0.55,0.72,0.82), foam*0.35);
+
+        // Reflection coords, distorted by slow ripples so the sky shimmers.
+        float2 uv = p * 1.6 + seed;
+        float2 rip = float2(fbm(uv*3.0 + float2(t*0.15, 0.0)),
+                            fbm(uv*3.0 + float2(0.0, t*0.13))) - 0.5;
+        uv += rip * 0.13;
+        // Reflected sky: drifting fbm clouds over a steely blue.
+        float2 flow = float2(t*0.02, t*0.015);
+        float clouds = fbm(uv*1.1 + flow)*0.6 + fbm(uv*2.3 - flow*1.2)*0.4;
+        float3 col = mix(float3(0.09,0.15,0.21), float3(0.60,0.66,0.71),
+                         smoothstep(0.42, 0.86, clouds));
+        // Deeper water in the middle reads darker.
+        float depth = 1.0 - smoothstep(0.15, edge, rad);
+        col *= 1.0 - 0.42*depth;
+        // Green algae / duckweed, thicker in the shallows near the rim.
+        float shallow = smoothstep(0.45, edge, rad);
+        float weed = fbm(p*7.0 + 5.0);
+        col = mix(col, float3(0.24,0.46,0.18),
+                  smoothstep(0.60,0.74,weed) * (0.35 + 0.65*shallow) * 0.85);
+        col = mix(col, float3(0.17,0.33,0.15),
+                  smoothstep(0.55,0.63, fbm(p*3.0+11.0)) * shallow * 0.4);
+        // Subtle sparkle on ripple crests, then a wet dark shore rim.
+        col += smoothstep(0.78, 1.0, clouds + 0.3*(rip.x+rip.y)) * 0.10;
+        col = mix(col, float3(0.05,0.07,0.06), smoothstep(edge-0.15, edge, rad) * 0.55);
         return float4(gammaOut(col)*mask, mask);
     } else if (shape == 11) {               // soft expanding ripple crest
         float r = length(p);
@@ -860,10 +871,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v9 (birth rate + visible eyes) — if you don't see this line "
-           "you're running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New BIRTH RATE slider (urge speed + litter size) so the colony can grow.\n"
-           "Bigger, vivid, heritable eye colors — zoom in to see them.\n");
+    printf("=== BIOME v10 (photoreal ponds) — if you don't see this line you're "
+           "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
+           "Ponds now reflect a drifting cloudy sky with green algae in the shallows,\n"
+           "ringed by a thick irregular grass band. Zoom in to see it.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1816,16 +1827,19 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             if (c.alive && simd_distance(c.pos, wp.pos) < outer + 2.5f)
                 nearby.push_back(c.pos);
 
-        const int rings = 4;
+        const int rings = 6;
         for (int ring = 0; ring < rings; ring++) {
             float rt = ring / (float)(rings - 1);                 // 0 inner .. 1 outer
-            float bandR = wp.radius * (0.90f + 0.46f * rt);       // 0.90x .. 1.36x band
-            int nA = std::max(8, (int)(bandR * 2.6f));            // dense around the rim
+            float bandR = wp.radius * (0.88f + 0.66f * rt);       // 0.88x .. 1.54x band
+            int nA = std::max(12, (int)(bandR * 3.4f));           // very dense around the rim
             for (int i = 0; i < nA; i++) {
                 float base = wi*97.0f + ring*13.7f + i*2.399f;
                 float j0 = hashf(base), j1 = hashf(base+1.7f), j2 = hashf(base+3.3f);
-                float ang = (i/(float)nA)*6.2831853f + ring*0.5f + (j0-0.5f)*0.45f;
-                float rr  = bandR + (j1-0.5f)*wp.radius*0.14f;
+                float ang = (i/(float)nA)*6.2831853f + ring*0.5f + (j0-0.5f)*0.5f;
+                // undulating outer boundary so the ring isn't a clean circle
+                float boundary = 1.0f + rt * (0.16f*sinf(ang*2.3f + wi*1.7f)
+                                              + 0.09f*sinf(ang*5.1f + wi));
+                float rr = bandR * boundary + (j1-0.5f)*wp.radius*0.16f;
                 simd_float2 gp = wp.pos + simd_make_float2(cosf(ang), sinf(ang)) * rr;
                 simd_float2 push = simd_make_float2(0,0);
                 float bend = 0.0f;
@@ -1839,11 +1853,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     }
                 }
                 gp += push * 0.9f;                                 // lean away
-                float sz = (0.85f + 0.5f*j2) * (1.0f - 0.5f*bend); // flatten when trodden
-                simd_float3 gcol = simd_make_float3(0.12f + 0.06f*j0,
-                                                    0.30f + 0.16f*j1,
-                                                    0.10f + 0.05f*j2);
-                [self push:gp half:simd_make_float2(sz, sz*1.5f) rot:(j0-0.5f)*0.35f shape:12
+                float sz = (0.95f + 0.6f*j2) * (1.0f - 0.5f*bend); // taller, flatten when trodden
+                // varied greens — bright lime highlights over darker bases
+                float lime = j1*j1;
+                simd_float3 gcol = simd_make_float3(0.10f + 0.14f*lime,
+                                                    0.32f + 0.26f*j1,
+                                                    0.07f + 0.09f*j2);
+                [self push:gp half:simd_make_float2(sz, sz*1.6f) rot:(j0-0.5f)*0.35f shape:12
                       color:simd_make_float4(gcol, 1.0f) p:simd_make_float4(base,0,0,0)];
             }
         }
@@ -2032,7 +2048,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v9 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v10 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         (int)_critters.size(), males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2195,7 +2211,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v9", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v10", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
