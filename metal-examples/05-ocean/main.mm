@@ -34,6 +34,7 @@ struct Uniforms {
     float4 camFwd;   // xyz = basis, w = focal length (1/tan(fov/2))
     float4 sun;      // xyz = direction to sun, w = time
     float4 misc;     // xy = drawable resolution, z = wave intensity
+    float4 water;    // rgb = water body color (linear)
 };
 
 // dir.x, dir.z, amplitude, wavelength — a swell plus five layers of chop.
@@ -251,10 +252,12 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     float3 reflection = skyColor(normalize(R), sun, time);
 
     // What's under the surface: deep water, plus light scattering through
-    // the top of backlit crests.
-    float3 deep = float3(0.02, 0.11, 0.16);
+    // the top of backlit crests. Both derive from the user's water color so
+    // the hue stays coherent from depths to sunlit crest.
+    float3 wc = u.water.rgb;
+    float3 deep = wc * 0.35;
     float scatter = pow(max(dot(-V, sun), 0.0), 3.0) * max(in.crest, 0.0);
-    float3 body = deep + float3(0.0, 0.25, 0.20) * scatter * 0.9;
+    float3 body = deep + wc * 1.35 * scatter * 0.9;
 
     float3 color = mix(body, reflection, fresnel);
 
@@ -345,6 +348,7 @@ struct Uniforms {
     simd_float4 camFwd;
     simd_float4 sun;
     simd_float4 misc;
+    simd_float4 water;
 };
 
 static simd_float4x4 Perspective(float fovyRadians, float aspect, float nearZ, float farZ) {
@@ -372,6 +376,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 @implementation OceanRenderer {
     float _intensity;        // sea state: 0.2 calm .. 2.5 storm
     float _intensityShown;   // eased value actually sent to the GPU
+    simd_float3 _waterLinear; // water body color, linear space
     id<MTLCommandQueue> _queue;
     id<MTLRenderPipelineState> _skyPipeline;
     id<MTLRenderPipelineState> _oceanPipeline;
@@ -490,13 +495,18 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 
     _intensity = 1.0f;
     _intensityShown = 1.0f;
+    _waterLinear = simd_make_float3(0.06f, 0.31f, 0.46f);   // classic sea teal
 
     // Sea-state controls: up/down arrows (or +/-) adjust smoothly, 1-5 are
-    // presets from glassy calm to full storm.
+    // presets from glassy calm to full storm. C opens the color wheel.
     __unsafe_unretained OceanRenderer *weakSelf = self;
+    __unsafe_unretained MTKView *weakView = view;
     [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
                                           handler:^NSEvent *(NSEvent *event) {
         if (event.modifierFlags & NSEventModifierFlagCommand) return event;
+        // Only react to keys aimed at the ocean window (so typing hex values
+        // into the color panel doesn't change the sea state).
+        if (event.window != weakView.window) return event;
         unsigned short c = event.keyCode;
         float &inten = weakSelf->_intensity;
         if (c == 126 || c == 24) { inten = std::min(inten * 1.15f, 2.5f); return nil; } // up / =
@@ -506,12 +516,40 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         if (c == 20) { inten = 1.00f; return nil; }   // 3 default
         if (c == 21) { inten = 1.60f; return nil; }   // 4 heavy
         if (c == 23) { inten = 2.40f; return nil; }   // 5 storm
+        if (c == 8) { [weakSelf openColorWheel]; return nil; }   // C
         return event;
     }];
-    printf("Sea state: Up/Down (or +/-) adjust wave intensity, 1-5 presets.\n");
+    printf("Sea state: Up/Down (or +/-) adjust wave intensity, 1-5 presets.\n"
+           "Color: press C for the color wheel — the water re-tints live.\n");
 
     _startTime = CACurrentMediaTime();
     return self;
+}
+
+// The native macOS color panel, in wheel mode: live updates while dragging.
+- (void)openColorWheel {
+    NSColorPanel *panel = [NSColorPanel sharedColorPanel];
+    panel.showsAlpha = NO;
+    panel.mode = NSColorPanelModeWheel;
+    panel.continuous = YES;
+    panel.target = self;
+    panel.action = @selector(waterColorChanged:);
+    // Seed the panel with the current water color (linear -> sRGB).
+    simd_float3 s = simd_make_float3(powf(_waterLinear.x, 1.0f / 2.2f),
+                                     powf(_waterLinear.y, 1.0f / 2.2f),
+                                     powf(_waterLinear.z, 1.0f / 2.2f));
+    panel.color = [NSColor colorWithSRGBRed:s.x green:s.y blue:s.z alpha:1.0];
+    [panel orderFront:nil];
+}
+
+- (void)waterColorChanged:(id)sender {
+    NSColor *c = [[(NSColorPanel *)sender color]
+                  colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    if (!c) return;
+    // sRGB -> linear, since the shader works in linear light.
+    _waterLinear = simd_make_float3(powf((float)c.redComponent, 2.2f),
+                                    powf((float)c.greenComponent, 2.2f),
+                                    powf((float)c.blueComponent, 2.2f));
 }
 
 - (void)drawInMTKView:(MTKView *)view {
@@ -549,6 +587,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         .misc = simd_make_float4((float)view.drawableSize.width,
                                  (float)view.drawableSize.height,
                                  _intensityShown, 0),
+        .water = simd_make_float4(_waterLinear, 0),
     };
 
     [self ensureTargets:view.device size:view.drawableSize];
@@ -634,7 +673,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                           _intensity < 1.30f ? "moderate" :
                           _intensity < 2.00f ? "heavy" : "STORM";
     _fps.tick(view.window, [NSString stringWithFormat:
-        @"05 — Ocean ▸ Sea state x%.2f (%s) [↑/↓, 1-5]", _intensity, seaName]);
+        @"05 — Ocean ▸ Sea state x%.2f (%s) [↑/↓, 1-5] ▸ [C] color", _intensity, seaName]);
 }
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}
