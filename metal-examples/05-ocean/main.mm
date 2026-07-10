@@ -504,6 +504,39 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         simd_make_float4(-simd_dot(right, eye), -simd_dot(up, eye), simd_dot(fwd, eye), 1));
 }
 
+// WMO weather codes -> how hard it's raining (0..1) and a display name.
+static float RainForCode(int c) {
+    if (c >= 95) return 1.0f;                       // thunderstorms
+    if (c == 82) return 1.0f;
+    if (c == 81) return 0.75f;
+    if (c == 80) return 0.50f;                      // showers
+    if (c == 85 || c == 86) return 0.6f;            // snow showers
+    if (c >= 71 && c <= 77) return 0.5f;            // snow (rendered as rain)
+    if (c == 65) return 1.0f;
+    if (c == 63) return 0.70f;
+    if (c == 61) return 0.45f;                      // rain
+    if (c == 66 || c == 67) return 0.7f;            // freezing rain
+    if (c >= 51 && c <= 57) return 0.30f;           // drizzle
+    return 0.0f;
+}
+
+static const char *NameForCode(int c) {
+    if (c == 0) return "clear";
+    if (c == 1) return "mostly clear";
+    if (c == 2) return "partly cloudy";
+    if (c == 3) return "overcast";
+    if (c == 45 || c == 48) return "fog";
+    if (c >= 51 && c <= 57) return "drizzle";
+    if (c == 61) return "light rain";
+    if (c == 63) return "rain";
+    if (c == 65) return "heavy rain";
+    if (c == 66 || c == 67) return "freezing rain";
+    if ((c >= 71 && c <= 77) || c == 85 || c == 86) return "snow";
+    if (c >= 80 && c <= 82) return "showers";
+    if (c >= 95) return "thunderstorm";
+    return "unknown";
+}
+
 @interface OceanRenderer : NSObject <MTKViewDelegate>
 - (instancetype)initWithView:(MTKView *)view;
 @end
@@ -514,6 +547,16 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     float _dayT;             // time of day: 0 = high noon .. 1 = dusk
     float _dayShown;         // eased value driving the sun
     simd_float3 _waterLinear; // water body color, linear space
+
+    // LIVE mode: mirror the real time of day and the real weather outside.
+    BOOL _live;
+    double _lastFetch;
+    float _liveWind;         // km/h
+    float _liveRain;         // 0..1
+    float _liveCloud;        // 0..1
+    float _sunriseMin, _sunsetMin;   // local minutes since midnight, -1 unknown
+    NSString *_liveCity;
+    NSString *_liveCond;
     id<MTLCommandQueue> _queue;
     id<MTLRenderPipelineState> _skyPipeline;
     id<MTLRenderPipelineState> _oceanPipeline;
@@ -647,6 +690,15 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         // into the color panel doesn't change the sea state).
         if (event.window != weakView.window) return event;
         unsigned short c = event.keyCode;
+        if (c == 37) { [weakSelf toggleLive]; return nil; }   // L = live mode
+        // Any manual sea/time key hands control back to you.
+        BOOL manual = (c == 126 || c == 24 || c == 125 || c == 27 ||
+                       (c >= 18 && c <= 23) || c == 25 || c == 26 || c == 28 ||
+                       c == 29 || c == 123 || c == 124);
+        if (manual && weakSelf->_live) {
+            weakSelf->_live = NO;
+            printf("LIVE mode OFF: manual controls restored.\n");
+        }
         float &inten = weakSelf->_intensity;
         if (c == 126 || c == 24) { inten = std::min(inten * 1.15f, 2.5f); return nil; } // up / =
         if (c == 125 || c == 27) { inten = std::max(inten / 1.15f, 0.2f); return nil; } // down / -
@@ -667,12 +719,96 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         if (c == 29) { day = 1.45f; return nil; }     // 0 NIGHT
         return event;
     }];
+    _live = NO;
+    _lastFetch = 0;
+    _liveWind = 10;
+    _liveRain = 0;
+    _liveCloud = 0.3f;
+    _sunriseMin = -1;
+    _sunsetMin = -1;
+    _liveCity = @"";
+    _liveCond = @"";
+
     printf("Sea state: Up/Down (or +/-) adjust wave intensity, 1-5 presets.\n"
            "Time of day: Left/Right, or 6 noon · 7 golden · 8 sunset · 9 dusk · 0 night.\n"
-           "Color: press C for the color wheel — the water re-tints live.\n");
+           "Color: press C for the color wheel — the water re-tints live.\n"
+           "LIVE: press L to mirror your real local time of day and weather.\n");
 
     _startTime = CACurrentMediaTime();
     return self;
+}
+
+// ---- LIVE mode: locate by IP, then pull current weather + sun times from
+// Open-Meteo (free, no API key). Refreshes every 10 minutes while active.
+- (void)fetchWeather {
+    _lastFetch = CACurrentMediaTime();
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURL *ipURL = [NSURL URLWithString:@"https://ipapi.co/json/"];
+    [[session dataTaskWithURL:ipURL completionHandler:
+      ^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSDictionary *j = data ? [NSJSONSerialization JSONObjectWithData:data
+                                                                 options:0 error:nil] : nil;
+        if (![j isKindOfClass:[NSDictionary class]] || !j[@"latitude"]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                printf("LIVE: could not determine location (offline?) — using defaults.\n");
+            });
+            return;
+        }
+        double lat = [j[@"latitude"] doubleValue];
+        double lon = [j[@"longitude"] doubleValue];
+        NSString *city = [j[@"city"] isKindOfClass:[NSString class]] ? j[@"city"] : @"";
+        NSString *wu = [NSString stringWithFormat:
+            @"https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
+             "&current=weather_code,wind_speed_10m,cloud_cover"
+             "&daily=sunrise,sunset&forecast_days=1&timezone=auto", lat, lon];
+        [[session dataTaskWithURL:[NSURL URLWithString:wu] completionHandler:
+          ^(NSData *d2, NSURLResponse *r2, NSError *e2) {
+            NSDictionary *w = d2 ? [NSJSONSerialization JSONObjectWithData:d2
+                                                                   options:0 error:nil] : nil;
+            if (![w isKindOfClass:[NSDictionary class]] || !w[@"current"]) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    printf("LIVE: weather fetch failed — using defaults.\n");
+                });
+                return;
+            }
+            NSDictionary *cur = w[@"current"];
+            int code = [cur[@"weather_code"] intValue];
+            float wind = [cur[@"wind_speed_10m"] floatValue];
+            float cloud = [cur[@"cloud_cover"] floatValue] / 100.0f;
+            float sr = -1, ss = -1;
+            NSArray *sra = w[@"daily"][@"sunrise"], *ssa = w[@"daily"][@"sunset"];
+            int hh, mm;
+            if ([sra isKindOfClass:[NSArray class]] && sra.count &&
+                sscanf([sra[0] UTF8String], "%*d-%*d-%*dT%d:%d", &hh, &mm) == 2)
+                sr = hh * 60 + mm;
+            if ([ssa isKindOfClass:[NSArray class]] && ssa.count &&
+                sscanf([ssa[0] UTF8String], "%*d-%*d-%*dT%d:%d", &hh, &mm) == 2)
+                ss = hh * 60 + mm;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self->_liveWind = wind;
+                self->_liveRain = RainForCode(code);
+                self->_liveCloud = cloud;
+                self->_sunriseMin = sr;
+                self->_sunsetMin = ss;
+                self->_liveCity = city;
+                self->_liveCond = @(NameForCode(code));
+                printf("LIVE: %s — %s, wind %.0f km/h, cloud %.0f%%, "
+                       "sunrise %02d:%02d, sunset %02d:%02d\n",
+                       city.UTF8String, NameForCode(code), wind, cloud * 100,
+                       (int)sr / 60, (int)sr % 60, (int)ss / 60, (int)ss % 60);
+            });
+        }] resume];
+    }] resume];
+}
+
+- (void)toggleLive {
+    _live = !_live;
+    if (_live) {
+        printf("LIVE mode ON: mirroring your local time of day and weather.\n");
+        [self fetchWeather];
+    } else {
+        printf("LIVE mode OFF: manual controls restored.\n");
+    }
 }
 
 // The native macOS color panel, in wheel mode: live updates while dragging.
@@ -709,9 +845,42 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     float t = (float)(CACurrentMediaTime() - _startTime);
     float aspect = (float)(view.drawableSize.width / view.drawableSize.height);
 
+    // LIVE mode: derive time-of-day from the wall clock against the real
+    // sunrise/sunset, and sea/weather from the live conditions.
+    if (_live) {
+        if (CACurrentMediaTime() - _lastFetch > 600.0) [self fetchWeather];
+        NSDateComponents *dc = [[NSCalendar currentCalendar]
+            components:(NSCalendarUnitHour | NSCalendarUnitMinute | NSCalendarUnitSecond)
+              fromDate:[NSDate date]];
+        float nowMin = dc.hour * 60.0f + dc.minute + dc.second / 60.0f;
+        float sr = _sunriseMin > 0 ? _sunriseMin : 6 * 60;
+        float ss = _sunsetMin > 0 ? _sunsetMin : 20 * 60;
+        float dayT;
+        if (nowMin >= sr && nowMin <= ss) {
+            // Daylight: sun arcs up to ~48 deg at solar noon.
+            float f = (nowMin - sr) / std::max(ss - sr, 1.0f);
+            float elevDeg = 48.0f * sinf(f * (float)M_PI);
+            dayT = (48.0f - elevDeg) / 56.0f;
+        } else {
+            // Twilight into night: the sun sinks ~16 deg per hour after sunset.
+            float after = nowMin > ss ? (nowMin - ss) : (sr - nowMin);
+            float elevDeg = -std::min(after / 60.0f * 16.0f, 33.0f);
+            dayT = (48.0f - elevDeg) / 56.0f;
+        }
+        _dayT = std::clamp(dayT, 0.0f, 1.45f);
+        _intensity = std::clamp(0.35f + _liveWind * 0.035f, 0.25f, 2.5f);
+        if (_liveRain > 0.8f) _intensity = std::max(_intensity, 1.3f);  // storm seas
+    }
+
     // Glide toward the requested sea state / time of day so changes ease in.
     _intensityShown += (_intensity - _intensityShown) * 0.06f;
     _dayShown += (_dayT - _dayShown) * 0.05f;
+
+    // Weather factors: manual mode ties overcast+rain to the sea state;
+    // live mode uses the real cloud cover and precipitation.
+    float autoStorm = std::clamp((_intensityShown - 1.45f) / 0.9f, 0.0f, 1.0f);
+    float overcast = _live ? std::max(_liveCloud * 0.9f, _liveRain) : autoStorm;
+    float rainAmt = _live ? _liveRain : autoStorm;
 
     // Sun path: ~48 degrees up at noon, below the horizon at dusk, deep under
     // at night, along a fixed azimuth (the camera sways across it).
@@ -753,8 +922,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         .misc = simd_make_float4((float)view.drawableSize.width,
                                  (float)view.drawableSize.height,
                                  _intensityShown, 0),
-        .water = simd_make_float4(_waterLinear,
-                                  std::clamp((_intensityShown - 1.45f) / 0.9f, 0.0f, 1.0f)),
+        .water = simd_make_float4(_waterLinear, overcast),
         .moon = simd_make_float4(moonDir, night),
     };
 
@@ -827,7 +995,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
             simd_make_float2((float)view.drawableSize.width,
                              (float)view.drawableSize.height),
             t,
-            std::clamp((_intensityShown - 1.45f) / 0.9f, 0.0f, 1.0f),
+            rainAmt,
         };
         id<MTLRenderCommandEncoder> enc =
             [commands renderCommandEncoderWithDescriptor:pass];
@@ -852,9 +1020,16 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                           _dayT < 0.78f ? "golden hour" :
                           _dayT < 0.95f ? "sunset" :
                           _dayT < 1.15f ? "dusk" : "night";
-    _fps.tick(view.window, [NSString stringWithFormat:
-        @"05 — Ocean ▸ %s [←/→, 6-0] ▸ Sea x%.2f (%s) [↑/↓, 1-5] ▸ [C] color",
-        dayName, _intensity, seaName]);
+    if (_live) {
+        _fps.tick(view.window, [NSString stringWithFormat:
+            @"05 — Ocean ▸ LIVE %@%@%@ ▸ %s, sea x%.2f ▸ [L] manual",
+            _liveCity, _liveCity.length ? @" — " : @"",
+            _liveCond.length ? _liveCond : @"fetching…", dayName, _intensity]);
+    } else {
+        _fps.tick(view.window, [NSString stringWithFormat:
+            @"05 — Ocean ▸ %s [←/→, 6-0] ▸ Sea x%.2f (%s) [↑/↓, 1-5] ▸ [C] color ▸ [L] live",
+            dayName, _intensity, seaName]);
+    }
 }
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}
