@@ -40,15 +40,19 @@ static const int kMaxInstances = 32768;
 static const int kMaxInFlight = 3;
 static const int kSpineNodes = 6;
 
-// Genome layout: kNumGenes autosomal loci spread across kChromosomes.
-static const int kNumGenes = 8;
-static const int kChromosomes = 2;
+// Genome layout: kNumGenes autosomal loci spread across kChromosomes. Related
+// genes share a chromosome so they tend to inherit together (linkage).
+static const int kNumGenes = 16;
+static const int kChromosomes = 4;
 static const int kGenesPerChrom = kNumGenes / kChromosomes;   // 4
 static const float kMutationRate = 0.04f;   // chance per gene per gamete
 
 // Gene indices -> traits.
+//   chrom 0: physiology   1: coloration   2: physique   3: features
 enum { GSize0 = 0, GSize1 = 1, GSpeed = 2, GMetab = 3,
-       GColR = 4, GColG = 5, GColB = 6, GResist = 7 };
+       GColR  = 4, GColG  = 5, GColB  = 6, GResist = 7,
+       GAspect = 8, GGirth = 9, GEye = 10, GSnout = 11,
+       GSpikes = 12, GPattern = 13, GPatHue = 14, GFert = 15 };
 
 // --------------------------------------------------------------- Genetics ---
 // A gene is 16 bases packed 2 bits each in a uint32 (A=0,C=1,G=2,T=3).
@@ -140,16 +144,26 @@ static Genome breed(const Genome &mom, const Genome &dad, std::mt19937 &rng) {
     return kid;
 }
 
-// Phenotype: the visible, playable traits translated from the genome.
+// Phenotype: the visible, playable traits translated from the genome. Many
+// are small physical shifts that compound over generations so lineages
+// visibly diverge in body plan and markings.
 struct Phenotype {
     float size;        // body scale
     float speed;       // move speed
     float metabolism;  // energy burn + hunger rate
-    float sensory;     // perception radius
+    float sensory;     // perception radius (tied to eye size)
     float fertility;   // urge growth / litter viability
     float resistance;  // disease resistance
     float lifespan;    // seconds
-    simd_float3 color; // coat color
+    // --- visible morphology ---
+    float aspect;      // 0..1 body elongation (long+slender vs short+round)
+    float girth;       // 0..1 belly fullness
+    float eyeSize;     // eye radius fraction
+    float snout;       // 0..1 head projection
+    float spikes;      // 0..1 side-fin prominence
+    float pattern;     // 0..1 banding strength
+    simd_float3 color;  // primary coat color
+    simd_float3 color2; // secondary (banding) color
 };
 
 static Phenotype phenotypeOf(const Genome &g) {
@@ -157,16 +171,28 @@ static Phenotype phenotypeOf(const Genome &g) {
     Phenotype p;
     float sz = (L(GSize0) + L(GSize1)) * 0.5f;
     p.size = 0.6f + 1.1f * sz;
-    // Pleiotropy: bigger critters are slower and burn more energy.
+    p.eyeSize = 0.09f + 0.15f * L(GEye);
+    // Pleiotropy: bigger critters are slower and burn more energy; sharper
+    // eyes see farther.
     p.speed = (6.0f + 10.0f * L(GSpeed)) * (1.25f - 0.5f * sz);
     p.metabolism = (0.5f + 1.2f * L(GMetab)) * (0.7f + 0.6f * sz);
-    p.sensory = 8.0f + 20.0f * L(GSpeed) * 0.5f + 6.0f;
-    p.fertility = 0.4f + 0.9f * (1.0f - L(GMetab) * 0.4f);
+    p.sensory = 10.0f + 62.0f * p.eyeSize;
+    p.fertility = 0.4f + 0.9f * L(GFert);
     p.resistance = L(GResist);
     p.lifespan = 55.0f + 70.0f * (1.0f - L(GMetab)) + 20.0f * (1.0f - sz);
     p.color = simd_make_float3(0.35f + 0.6f * L(GColR),
                                0.35f + 0.6f * L(GColG),
                                0.35f + 0.6f * L(GColB));
+    p.aspect = L(GAspect);
+    p.girth = L(GGirth);
+    p.snout = L(GSnout);
+    p.spikes = L(GSpikes);
+    p.pattern = L(GPattern);
+    // Secondary color: a shift toward the complement, scaled by the hue gene,
+    // so markings read distinct from the coat.
+    float hue = L(GPatHue);
+    simd_float3 comp = simd_make_float3(1.0f, 1.0f, 1.0f) - p.color;
+    p.color2 = (p.color + (comp - p.color) * (0.35f + 0.55f * hue)) * 0.92f;
     return p;
 }
 
@@ -681,9 +707,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         c.pos.y = std::clamp(c.pos.y, 1.0f, kWorldH - 1.0f);
         c.phase += (0.5f + simd_length(c.vel) * 0.5f) * dt * 6.0f;
 
-        // --- Verlet spine follows the head ---
+        // --- Verlet spine follows the head (elongated bodies stretch it) ---
         c.spine[0] = c.pos;
-        float link = 0.42f * ph.size;
+        float link = 0.40f * ph.size * (0.75f + 0.7f * ph.aspect);
         for (int s = 1; s < kSpineNodes; s++) {
             simd_float2 dir = c.spine[s] - c.spine[s-1];
             float dl = simd_length(dir);
@@ -798,31 +824,64 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // critters: spine of soft blobs, head + eyes, status pips
     for (const Critter &c : _critters) {
         if (!c.alive) continue;
-        simd_float4 col = simd_make_float4(c.ph.color, 1.0f);
-        if (c.sick > 0)   col = col + (simd_make_float4(0.7f,0.85f,0.3f,0) - col) * (c.sick*0.6f);
-        if (c.health < 0.5f) { float f = 0.6f + 0.4f*c.health; col.x*=f; col.y*=f; col.z*=f; }
-        for (int sidx = kSpineNodes-1; sidx >= 0; sidx--) {
-            float taper = 1.0f - sidx * 0.12f;
-            float rr = c.ph.size * 0.55f * taper;
-            simd_float4 sc = col; sc.w = 1.0f;
-            [self push:c.spine[sidx] half:simd_make_float2(rr,rr) rot:0 shape:0
-                  color:sc p:simd_make_float4(0,0,0,0)];
+        const Phenotype &ph = c.ph;
+        // Primary + secondary coat colors, tinted by sickness and dimmed by
+        // failing health.
+        simd_float3 base = ph.color;
+        simd_float3 sec = ph.color2;
+        if (c.sick > 0) {
+            simd_float3 ill = simd_make_float3(0.70f, 0.85f, 0.30f);
+            base = base + (ill - base) * (c.sick * 0.6f);
+            sec  = sec  + (ill - sec)  * (c.sick * 0.6f);
         }
-        // head accent + eyes
-        simd_float2 hd = c.pos;
+        if (c.health < 0.5f) { float f = 0.6f + 0.4f*c.health; base = base*f; sec = sec*f; }
+
+        float widthMul = 1.15f - 0.40f * ph.aspect;   // longer bodies are slimmer
         simd_float2 fwd = simd_make_float2(cosf(c.heading), sinf(c.heading));
         simd_float2 perp = simd_make_float2(-fwd.y, fwd.x);
-        float er = 0.14f * c.ph.size;
-        [self push:hd + fwd*0.18f*c.ph.size + perp*0.22f*c.ph.size
+
+        // Snout: a forward-projecting muzzle blob.
+        if (ph.snout > 0.10f) {
+            float sr = ph.size * 0.28f * (0.5f + 0.6f * ph.snout);
+            [self push:c.pos + fwd * (0.55f*ph.size*(0.4f+0.7f*ph.snout))
+                  half:simd_make_float2(sr,sr) rot:0 shape:0
+                  color:simd_make_float4(base,1.0f) p:simd_make_float4(0,0,0,0)];
+        }
+        // Side fins / spines along the flanks.
+        int nf = (int)(ph.spikes * 3.5f + 0.5f);
+        for (int k = 0; k < nf && (k+1) < kSpineNodes; k++) {
+            int node = k + 1;
+            float un = node / (kSpineNodes - 1.0f);
+            float rr = ph.size * 0.55f * (1.0f - 0.72f*un) * widthMul;
+            float fr = ph.size * 0.20f * (0.5f + 0.7f * ph.spikes);
+            float side = (k % 2 == 0) ? 1.0f : -1.0f;
+            [self push:c.spine[node] + perp * side * (rr + fr*0.5f)
+                  half:simd_make_float2(fr,fr) rot:0 shape:7
+                  color:simd_make_float4(sec*0.85f,1.0f) p:simd_make_float4(0,0,0,0)];
+        }
+        // Body: tapered, belly-bulged, banded segments (tail first).
+        for (int sidx = kSpineNodes-1; sidx >= 0; sidx--) {
+            float un = sidx / (kSpineNodes - 1.0f);              // 0 head .. 1 tail
+            float taper = 1.0f - 0.72f * un;
+            float bulge = 1.0f + ph.girth * 0.70f * sinf(un * 3.14159f);
+            float rr = ph.size * 0.55f * taper * bulge * widthMul;
+            float band = ph.pattern * (0.5f + 0.5f * sinf(un * 3.0f * 6.2831853f));
+            simd_float3 srgb = base + (sec - base) * band;
+            [self push:c.spine[sidx] half:simd_make_float2(rr,rr) rot:0 shape:0
+                  color:simd_make_float4(srgb,1.0f) p:simd_make_float4(0,0,0,0)];
+        }
+        // Eyes (size is a heritable trait).
+        float er = ph.eyeSize * ph.size;
+        [self push:c.pos + fwd*0.18f*ph.size + perp*0.26f*ph.size
               half:simd_make_float2(er,er) rot:0 shape:3
               color:simd_make_float4(1,1,1,1) p:simd_make_float4(0,0,0,0)];
-        [self push:hd + fwd*0.18f*c.ph.size - perp*0.22f*c.ph.size
+        [self push:c.pos + fwd*0.18f*ph.size - perp*0.26f*ph.size
               half:simd_make_float2(er,er) rot:0 shape:3
               color:simd_make_float4(1,1,1,1) p:simd_make_float4(0,0,0,0)];
-        // sex tick + pregnancy/sick pips above the head
-        simd_float2 top = c.pos + simd_make_float2(0, c.ph.size * 0.9f);
+        // Pregnancy pip.
         if (c.pregnant)
-            [self push:top half:simd_make_float2(0.18f,0.18f) rot:0 shape:7
+            [self push:c.pos + simd_make_float2(0, ph.size * 0.95f)
+                  half:simd_make_float2(0.18f,0.18f) rot:0 shape:7
                   color:simd_make_float4(1.0f,0.5f,0.7f,1) p:simd_make_float4(0,0,0,0)];
     }
 
@@ -885,52 +944,60 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         [self hud:cx cy:cy hw:w/bw hh:h/bh shape:shape color:col p0:0];
     };
     if (!sel) return;
-    float px = 16, py = 16, pw = 340, ph = 330;
-    rect(px-8, py-8, pw+16, ph+16, simd_make_float4(0.05f,0.06f,0.08f,0.86f), 6);
+    float px = 16, py = 16, panW = 360, panH = 312;
+    rect(px-8, py-8, panW+16, panH+16, simd_make_float4(0.05f,0.06f,0.08f,0.88f), 6);
 
-    // trait bars
-    struct { const char *n; float v; } bars[] = {
-        {"size", (sel->ph.size-0.6f)/1.1f}, {"speed", sel->ph.speed/16.0f},
-        {"metab", sel->ph.metabolism/1.7f}, {"sensory", (sel->ph.sensory-14.0f)/16.0f},
-        {"fertility", sel->ph.fertility}, {"resist", sel->ph.resistance},
-        {"energy", sel->energy}, {"hunger", sel->hunger}, {"health", sel->health},
+    // Trait bars, colored by group: physiology (blue), morphology (green),
+    // condition (amber). Two columns.
+    simd_float4 cPhys  = simd_make_float4(0.35f,0.75f,0.95f,1);
+    simd_float4 cMorph = simd_make_float4(0.45f,0.90f,0.50f,1);
+    simd_float4 cState = simd_make_float4(0.95f,0.70f,0.30f,1);
+    const Phenotype &q = sel->ph;
+    struct Bar { float v; simd_float4 c; };
+    Bar bars[16] = {
+        {(q.size-0.6f)/1.1f, cPhys}, {q.speed/16.0f, cPhys},
+        {q.metabolism/1.7f, cPhys}, {(q.sensory-10.0f)/15.0f, cPhys},
+        {q.fertility, cPhys}, {q.resistance, cPhys},
+        {q.aspect, cMorph}, {q.girth, cMorph}, {q.eyeSize/0.25f, cMorph},
+        {q.snout, cMorph}, {q.spikes, cMorph}, {q.pattern, cMorph},
+        {sel->energy, cState}, {sel->hunger, cState}, {sel->health, cState},
+        {std::clamp(sel->age/q.lifespan,0.0f,1.0f), cState},
     };
-    float by = py + 46;
-    for (auto &b : bars) {
-        rect(px, by, 200, 12, simd_make_float4(0.15f,0.16f,0.18f,1.0f), 4);
-        rect(px, by, 200*std::clamp(b.v,0.0f,1.0f), 12,
-             simd_make_float4(0.35f,0.75f,0.95f,1.0f), 4);
-        by += 20;
+    float by0 = py + 34;
+    for (int i = 0; i < 16; i++) {
+        float bx = px + (i/8) * 180.0f;
+        float y = by0 + (i%8) * 17.0f;
+        rect(bx, y, 150, 11, simd_make_float4(0.15f,0.16f,0.18f,1), 4);
+        rect(bx, y, 150*std::clamp(bars[i].v,0.0f,1.0f), 11, bars[i].c, 4);
     }
-    // sex + color swatch
-    rect(px+220, py+46, 100, 60,
-         simd_make_float4(sel->ph.color.x, sel->ph.color.y, sel->ph.color.z, 1.0f), 4);
-    rect(px+220, py+112, 100, 16,
+    // Coat swatches (primary + secondary) and the sex bar.
+    rect(px+300, py+34, 44, 30, simd_make_float4(q.color, 1.0f), 4);
+    rect(px+300, py+66, 44, 30, simd_make_float4(q.color2, 1.0f), 4);
+    rect(px+300, py+100, 44, 14,
          sel->male ? simd_make_float4(0.4f,0.6f,1.0f,1.0f)
                    : simd_make_float4(1.0f,0.5f,0.7f,1.0f), 4);
 
-    // genome strip: both homologs, each gene 16 bases as colored ticks
-    // (A green, C blue, G yellow, T red). Two rows per gene = the pair.
-    float gy = py + ph - 96;
-    float tickW = (pw - 20) / (float)(kNumGenes * 16);
+    // Genome strip: both homologs, each gene's 16 bases as colored ticks
+    // (A green, C blue, G yellow, T red).
+    float gy = py + panH - 84;
+    float tickW = (panW - 16) / (float)(kNumGenes * 16);
     simd_float4 baseCol[4] = {
         simd_make_float4(0.30f,0.85f,0.35f,1), simd_make_float4(0.30f,0.55f,0.95f,1),
         simd_make_float4(0.95f,0.85f,0.30f,1), simd_make_float4(0.95f,0.35f,0.30f,1),
     };
-    for (int h = 0; h < 2; h++) {
+    for (int h = 0; h < 2; h++)
         for (int g = 0; g < kNumGenes; g++) {
             uint32_t word = sel->genome.hom[h][g];
             for (int b = 0; b < 16; b++) {
                 int base = (word >> (2*b)) & 3;
                 float x = px + (g*16 + b) * tickW;
-                rect(x, gy + h*40, tickW*0.9f, 32, baseCol[base], 4);
+                rect(x, gy + h*32, tickW*0.9f, 26, baseCol[base], 4);
             }
         }
-    }
-    // header numbers: id and age
+    // Header numbers: id, age, generation.
     [self hudNumber:(int)sel->id x:px y:py dw:6 dh:11 col:simd_make_float4(1,1,1,1) bw:bw bh:bh];
     [self hudNumber:(int)sel->age x:px+120 y:py dw:6 dh:11 col:simd_make_float4(0.8f,0.9f,1,1) bw:bw bh:bh];
-    [self hudNumber:sel->generation x:px+220 y:py dw:6 dh:11 col:simd_make_float4(0.7f,1,0.7f,1) bw:bw bh:bh];
+    [self hudNumber:sel->generation x:px+230 y:py dw:6 dh:11 col:simd_make_float4(0.7f,1,0.7f,1) bw:bw bh:bh];
 }
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}
