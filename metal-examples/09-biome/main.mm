@@ -596,20 +596,20 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         return float4(gammaOut(in.color.rgb)*av, av);
     } else if (shape == 12) {               // grass / reed tuft (params.x = seed)
         float seed = in.params.x;
-        float up = p.y*0.5 + 0.5;            // 0 base .. 1 tip
-        float av = 0.0;
-        for (int k = 0; k < 5; k++) {
+        float up = clamp(p.y*0.5 + 0.5, 0.0, 1.0);   // 0 base .. 1 tip
+        float vmask = smoothstep(-1.0,-0.85,p.y) * (1.0 - smoothstep(0.80,1.05,p.y));
+        float av = 0.0, shade = 0.7;
+        for (int k = 0; k < 7; k++) {                // a fan of fine blades
             float fk = float(k);
-            float root = (fk - 2.0) * 0.30 + 0.12*sin(seed*3.1 + fk);
-            float lean = (0.10 + 0.18*fract(sin(seed+fk)*91.7)) * up;   // bends toward tip
-            float bx = root + lean;
-            float w  = 0.09 * (1.0 - up*0.75);                          // taper to a point
-            float blade = smoothstep(w, 0.0, abs(p.x - bx));
-            blade *= step(-0.95, p.y) * smoothstep(1.0, 0.15, p.y);
-            av = max(av, blade);
+            float rnd = fract(sin(seed*2.3 + fk*7.1) * 91.7);
+            float root = (fk - 3.0) * 0.24 + 0.10*sin(seed + fk);
+            float lean = (rnd - 0.5) * 2.0 * (0.15 + 0.30*rnd) * up*up;  // curve to tip
+            float w = 0.075 * (1.0 - up*0.85);                          // taper to a point
+            float blade = smoothstep(w, 0.0, abs(p.x - (root + lean))) * vmask;
+            if (blade > av) { av = blade; shade = 0.6 + 0.4*rnd; }
         }
         if (av < 0.02) discard_fragment();
-        float3 g = in.color.rgb * (0.6 + 0.55*up);   // dark base, bright tips
+        float3 g = in.color.rgb * shade * (0.5 + 0.65*up);   // dark base, bright tips
         return float4(gammaOut(g)*av, av);
     }
     return float4(gammaOut(in.color.rgb) * a, a * in.color.a);
@@ -1803,34 +1803,49 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         [self push:rp.pos half:simd_make_float2(rad, rad) rot:0 shape:11
               color:simd_make_float4(0.85f,0.93f,1.0f, alpha) p:simd_make_float4(0,0,0,0)];
     }
-    // grassy reeds ringing each pond — they part where a critter treads/drinks
+    // Thick, lush grass band ringing each pond — several dense radial rows of
+    // reed tufts. They lean away and flatten where a critter treads or drinks.
     auto hashf = [](float n){ float s = sinf(n)*43758.5453f; return s - floorf(s); };
+    std::vector<simd_float2> nearby;
     for (int wi = 0; wi < (int)_water.size(); wi++) {
         const Water &wp = _water[wi];
-        int nT = (int)(wp.radius * 3.5f);
-        for (int i = 0; i < nT; i++) {
-            float base = wi*17.31f + i*2.399f;
-            float j0 = hashf(base), j1 = hashf(base+1.7f), j2 = hashf(base+3.3f);
-            float ang = (i/(float)nT)*6.2831853f + (j0-0.5f)*0.35f;
-            float rr = wp.radius * (1.02f + 0.13f*j1);
-            simd_float2 gp = wp.pos + simd_make_float2(cosf(ang), sinf(ang)) * rr;
-            simd_float2 push = simd_make_float2(0,0);
-            float bend = 0.0f;
-            for (const Critter &c : _critters) {
-                if (!c.alive) continue;
-                simd_float2 to = gp - c.pos;
-                float d = simd_length(to);
-                if (d < 1.7f) {
-                    float kk = (1.7f - d) / 1.7f;
-                    push += (d > 1e-3f ? to/d : simd_make_float2(0,1)) * kk;
-                    bend = std::max(bend, kk);
+        float outer = wp.radius * 1.40f;
+        // gather just the critters close to this pond, once, for the parting test
+        nearby.clear();
+        for (const Critter &c : _critters)
+            if (c.alive && simd_distance(c.pos, wp.pos) < outer + 2.5f)
+                nearby.push_back(c.pos);
+
+        const int rings = 4;
+        for (int ring = 0; ring < rings; ring++) {
+            float rt = ring / (float)(rings - 1);                 // 0 inner .. 1 outer
+            float bandR = wp.radius * (0.90f + 0.46f * rt);       // 0.90x .. 1.36x band
+            int nA = std::max(8, (int)(bandR * 2.6f));            // dense around the rim
+            for (int i = 0; i < nA; i++) {
+                float base = wi*97.0f + ring*13.7f + i*2.399f;
+                float j0 = hashf(base), j1 = hashf(base+1.7f), j2 = hashf(base+3.3f);
+                float ang = (i/(float)nA)*6.2831853f + ring*0.5f + (j0-0.5f)*0.45f;
+                float rr  = bandR + (j1-0.5f)*wp.radius*0.14f;
+                simd_float2 gp = wp.pos + simd_make_float2(cosf(ang), sinf(ang)) * rr;
+                simd_float2 push = simd_make_float2(0,0);
+                float bend = 0.0f;
+                for (const simd_float2 &cp : nearby) {
+                    simd_float2 to = gp - cp;
+                    float d = simd_length(to);
+                    if (d < 1.8f) {
+                        float kk = (1.8f - d) / 1.8f;
+                        push += (d > 1e-3f ? to/d : simd_make_float2(0,1)) * kk;
+                        bend = std::max(bend, kk);
+                    }
                 }
+                gp += push * 0.9f;                                 // lean away
+                float sz = (0.85f + 0.5f*j2) * (1.0f - 0.5f*bend); // flatten when trodden
+                simd_float3 gcol = simd_make_float3(0.12f + 0.06f*j0,
+                                                    0.30f + 0.16f*j1,
+                                                    0.10f + 0.05f*j2);
+                [self push:gp half:simd_make_float2(sz, sz*1.5f) rot:(j0-0.5f)*0.35f shape:12
+                      color:simd_make_float4(gcol, 1.0f) p:simd_make_float4(base,0,0,0)];
             }
-            gp += push;                                        // reeds lean away
-            float sz = (0.7f + 0.4f*j2) * (1.0f - 0.45f*bend); // and flatten a bit
-            simd_float3 gcol = simd_make_float3(0.16f, 0.34f + 0.14f*j1, 0.12f);
-            [self push:gp half:simd_make_float2(sz, sz*1.2f) rot:(j0-0.5f)*0.4f shape:12
-                  color:simd_make_float4(gcol, 1.0f) p:simd_make_float4(base,0,0,0)];
         }
     }
 
