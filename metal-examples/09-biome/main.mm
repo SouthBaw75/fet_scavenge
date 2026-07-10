@@ -265,6 +265,25 @@ struct InstC {
     float p0, p1, p2, p3;
 };
 
+// ------------------------------------------------------------ HUD widgets ---
+// Every control is a clickable rectangle rebuilt each frame; the mouse handler
+// hit-tests these instead of the keyboard driving the sim.
+enum {
+    WA_None = 0, WA_Toggle, WA_Pause, WA_SpeedDn, WA_SpeedUp,
+    WA_ClimateSlider, WA_Food, WA_FoodSlider, WA_Introduce, WA_Cull, WA_Reset,
+    WA_TraitPick, WA_ExprSlider, WA_Splice,
+};
+struct UIWidget { float x, y, w, h; int act; float val; };
+
+// Genes exposed in the splice lab (short label + locus).
+struct TraitBtn { const char *name; int gene; };
+static const TraitBtn kTraits[] = {
+    {"SIZE", GSize0}, {"SPEED", GSpeed}, {"METAB", GMetab}, {"RESIST", GResist},
+    {"EYES", GEye},   {"RED", GColR},    {"GREEN", GColG},  {"BLUE", GColB},
+    {"FINS", GSpikes},{"BODY", GAspect},
+};
+static const int kNumTraitBtns = sizeof(kTraits) / sizeof(kTraits[0]);
+
 static const char *kShaderSource = R"METAL(
 #include <metal_stdlib>
 using namespace metal;
@@ -344,6 +363,22 @@ constant ushort kDigit[10][7] = {
     {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E},{0x1F,0x01,0x02,0x04,0x08,0x08,0x08},
     {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E},{0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C},
 };
+// 5x7 uppercase font, A..Z, for HUD labels.
+constant ushort kAlpha[26][7] = {
+    {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11},{0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E}, // A B
+    {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E},{0x1E,0x11,0x11,0x11,0x11,0x11,0x1E}, // C D
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F},{0x1F,0x10,0x10,0x1E,0x10,0x10,0x10}, // E F
+    {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F},{0x11,0x11,0x11,0x1F,0x11,0x11,0x11}, // G H
+    {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E},{0x07,0x02,0x02,0x02,0x02,0x12,0x0C}, // I J
+    {0x11,0x12,0x14,0x18,0x14,0x12,0x11},{0x10,0x10,0x10,0x10,0x10,0x10,0x1F}, // K L
+    {0x11,0x1B,0x15,0x15,0x11,0x11,0x11},{0x11,0x11,0x19,0x15,0x13,0x11,0x11}, // M N
+    {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E},{0x1E,0x11,0x11,0x1E,0x10,0x10,0x10}, // O P
+    {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D},{0x1E,0x11,0x11,0x1E,0x14,0x12,0x11}, // Q R
+    {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E},{0x1F,0x04,0x04,0x04,0x04,0x04,0x04}, // S T
+    {0x11,0x11,0x11,0x11,0x11,0x11,0x0E},{0x11,0x11,0x11,0x11,0x11,0x0A,0x04}, // U V
+    {0x11,0x11,0x11,0x15,0x15,0x1B,0x11},{0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, // W X
+    {0x11,0x11,0x0A,0x04,0x04,0x04,0x04},{0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}, // Y Z
+};
 
 fragment float4 entity_fragment(EOut in [[stage_in]]) {
     float2 p = in.lp;
@@ -380,6 +415,14 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         return float4(gammaOut(in.color.rgb)*in.color.a*a, in.color.a*a);
     } else if (shape == 7) {                // heart / sick pip (small diamond)
         float d = abs(p.x)+abs(p.y); a = smoothstep(1.0,0.4,d);
+    } else if (shape == 8) {                // text glyph: params.x = 0-9 digit, 10-35 A-Z
+        int code = clamp(int(in.params.x + 0.5), 0, 35);
+        int cx = clamp(int((p.x*0.5+0.5)*5.0), 0, 4);
+        int cy = clamp(int((1.0-(p.y*0.5+0.5))*7.0), 0, 6);
+        ushort rowbits = (code < 10) ? kDigit[code][cy] : kAlpha[code-10][cy];
+        uint bit = (uint(rowbits) >> uint(4-cx)) & 1u;
+        if (bit == 0u) discard_fragment();
+        return float4(gammaOut(in.color.rgb), in.color.a);
     }
     return float4(gammaOut(in.color.rgb) * a, a * in.color.a);
 }
@@ -438,6 +481,16 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float _histRes[kHistLen];
     float _histPop[kHistLen];
 
+    int _foodTarget;        // carrying-capacity target (set from the HUD)
+
+    // Sliding control panel + mouse widget state.
+    std::vector<UIWidget> _widgets;
+    float _panelT, _panelTarget;   // 0 hidden .. 1 shown
+    int   _spliceGene;             // locus selected in the gene lab
+    float _spliceExpr;             // engineered expression level 0..1
+    int   _dragAct;                // slider being dragged (WA_None if none)
+    float _dragX, _dragW;
+
     simd_float2 _uScale, _uOffset;
     double _startTime, _lastFrameTime, _simAccum;
     float _smoothedFPS;
@@ -479,13 +532,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (int i = 0; i < kMaxInFlight; i++) {
         _instBuffers[i] = [device newBufferWithLength:kMaxInstances*sizeof(InstC)
                                               options:MTLResourceStorageModeShared];
-        _hudBuffers[i] = [device newBufferWithLength:2048*sizeof(InstC)
+        _hudBuffers[i] = [device newBufferWithLength:4096*sizeof(InstC)
                                              options:MTLResourceStorageModeShared];
     }
     _frameIndex = 0;
     _frameSemaphore = dispatch_semaphore_create(kMaxInFlight);
     _scratch.reserve(kMaxInstances);
-    _hud.reserve(2048);
+    _hud.reserve(4096);
     // Reserve to the hard caps so births/food never reallocate the vectors
     // mid-simulation (which would invalidate the references we hold).
     _critters.reserve(kMaxCritters);
@@ -496,6 +549,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _selected = 0;
     _paused = NO;
     _timeScale = 1.0f;
+    _widgets.reserve(64);
+    _panelT = _panelTarget = 1.0f;   // start open so the controls are discoverable
+    _spliceGene = GSize0;
+    _spliceExpr = 0.9f;
+    _dragAct = WA_None;
     [self resetColony];
 
     __unsafe_unretained BiomeRenderer *weakSelf = self;
@@ -520,16 +578,36 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         MTKView *v = (MTKView *)e.window.contentView;
         if (![v isKindOfClass:[MTKView class]] || weakSelf->_uScale.x == 0) return e;
         NSPoint pt = [v convertPoint:e.locationInWindow fromView:nil];
-        simd_float2 ndc = simd_make_float2((float)(pt.x/v.bounds.size.width)*2.0f-1.0f,
-                                           (float)(pt.y/v.bounds.size.height)*2.0f-1.0f);
+        float bw = (float)v.bounds.size.width, bh = (float)v.bounds.size.height;
+        // 1) HUD widgets first (topmost wins → iterate in reverse).
+        if ([weakSelf hudMouseDown:simd_make_float2((float)pt.x,(float)pt.y) bw:bw bh:bh])
+            return nil;
+        // 2) otherwise a world click selects a critter.
+        simd_float2 ndc = simd_make_float2((float)(pt.x/bw)*2.0f-1.0f,
+                                           (float)(pt.y/bh)*2.0f-1.0f);
         simd_float2 world = (ndc - weakSelf->_uOffset) / weakSelf->_uScale;
         [weakSelf selectAt:world];
         return e;
     }];
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDragged
+                                          handler:^NSEvent *(NSEvent *e) {
+        if (weakSelf->_dragAct == WA_None || !e.window) return e;
+        MTKView *v = (MTKView *)e.window.contentView;
+        if (![v isKindOfClass:[MTKView class]]) return e;
+        NSPoint pt = [v convertPoint:e.locationInWindow fromView:nil];
+        float frac = ((float)pt.x - weakSelf->_dragX) / std::max(weakSelf->_dragW, 1.0f);
+        [weakSelf applySlider:weakSelf->_dragAct frac:std::clamp(frac,0.0f,1.0f)];
+        return nil;
+    }];
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseUp
+                                          handler:^NSEvent *(NSEvent *e) {
+        weakSelf->_dragAct = WA_None;
+        return e;
+    }];
 
-    printf("BIOME v1 — Click a critter to inspect. F food · Space pause · [ ] speed\n"
-           "         , cool · . warm · K cull · I introduce · R reset.\n"
-           "         Climate selects on size + coat: watch the colony evolve.\n");
+    printf("BIOME v1 — Everything is on the sliding control panel (right edge).\n"
+           "         Click the tab to show/hide it. Click a critter to inspect.\n"
+           "         Splice experimental dominant genes and watch them spread.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -599,6 +677,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _climateTrend = 0;
     _sampleTimer = 0;
     _histCount = _histHead = 0;
+    _foodTarget = 320;
     for (int i = 0; i < 24; i++)
         [self spawnCritter:randomGenome(_rng, i % 2) at:[self randomPos] gen:0];
     [self scatterFood:220];
@@ -639,7 +718,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // Food regrows / seeds slowly toward a carrying capacity.
     for (Food &f : _food) if (f.alive) f.growth = std::min(f.growth + 0.20f * dt, 1.0f);
     _foodTimer -= dt;
-    if (_foodTimer <= 0 && (int)_food.size() < 320) {
+    if (_foodTimer <= 0 && (int)_food.size() < _foodTarget) {
         _foodTimer = 0.5f;
         [self scatterFood:3];
     }
@@ -852,6 +931,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 }
 - (void)hud:(float)cx cy:(float)cy hw:(float)hw hh:(float)hh shape:(float)s
       color:(simd_float4)col p0:(float)p0 {
+    if (_hud.size() >= 4096) return;
     _hud.push_back({cx,cy,hw,hh,0,s, col.x,col.y,col.z,col.w, p0,0,0,0});
 }
 
@@ -865,6 +945,208 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
 }
 
+// Draw a text string (A-Z, 0-9) from the bitmap font, left-aligned at (x,y).
+- (void)hudText:(const char *)s x:(float)x y:(float)y h:(float)h
+            col:(simd_float4)col bw:(float)bw bh:(float)bh {
+    float gw = h * 0.62f, adv = gw + h * 0.30f;
+    for (const char *p = s; *p; ++p) {
+        char ch = *p; int code = -1;
+        if (ch >= '0' && ch <= '9') code = ch - '0';
+        else if (ch >= 'A' && ch <= 'Z') code = 10 + (ch - 'A');
+        else if (ch >= 'a' && ch <= 'z') code = 10 + (ch - 'a');
+        if (code >= 0) {
+            float cx = (x + gw*0.5f)/bw*2.0f-1.0f, cy = (y + h*0.5f)/bh*2.0f-1.0f;
+            [self hud:cx cy:cy hw:gw/bw hh:h/bh shape:8 color:col p0:(float)code];
+        }
+        x += adv;
+    }
+}
+
+// -------------------------------------------------------------- Gene lab ---
+
+// Craft a synthetic allele of a chosen expression level that is always
+// DOMINANT (its dominance region is packed with G/T), so a spliced gene
+// visibly takes over the phenotype and then spreads through the gene pool.
+- (uint32_t)engineerAllele:(float)expr {
+    int k = (int)lroundf(std::clamp(expr, 0.0f, 1.0f) * 16.0f);
+    uint32_t g = 0; int gc = 0;
+    for (int i = 0; i < 16; i++) {
+        bool wantGC = gc < k;
+        int b = (i >= 8) ? (wantGC ? 2 : 3)     // dominance region: G (GC) or T
+                         : (wantGC ? 1 : 0);     // value region:    C (GC) or A
+        if (b == 1 || b == 2) gc++;
+        g |= ((uint32_t)b) << (2 * i);
+    }
+    return g;
+}
+
+// Introduce n engineered individuals homozygous for the spliced allele.
+- (void)spliceGene:(int)gene expr:(float)expr count:(int)n {
+    uint32_t allele = [self engineerAllele:expr];
+    for (int i = 0; i < n && (int)_critters.size() < kMaxCritters; i++) {
+        Genome g = randomGenome(_rng, i % 2);
+        g.hom[0][gene] = allele;
+        g.hom[1][gene] = allele;
+        [self spawnCritter:g at:[self randomPos] gen:_generation];
+    }
+}
+
+// ------------------------------------------------------------ HUD input ---
+
+- (void)applySlider:(int)act frac:(float)f {
+    if (act == WA_ClimateSlider) _climateTrend = f * 1.5f - 0.75f;
+    else if (act == WA_ExprSlider) _spliceExpr = std::clamp(f, 0.0f, 1.0f);
+    else if (act == WA_FoodSlider) _foodTarget = (int)(40.0f + f * 460.0f);
+}
+
+- (BOOL)hudMouseDown:(simd_float2)pt bw:(float)bw bh:(float)bh {
+    for (int i = (int)_widgets.size() - 1; i >= 0; i--) {
+        UIWidget &wg = _widgets[i];
+        if (pt.x < wg.x || pt.x > wg.x+wg.w || pt.y < wg.y || pt.y > wg.y+wg.h) continue;
+        switch (wg.act) {
+            case WA_Toggle:    _panelTarget = (_panelTarget > 0.5f) ? 0.0f : 1.0f; break;
+            case WA_Pause:     _paused = !_paused; break;
+            case WA_SpeedDn:   _timeScale = std::max(_timeScale*0.5f, 0.25f); break;
+            case WA_SpeedUp:   _timeScale = std::min(_timeScale*2.0f, 8.0f); break;
+            case WA_Food:      [self scatterFood:60]; break;
+            case WA_Introduce: [self introduceRandom]; break;
+            case WA_Cull:      [self cullSelected]; break;
+            case WA_Reset:     [self resetColony]; break;
+            case WA_TraitPick: _spliceGene = (int)wg.val; break;
+            case WA_Splice:    [self spliceGene:_spliceGene expr:_spliceExpr count:4]; break;
+            case WA_ClimateSlider:
+            case WA_ExprSlider:
+            case WA_FoodSlider:
+                _dragAct = wg.act; _dragX = wg.x; _dragW = wg.w;
+                [self applySlider:wg.act
+                             frac:std::clamp((pt.x-wg.x)/std::max(wg.w,1.0f), 0.0f, 1.0f)];
+                break;
+            default: break;
+        }
+        return YES;
+    }
+    // Click landed on the open panel but missed every widget: swallow it so it
+    // doesn't select a critter hidden behind the panel.
+    float panelX = bw - 300.0f * _panelT;
+    return (_panelT > 0.5f && pt.x >= panelX) ? YES : NO;
+}
+
+// Sliding control panel: every environmental knob and the gene lab, all
+// mouse-driven. Rebuilt each frame; widgets are registered for hit-testing.
+- (void)buildControlPanel:(float)bw bh:(float)bh {
+    _widgets.clear();
+    auto rect = [&](float x, float y, float w, float h, simd_float4 c, float s) {
+        float cx = (x+w*0.5f)/bw*2.0f-1.0f, cy = (y+h*0.5f)/bh*2.0f-1.0f;
+        [self hud:cx cy:cy hw:w/bw hh:h/bh shape:s color:c p0:0];
+    };
+    auto text = [&](float x, float y, const char *t, float h, simd_float4 c) {
+        [self hudText:t x:x y:y h:h col:c bw:bw bh:bh];
+    };
+    const float panW = 300, tabW = 30;
+    float panelX = bw - panW * _panelT;
+
+    // Tab handle (always present, even when the panel is hidden).
+    float tabH = 76, tabX = panelX - tabW, tabY = bh*0.5f - tabH*0.5f;
+    rect(tabX, tabY, tabW, tabH, simd_make_float4(0.10f,0.12f,0.16f,0.96f), 6);
+    for (int i = 0; i < 3; i++)
+        rect(tabX+9, tabY+tabH*0.5f-7+i*6, tabW-18, 2.5f, simd_make_float4(0.75f,0.85f,1.0f,1), 4);
+    _widgets.push_back({tabX, tabY, tabW, tabH, WA_Toggle, 0});
+
+    if (_panelT < 0.02f) return;
+    bool live = _panelT > 0.5f;
+
+    rect(panelX, 0, panW, bh, simd_make_float4(0.05f,0.06f,0.09f,0.95f), 4);
+    rect(panelX, 0, 2, bh, simd_make_float4(0.30f,0.55f,0.80f,0.7f), 4);
+
+    float x0 = panelX + 16, cw = panW - 32;
+    simd_float4 cLabel = simd_make_float4(0.55f,0.68f,0.85f,1);
+    simd_float4 cTxt   = simd_make_float4(0.92f,0.95f,1.0f,1);
+    std::vector<UIWidget> &widgets = _widgets;
+
+    auto button = [&](float x, float y, float w, float h, const char *t,
+                      int act, float val, bool hot) {
+        rect(x, y, w, h, hot ? simd_make_float4(0.18f,0.42f,0.62f,1)
+                             : simd_make_float4(0.14f,0.17f,0.22f,1), 6);
+        float gh = h*0.5f, adv = gh*0.62f + gh*0.30f;
+        float tw = (float)strlen(t) * adv - gh*0.30f;
+        text(x + std::max((w-tw)*0.5f, 3.0f), y + (h-gh)*0.5f, t, gh, cTxt);
+        if (live) widgets.push_back({x, y, w, h, act, val});
+    };
+    auto slider = [&](float x, float y, float w, float h, float frac, int act) {
+        frac = std::clamp(frac, 0.0f, 1.0f);
+        rect(x, y, w, h, simd_make_float4(0.12f,0.14f,0.18f,1), 6);
+        rect(x, y, w*frac, h, simd_make_float4(0.28f,0.52f,0.78f,1), 6);
+        rect(x + frac*w - 4, y-3, 8, h+6, simd_make_float4(0.9f,0.95f,1.0f,1), 6);
+        if (live) widgets.push_back({x, y, w, h, act, 0});
+    };
+
+    float cy = bh - 22;
+    auto row = [&](float h, float gap) { cy -= h; float y = cy; cy -= gap; return y; };
+
+    text(x0, row(18,12), "CONTROLS", 18, simd_make_float4(0.85f,0.92f,1.0f,1));
+
+    // --- TIME ---
+    text(x0, row(11,5), "TIME", 11, cLabel);
+    {
+        float y = row(26,6);
+        button(x0, y, 96, 26, _paused ? "PLAY" : "PAUSE", WA_Pause, 0, _paused);
+        button(x0+cw-84, y, 40, 26, "-", WA_SpeedDn, 0, false);
+        button(x0+cw-40, y, 40, 26, "+", WA_SpeedUp, 0, false);
+    }
+    {
+        float y = row(8,14);
+        int idx = (int)lroundf(log2f(std::max(_timeScale,0.25f)) + 2.0f);  // 0..5
+        float segW = (cw - 5*4) / 6.0f;
+        for (int k = 0; k < 6; k++)
+            rect(x0 + k*(segW+4), y, segW, 8,
+                 (k <= idx) ? simd_make_float4(0.30f,0.60f,0.85f,1)
+                            : simd_make_float4(0.16f,0.18f,0.22f,1), 6);
+    }
+
+    // --- CLIMATE ---
+    text(x0, row(11,5), "CLIMATE", 11, cLabel);
+    slider(x0, row(18,5), cw, 18, (_climateTrend+0.75f)/1.5f, WA_ClimateSlider);
+    {
+        const char *band = _climate<-0.33f ? "COLD" : (_climate>0.33f ? "HOT" : "TEMPERATE");
+        text(x0, row(11,14), band, 11, cTxt);
+    }
+
+    // --- FOOD ---
+    text(x0, row(11,5), "FOOD", 11, cLabel);
+    button(x0, row(26,6), cw, 26, "SCATTER FOOD", WA_Food, 0, false);
+    text(x0, row(10,3), "ABUNDANCE", 10, cLabel);
+    slider(x0, row(18,14), cw, 18, (_foodTarget-40)/460.0f, WA_FoodSlider);
+
+    // --- POPULATION ---
+    text(x0, row(11,5), "POPULATION", 11, cLabel);
+    {
+        float y = row(26,14), w = (cw-8)/3.0f;
+        button(x0, y, w, 26, "ADD", WA_Introduce, 0, false);
+        button(x0+w+4, y, w, 26, "CULL", WA_Cull, 0, false);
+        button(x0+2*(w+4), y, w, 26, "RESET", WA_Reset, 0, false);
+    }
+
+    // --- GENE LAB ---
+    text(x0, row(12,6), "SPLICE GENE", 12, simd_make_float4(0.70f,0.92f,0.66f,1));
+    {
+        float bwid = (cw-6)/2.0f, bhei = 22;
+        int rows = (kNumTraitBtns + 1) / 2;
+        for (int r = 0; r < rows; r++) {
+            float y = row(bhei, 4);
+            for (int c2 = 0; c2 < 2; c2++) {
+                int i = r*2 + c2;
+                if (i >= kNumTraitBtns) break;
+                button(x0 + c2*(bwid+6), y, bwid, bhei, kTraits[i].name,
+                       WA_TraitPick, (float)kTraits[i].gene,
+                       kTraits[i].gene == _spliceGene);
+            }
+        }
+    }
+    text(x0, row(10,3), "EXPRESSION", 10, cLabel);
+    slider(x0, row(18,8), cw, 18, _spliceExpr, WA_ExprSlider);
+    button(x0, row(28,8), cw, 28, "SPLICE INTO COLONY", WA_Splice, 0, false);
+}
+
 - (void)drawInMTKView:(MTKView *)view {
     MTLRenderPassDescriptor *pass = view.currentRenderPassDescriptor;
     id<CAMetalDrawable> drawable = view.currentDrawable;
@@ -875,6 +1157,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float dtRaw = (float)(now - _lastFrameTime);
     _lastFrameTime = now;
     if (dtRaw > 0) _smoothedFPS += (1.0f/dtRaw - _smoothedFPS) * 0.05f;
+    _panelT += (_panelTarget - _panelT) * std::min(1.0f, 12.0f * dtRaw);  // slide
 
     if (!_paused) {
         _simAccum += std::min(dtRaw * _timeScale, 0.5f);
@@ -985,6 +1268,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float bw = (float)view.bounds.size.width, bh = (float)view.bounds.size.height;
     [self buildEvoGraph:bw bh:bh];
     [self buildHUD:sel bw:bw bh:bh];
+    [self buildControlPanel:bw bh:bh];
     id<MTLBuffer> hb = _hudBuffers[_frameIndex];
     NSUInteger hc = _hud.size();
     if (hc) memcpy([hb contents], _hud.data(), hc*sizeof(InstC));

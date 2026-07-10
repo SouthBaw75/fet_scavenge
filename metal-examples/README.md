@@ -194,8 +194,16 @@ with the temperature. Critters have procedural Verlet-spine bodies, utility-AI
 needs (hunger / energy / reproduction), forage regrowing food, court and breed,
 and catch a contagion whose spread is governed by disease-resistance genes.
 Click any critter to inspect its trait bars and its genome (both homologs shown
-as colored base ticks). F scatters food, `,`/`.` cool/warm the climate, Space
-pauses, `[`/`]` change speed, K culls, I introduces a stranger, R resets.
+as colored base ticks).
+
+Everything is driven from a **sliding control panel** — click the tab on the
+right edge to slide it in or out. It carries all the caretaker tools, worked
+entirely with the mouse: play/pause and time-scale, a **climate slider** and
+food **abundance** slider, scatter-food, add/cull/reset, and a **gene lab**.
+Pick a trait, set an expression dial, and hit *Splice Into Colony* to introduce
+individuals carrying an engineered **dominant** allele — then watch that
+experimental gene sweep through the population or get selected out. (The old
+keyboard shortcuts still work as accelerators.)
 
 ## Where to go from here
 
