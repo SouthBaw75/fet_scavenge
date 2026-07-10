@@ -232,6 +232,18 @@ individuals carrying an engineered **dominant** allele — then watch that
 experimental gene sweep through the population or get selected out. (The old
 keyboard shortcuts still work as accelerators.)
 
+### 10 — CRITTER STYLES (movement gallery)
+A design-review sandbox for the biome creatures: eight procedurally-animated
+organism body plans, each wandering in its own labeled cell so you can compare
+how they **move** — **Serpent** (Verlet-spine slither), **Fish** (carangiform
+swim with a sweeping tail), **Walker** (six legs in a tripod gait), **Crawler**
+(peristaltic surges), **Jelly** (pulse-jet bell with trailing tentacles),
+**Hopper** (ballistic squash-and-stretch hops), **Fat Worm** (chunky segmented
+undulation with a pale saddle), and **Amoeba** (a translucent oozing membrane
+that reaches a pseudopod toward its heading). Every creature is procedural SDF
+blobs — no art. Space pauses; R rerolls their wander targets. Pick a favorite
+and it becomes the new body style for `09-biome`.
+
 ## Where to go from here
 
 - **Textures & samplers** — `MTLTexture`, `MTKTextureLoader`
