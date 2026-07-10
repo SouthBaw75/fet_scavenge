@@ -35,6 +35,7 @@ struct Uniforms {
     float4 sun;      // xyz = direction to sun, w = time
     float4 misc;     // xy = drawable resolution, z = wave intensity
     float4 water;    // rgb = water body color (linear)
+    float4 moon;     // xyz = direction to moon, w = night factor 0..1
 };
 
 // dir.x, dir.z, amplitude, wavelength — a swell plus five layers of chop.
@@ -131,17 +132,19 @@ float3 sunTint(float elev) {
 // midday blue, golden-hour warmth, a full layered sunset (yellow -> orange ->
 // pink -> purple climbing from the horizon), and violet dusk after the sun
 // slips under. The water reflects all of it.
-float3 skyColor(float3 rd, float3 sun, float time) {
+float3 skyColor(float3 rd, float3 sun, float time, float4 moon) {
     float sd = max(dot(rd, sun), 0.0);
     float elev = sun.y;
     float sunset = clamp(1.0 - abs(elev - 0.04) / 0.24, 0.0, 1.0);
     float dusk = smoothstep(0.02, -0.12, elev);
+    float night = moon.w;
 
     float h = saturate(rd.y);
     float3 zenith = mix(float3(0.10, 0.28, 0.58),        // midday blue
                         float3(0.15, 0.10, 0.36),        // sunset blue-violet
                         sunset);
-    zenith = mix(zenith, float3(0.035, 0.025, 0.10), dusk);   // indigo night
+    zenith = mix(zenith, float3(0.035, 0.025, 0.10), dusk);   // indigo dusk
+    zenith = mix(zenith, float3(0.008, 0.012, 0.030), night); // near-black night
 
     // Sunset bands: yellow at the waterline, up through orange and hot pink
     // into purple — strongest toward the sun's side of the sky.
@@ -157,14 +160,39 @@ float3 skyColor(float3 rd, float3 sun, float time) {
 
     float3 haze = mix(float3(0.58, 0.68, 0.78), band, sunset);
     haze = mix(haze, float3(0.34, 0.13, 0.40) * (0.35 + 0.65 * azim), dusk);
+    haze = mix(haze, float3(0.030, 0.042, 0.085), night);       // afterglow dies
 
     float horizon = pow(1.0 - h, 3.5);
     float3 col = mix(zenith, haze, horizon);
 
     float3 st = sunTint(elev);
-    col += st * pow(sd, 9.0) * (0.45 + 1.10 * sunset);          // aureole swells low
+    col += st * pow(sd, 9.0) * (0.45 + 1.10 * sunset)
+              * (1.0 - night);                                  // aureole swells low
     col += st * pow(sd, 1400.0) * 60.0
               * smoothstep(-0.025, 0.015, elev);                // disc sets below horizon
+
+    // Stars: hashed points on the dome, twinkling, fading toward the horizon
+    // haze. Drawn before the clouds so clouds drift in front of them.
+    if (night > 0.02 && rd.y > 0.01) {
+        float2 suv = rd.xz / (rd.y + 0.55) * 48.0;
+        float2 cell = floor(suv);
+        float hs = hash21(cell);
+        if (hs > 0.80) {
+            float2 sp = float2(hash21(cell + 3.1), hash21(cell + 7.7));
+            float d = length(fract(suv) - sp);
+            float tw = 0.72 + 0.28 * sin(time * (1.5 + hs * 5.0) + hs * 41.0);
+            float bright = (hs - 0.80) / 0.20;
+            float star = smoothstep(0.10, 0.0, d) * tw;
+            col += float3(0.85, 0.92, 1.10) * star
+                 * (0.25 + 1.9 * bright * bright)
+                 * night * smoothstep(0.02, 0.25, rd.y);
+        }
+    }
+
+    // The moon: cool disc + soft halo, rising as the night deepens.
+    float md = max(dot(rd, moon.xyz), 0.0);
+    col += float3(0.95, 0.98, 1.05) * pow(md, 4000.0) * 9.0 * night;
+    col += float3(0.40, 0.50, 0.70) * pow(md, 24.0) * 0.35 * night;
 
     // Clouds: shadowed bases go purple at sunset, sunlit sides catch pink
     // and orange; everything dims into dusk.
@@ -176,10 +204,13 @@ float3 skyColor(float3 rd, float3 sun, float time) {
         float detail = fbm(cuv * 2.7 + 11.0);
         float3 lit = mix(float3(1.08, 1.04, 0.98), float3(1.35, 0.52, 0.40), sunset);
         lit = mix(lit, float3(0.30, 0.20, 0.38), dusk);
+        lit = mix(lit, float3(0.14, 0.17, 0.24), night);   // moon-grey
         float3 shad = mix(float3(0.52, 0.55, 0.60), float3(0.40, 0.22, 0.44), sunset);
         shad = mix(shad, float3(0.09, 0.07, 0.15), dusk);
+        shad = mix(shad, float3(0.015, 0.020, 0.038), night);
         float3 cloud = mix(shad, lit, detail * 0.6 + 0.4 * pow(sd, 2.0));
-        cloud += st * pow(sd, 6.0) * (0.35 + 0.5 * sunset);
+        cloud += st * pow(sd, 6.0) * (0.35 + 0.5 * sunset) * (1.0 - night);
+        cloud += float3(0.35, 0.42, 0.55) * pow(md, 8.0) * 0.5 * night;  // moonlit edges
         float fade = smoothstep(0.02, 0.15, rd.y);
         col = mix(col, cloud, cover * fade * 0.85);
     }
@@ -221,7 +252,7 @@ fragment float4 sky_fragment(SkyVSOut in [[stage_in]],
     float3 rd = normalize(u.camFwd.xyz +
                           u.camRight.xyz * (ndc.x * aspect / focal) +
                           u.camUp.xyz * (ndc.y / focal));
-    float3 col = skyColor(rd, u.sun.xyz, u.sun.w);
+    float3 col = skyColor(rd, u.sun.xyz, u.sun.w, u.moon);
     return float4(col, 1.0);   // linear HDR; tonemap happens in the composite
 }
 
@@ -282,7 +313,7 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     // What the mirror sees.
     float3 R = reflect(-V, n);
     R.y = max(R.y, 0.03);
-    float3 reflection = skyColor(normalize(R), sun, time);
+    float3 reflection = skyColor(normalize(R), sun, time, u.moon);
 
     // What's under the surface: deep water, plus light scattering through
     // the top of backlit crests. Both derive from the user's water color so
@@ -304,6 +335,15 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     float spec = D_GGX(NoH, alpha) * 0.25;
     color += sunTint(sun.y) * spec * fresnel * NoL * 3.0;
 
+    // Moonlight: a second, silver glitter path once night falls.
+    float night = u.moon.w;
+    if (night > 0.02) {
+        float3 Hm = normalize(V + u.moon.xyz);
+        float specM = D_GGX(max(dot(n, Hm), 0.0), alpha) * 0.25;
+        color += float3(0.70, 0.80, 1.00) * specM * fresnel
+               * max(dot(n, u.moon.xyz), 0.0) * 1.3 * night;
+    }
+
     // Whitecaps where the surface FOLDS (Jacobian pinch), not where it's
     // merely high — foam hugs breaking crests the way real water does.
     float rough = clamp(u.misc.z, 0.25, 2.5);
@@ -319,7 +359,7 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
 
     // Fade the far edge of the grid into the sky so it has no visible border.
     float3 rd = -V;
-    float3 horizon = skyColor(normalize(float3(rd.x, 0.015, rd.z)), sun, time);
+    float3 horizon = skyColor(normalize(float3(rd.x, 0.015, rd.z)), sun, time, u.moon);
     color = mix(color, horizon, smoothstep(60.0, 95.0, dist));
 
     return float4(color, 1.0);   // linear HDR; tonemap happens in the composite
@@ -386,6 +426,7 @@ struct Uniforms {
     simd_float4 sun;
     simd_float4 misc;
     simd_float4 water;
+    simd_float4 moon;
 };
 
 static simd_float4x4 Perspective(float fovyRadians, float aspect, float nearZ, float farZ) {
@@ -558,18 +599,19 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         if (c == 21) { inten = 1.60f; return nil; }   // 4 heavy
         if (c == 23) { inten = 2.40f; return nil; }   // 5 storm
         if (c == 8) { [weakSelf openColorWheel]; return nil; }   // C
-        // Time of day: left = earlier, right = later; 6-9 presets.
+        // Time of day: left = earlier, later = right; 6-9 and 0 presets.
         float &day = weakSelf->_dayT;
         if (c == 123) { day = std::max(day - 0.05f, 0.0f); return nil; }  // ←
-        if (c == 124) { day = std::min(day + 0.05f, 1.0f); return nil; }  // →
+        if (c == 124) { day = std::min(day + 0.05f, 1.45f); return nil; } // →
         if (c == 22) { day = 0.05f; return nil; }     // 6 high noon
         if (c == 26) { day = 0.62f; return nil; }     // 7 golden hour
         if (c == 28) { day = 0.88f; return nil; }     // 8 sunset
         if (c == 25) { day = 1.00f; return nil; }     // 9 dusk
+        if (c == 29) { day = 1.45f; return nil; }     // 0 NIGHT
         return event;
     }];
     printf("Sea state: Up/Down (or +/-) adjust wave intensity, 1-5 presets.\n"
-           "Time of day: Left/Right, or 6 noon · 7 golden · 8 sunset · 9 dusk.\n"
+           "Time of day: Left/Right, or 6 noon · 7 golden · 8 sunset · 9 dusk · 0 night.\n"
            "Color: press C for the color wheel — the water re-tints live.\n");
 
     _startTime = CACurrentMediaTime();
@@ -614,13 +656,21 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     _intensityShown += (_intensity - _intensityShown) * 0.06f;
     _dayShown += (_dayT - _dayShown) * 0.05f;
 
-    // Sun path: ~48 degrees up at noon, sliding to just below the horizon at
-    // dusk, along a fixed azimuth (the camera sways across it).
+    // Sun path: ~48 degrees up at noon, below the horizon at dusk, deep under
+    // at night, along a fixed azimuth (the camera sways across it).
     float elevA = (48.0f - 56.0f * _dayShown) * (float)M_PI / 180.0f;
     simd_float3 hdir = simd_normalize(simd_make_float3(0.8f, 0, 0.55f));
     simd_float3 sunDir = simd_normalize(simd_make_float3(hdir.x * cosf(elevA),
                                                          sinf(elevA),
                                                          hdir.z * cosf(elevA)));
+
+    // The moon rises from the opposite quarter as night comes on.
+    float night = std::clamp((_dayShown - 1.02f) / 0.30f, 0.0f, 1.0f);
+    float moonElev = (6.0f + 30.0f * night) * (float)M_PI / 180.0f;
+    simd_float3 mdir = simd_normalize(simd_make_float3(-0.30f, 0, 0.95f));
+    simd_float3 moonDir = simd_normalize(simd_make_float3(mdir.x * cosf(moonElev),
+                                                          sinf(moonElev),
+                                                          mdir.z * cosf(moonElev)));
 
     // A boat-like camera: fixed position with a gentle bob (heavier seas
     // toss the boat harder), slowly panning back and forth across the sun.
@@ -647,6 +697,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                                  (float)view.drawableSize.height,
                                  _intensityShown, 0),
         .water = simd_make_float4(_waterLinear, 0),
+        .moon = simd_make_float4(moonDir, night),
     };
 
     [self ensureTargets:view.device size:view.drawableSize];
@@ -734,9 +785,10 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     const char *dayName = _dayT < 0.25f ? "midday" :
                           _dayT < 0.55f ? "afternoon" :
                           _dayT < 0.78f ? "golden hour" :
-                          _dayT < 0.95f ? "sunset" : "dusk";
+                          _dayT < 0.95f ? "sunset" :
+                          _dayT < 1.15f ? "dusk" : "night";
     _fps.tick(view.window, [NSString stringWithFormat:
-        @"05 — Ocean ▸ %s [←/→, 6-9] ▸ Sea x%.2f (%s) [↑/↓, 1-5] ▸ [C] color",
+        @"05 — Ocean ▸ %s [←/→, 6-0] ▸ Sea x%.2f (%s) [↑/↓, 1-5] ▸ [C] color",
         dayName, _intensity, seaName]);
 }
 
