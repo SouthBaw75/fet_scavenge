@@ -549,6 +549,34 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         float3 col = mix(hollow, twig, cup);
         col += in.color.rgb * 0.30 * smoothstep(outer-0.18, outer, rad); // rim highlight
         return float4(gammaOut(col)*disc, disc);
+    } else if (shape == 10) {               // animated water (params.x=time, y=seed)
+        float t = in.params.x, seed = in.params.y;
+        float ang = atan2(p.y, p.x), rad = length(p);
+        // Irregular, softly lapping shoreline — no hard circle.
+        float edge = 0.90 + 0.06*vnoise(float2(ang*3.0,1.0)+seed)
+                          + 0.03*sin(ang*5.0 + seed*1.7 + t*0.6);
+        float aa = fwidth(rad);
+        float mask = smoothstep(edge, edge-0.09-aa, rad);
+        if (mask < 0.01) discard_fragment();
+        // Depth: darker toward the middle, lighter at the shallows.
+        float depth = smoothstep(edge, 0.0, rad);
+        float3 col = mix(float3(0.22,0.46,0.60), float3(0.05,0.17,0.35), depth);
+        // Surface: layered wavelets drifting in different directions + fbm swell.
+        float2 s = p * 5.0;
+        float h = 0.5*sin(s.x*1.2 + t*1.6 + seed)
+                + 0.4*sin(s.y*1.6 - t*1.2)
+                + 0.6*fbm(p*3.2 + float2(t*0.10, -t*0.08));
+        float glint = smoothstep(0.72, 1.0, 0.5+0.5*sin(h*3.14159));
+        col += glint * 0.16;                 // soft moving sparkle
+        col += 0.05 * (h - 0.75);            // gentle light/dark shading
+        float foam = smoothstep(edge-0.05, edge, rad);      // wet, bright shore
+        col = mix(col, float3(0.55,0.72,0.82), foam*0.35);
+        return float4(gammaOut(col)*mask, mask);
+    } else if (shape == 11) {               // soft expanding ripple crest
+        float r = length(p);
+        float d = (r - 0.82) / 0.15;
+        float av = exp(-d*d) * in.color.a;   // gaussian ring, no hard edge
+        return float4(gammaOut(in.color.rgb)*av, av);
     }
     return float4(gammaOut(in.color.rgb) * a, a * in.color.a);
 }
@@ -796,10 +824,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v6 (zoom + water) — if you don't see this line you're "
+    printf("=== BIOME v7 (realistic water) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Scroll to zoom, drag to pan (or use the VIEW buttons). Water pools "
-           "critters drink from. Top-center readout shows population + growth.\n");
+           "Animated water surface + soft wakes. START POP / LIFESPAN sliders now "
+           "drag (bug fixed). Scroll to zoom, drag to pan.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -888,8 +916,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     std::uniform_real_distribution<float> u(0,1);
     for (const Water &wp : _water)
         if (simd_distance(pos, wp.pos) < wp.radius) {
-            if (u(_rng) < 6.0f * dt && (int)_ripples.size() < kMaxRipples) {
-                Ripple rp; rp.pos = pos; rp.age = 0; rp.life = 1.3f;
+            if (u(_rng) < 2.4f * dt && (int)_ripples.size() < kMaxRipples) {
+                Ripple rp;
+                rp.pos = pos + simd_make_float2((u(_rng)-0.5f)*0.7f, (u(_rng)-0.5f)*0.7f);
+                rp.age = 0; rp.life = 1.8f;
                 _ripples.push_back(rp);
             }
             return;
@@ -1495,6 +1525,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_ClimateSlider:
             case WA_ExprSlider:
             case WA_FoodSlider:
+            case WA_StartPopSlider:
+            case WA_LifespanSlider:
                 _dragAct = wg.act; _dragX = wg.x; _dragW = wg.w;
                 [self applySlider:wg.act
                              frac:std::clamp((pt.x-wg.x)/std::max(wg.w,1.0f), 0.0f, 1.0f)];
@@ -1698,22 +1730,19 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _scratch.clear();
     _hud.clear();
 
-    // water pools (lowest layer): deep-blue disc, lighter center, bright rim
+    // water pools (lowest layer): one animated water sprite per pool
     for (const Water &wp : _water) {
-        [self push:wp.pos half:simd_make_float2(wp.radius, wp.radius) rot:0 shape:0
-              color:simd_make_float4(0.10f,0.26f,0.48f,0.92f) p:simd_make_float4(0,0,0,0)];
-        [self push:wp.pos half:simd_make_float2(wp.radius*0.68f, wp.radius*0.68f) rot:0 shape:0
-              color:simd_make_float4(0.20f,0.44f,0.64f,0.75f) p:simd_make_float4(0,0,0,0)];
-        [self push:wp.pos half:simd_make_float2(wp.radius, wp.radius) rot:0 shape:1
-              color:simd_make_float4(0.35f,0.60f,0.78f,0.85f) p:simd_make_float4(0,0,0,0)];
+        float seed = wp.pos.x*0.7f + wp.pos.y*1.3f;
+        [self push:wp.pos half:simd_make_float2(wp.radius, wp.radius) rot:0 shape:10
+              color:simd_make_float4(1,1,1,1) p:simd_make_float4(t, seed, 0, 0)];
     }
-    // expanding wake ripples on the water surface
+    // soft wake ripples — faint gaussian crests that expand and dissolve
     for (const Ripple &rp : _ripples) {
-        float t = rp.age / rp.life;                 // 0..1
-        float rad = 0.3f + 2.4f * t;                // grows outward
-        float alpha = (1.0f - t) * 0.5f;            // fades
-        [self push:rp.pos half:simd_make_float2(rad, rad) rot:0 shape:1
-              color:simd_make_float4(0.80f,0.90f,1.0f, alpha) p:simd_make_float4(0,0,0,0)];
+        float ft = rp.age / rp.life;                // 0..1
+        float rad = 0.4f + 2.0f * ft;               // grows outward
+        float alpha = (1.0f - ft) * (1.0f - ft) * 0.28f;   // eases out gently
+        [self push:rp.pos half:simd_make_float2(rad, rad) rot:0 shape:11
+              color:simd_make_float4(0.85f,0.93f,1.0f, alpha) p:simd_make_float4(0,0,0,0)];
     }
 
     // Soft contact shadows — drawn first so every entity sits on top of its own
@@ -1897,7 +1926,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v6 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v7 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         (int)_critters.size(), males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2059,7 +2088,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v6", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v7", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
