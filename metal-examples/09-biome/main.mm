@@ -36,6 +36,7 @@ static const float kWorldW = 120.0f;
 static const float kWorldH = 72.0f;
 static const int kMaxCritters = 500;
 static const int kMaxFood = 600;
+static const int kMaxPredators = 90;
 static const int kMaxInstances = 32768;
 static const int kMaxInFlight = 3;
 static const int kSpineNodes = 6;
@@ -224,7 +225,7 @@ static Phenotype phenotypeOf(const Genome &g) {
 
 // ------------------------------------------------------------------ World ---
 
-enum { AWander = 0, AForage = 1, ARest = 2, AMate = 3 };
+enum { AWander = 0, AForage = 1, ARest = 2, AMate = 3, AFlee = 4 };
 
 struct Critter {
     uint32_t id;
@@ -257,6 +258,23 @@ struct Food {
     bool alive;
 };
 
+// A simple hunting predator (not diploid — a lean agent). It preys on
+// critters, and its numbers rise and fall with the prey supply, producing
+// predator/prey population cycles. Prey coats that match the ground are harder
+// for it to spot, so predation selects for camouflage.
+struct Predator {
+    simd_float2 pos, vel;
+    float heading;
+    simd_float2 spine[kSpineNodes];
+    float age, lifespan;
+    float energy;      // starves at 0
+    float size;
+    uint32_t targetPrey;
+    float cooldown;    // brief pause after a kill
+    float phase;
+    bool alive;
+};
+
 // -------------------------------------------------------------- Instances ---
 
 struct InstC {
@@ -272,6 +290,7 @@ enum {
     WA_None = 0, WA_Toggle, WA_Pause, WA_SpeedDn, WA_SpeedUp,
     WA_ClimateSlider, WA_Food, WA_FoodSlider, WA_Introduce, WA_Cull, WA_Reset,
     WA_TraitPick, WA_ExprSlider, WA_Splice, WA_ToggleGraph,
+    WA_AddPredator, WA_CullPredators,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -467,6 +486,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
     std::vector<Critter> _critters;
     std::vector<Food> _food;
+    std::vector<Predator> _predators;
     std::mt19937 _rng;
     uint32_t _nextId;
     int _generation;
@@ -487,6 +507,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float _histDark[kHistLen];
     float _histRes[kHistLen];
     float _histPop[kHistLen];
+    float _histPred[kHistLen];   // predator population (normalized)
 
     int _foodTarget;        // carrying-capacity target (set from the HUD)
 
@@ -551,6 +572,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // mid-simulation (which would invalidate the references we hold).
     _critters.reserve(kMaxCritters);
     _food.reserve(kMaxFood);
+    _predators.reserve(kMaxPredators);
 
     _rng.seed(0xB10E);
     _nextId = 1;
@@ -614,10 +636,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return e;
     }];
 
-    printf("=== BIOME v2 [HUD] — if you don't see this line, you're running an "
-           "OLD BINARY (run: rm -rf build && make 09-biome) ===\n"
-           "Control panel is OPEN on the right edge at launch. Click the tab to "
-           "hide/show it. Splice experimental dominant genes and watch them spread.\n");
+    printf("=== BIOME v3 (predators) — if you don't see this line you're running "
+           "an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
+           "Control panel is OPEN on the right edge. Add predators to see prey/"
+           "predator cycles and camouflage evolve. Splice genes; hide the graph with X.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -676,9 +698,33 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     [self spawnCritter:randomGenome(_rng, -1) at:[self randomPos] gen:_generation];
 }
 
+- (void)spawnPredator:(simd_float2)pos {
+    if ((int)_predators.size() >= kMaxPredators) return;
+    std::uniform_real_distribution<float> u(0,1);
+    Predator p = {};
+    p.pos = pos;
+    p.vel = simd_make_float2(0,0);
+    p.heading = u(_rng) * 6.28f;
+    for (int i = 0; i < kSpineNodes; i++) p.spine[i] = pos;
+    p.age = 0;
+    p.lifespan = 90.0f + 40.0f * u(_rng);
+    p.energy = 0.7f;
+    p.size = 1.7f + 0.4f * u(_rng);      // larger than prey
+    p.targetPrey = 0;
+    p.cooldown = 0;
+    p.phase = u(_rng) * 6.28f;
+    p.alive = true;
+    _predators.push_back(p);
+}
+
+- (void)cullPredators {
+    _predators.clear();
+}
+
 - (void)resetColony {
     _critters.clear();
     _food.clear();
+    _predators.clear();
     _generation = 0;
     _births = _deaths = 0;
     _selected = 0;
@@ -691,6 +737,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (int i = 0; i < 24; i++)
         [self spawnCritter:randomGenome(_rng, i % 2) at:[self randomPos] gen:0];
     [self scatterFood:220];
+    for (int i = 0; i < 3; i++) [self spawnPredator:[self randomPos]];
 }
 
 - (void)selectAt:(simd_float2)world {
@@ -769,21 +816,40 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             continue;
         }
 
+        // --- detect predators (sharper-eyed critters see them sooner) ---
+        simd_float2 threatDir = simd_make_float2(0,0);
+        float threatLvl = 0.0f;
+        for (const Predator &pr : _predators) {
+            if (!pr.alive) continue;
+            float dd = simd_distance(pr.pos, c.pos);
+            if (dd < ph.sensory) {
+                float near = 1.0f - dd / ph.sensory;
+                if (near > threatLvl) { threatLvl = near; threatDir = c.pos - pr.pos; }
+            }
+        }
+
         // --- utility AI: pick the most pressing drive ---
         float sForage = c.hunger;
         float sRest = (1.0f - c.energy) * 0.9f;
         float sMate = (c.age > c.maturity && c.energy > 0.5f && !c.pregnant) ? c.urge : 0.0f;
         float sWander = 0.15f;
+        float sFlee = threatLvl * 2.0f;              // survival trumps everything
         c.action = AWander;
         float best = sWander;
         if (sForage > best) { best = sForage; c.action = AForage; }
         if (sRest > best)   { best = sRest;   c.action = ARest; }
         if (sMate > best)   { best = sMate;   c.action = AMate; }
+        if (sFlee > best)   { best = sFlee;   c.action = AFlee; }
 
         // --- act ---
         simd_float2 desire = simd_make_float2(0,0);
         float wantSpeed = ph.speed;
-        if (c.action == AForage) {
+        if (c.action == AFlee) {
+            desire = (simd_length(threatDir) > 1e-3f) ? simd_normalize(threatDir)
+                        : simd_make_float2(cosf(c.heading), sinf(c.heading));
+            wantSpeed = ph.speed * 1.6f;      // panic sprint
+            c.energy -= 0.02f * dt;           // burns energy
+        } else if (c.action == AForage) {
             int fi = c.targetFood;
             if (fi < 0 || fi >= (int)_food.size() || !_food[fi].alive) {
                 fi = -1; float bd = ph.sensory;
@@ -885,6 +951,82 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         }
     }
 
+    // --- predators: hunt prey; numbers rise and fall with the prey supply ---
+    float groundLuma = 0.24f + 0.06f * _climate;   // grass tone by climate
+    for (size_t i = 0; i < _predators.size(); i++) {
+        Predator &p = _predators[i];
+        if (!p.alive) continue;
+        p.age += dt;
+        p.cooldown = std::max(p.cooldown - dt, 0.0f);
+        p.energy -= 0.022f * dt;                    // metabolism
+        if (p.age > p.lifespan || p.energy <= 0.0f) { p.alive = false; continue; }
+
+        float sight = 22.0f;
+        // Re-acquire a target if the current one is gone.
+        Critter *prey = [self critterById:p.targetPrey];
+        if (!prey) {
+            float bestD = 1e9f;
+            for (Critter &o : _critters) {
+                if (!o.alive) continue;
+                float dd = simd_distance(o.pos, p.pos);
+                // Camouflaged coats (matching the ground) are spotted only up
+                // close; conspicuous ones are seen from far off.
+                float contrast = fabsf(coatLuma(o.ph.color) - groundLuma);
+                float visRange = sight * (0.35f + 1.5f * std::clamp(contrast,0.0f,1.0f));
+                if (dd < visRange && dd < bestD) { bestD = dd; p.targetPrey = o.id; }
+            }
+            prey = [self critterById:p.targetPrey];
+        }
+
+        simd_float2 desire = simd_make_float2(0,0);
+        float wantSpeed = 8.6f;                      // fast prey can outrun it
+        if (prey) {
+            simd_float2 to = prey->pos - p.pos;
+            float d = simd_length(to);
+            float catchR = 0.9f + p.size * 0.3f + prey->ph.size * 0.3f;
+            if (d < catchR) {
+                if (p.cooldown <= 0.0f) {             // kill
+                    prey->alive = false; _deaths++;
+                    if (prey->id == _selected) _selected = 0;
+                    p.energy = std::min(p.energy + 0.5f, 1.4f);
+                    p.cooldown = 1.6f;
+                    p.targetPrey = 0;
+                }
+            } else desire = to / std::max(d, 1e-3f);
+        } else {
+            p.heading += (u(_rng) - 0.5f) * 1.4f * dt;
+            desire = simd_make_float2(cosf(p.heading), sinf(p.heading));
+            wantSpeed *= 0.45f;                       // patrol slowly
+        }
+
+        // Well-fed adults bud off a new predator (asexual, for simplicity).
+        if (p.energy > 1.05f && p.age > 14.0f && (int)_predators.size() < kMaxPredators) {
+            [self spawnPredator:(p.pos + simd_make_float2(u(_rng)-0.5f, u(_rng)-0.5f))];
+            p.energy -= 0.6f;
+        }
+
+        simd_float2 wantVel = (simd_length(desire) > 1e-3f)
+            ? simd_normalize(desire) * wantSpeed : simd_make_float2(0,0);
+        p.vel += (wantVel - p.vel) * std::min(3.5f * dt, 1.0f);
+        if (simd_length(p.vel) > 0.05f) p.heading = atan2f(p.vel.y, p.vel.x);
+        p.pos += p.vel * dt;
+        p.pos.x = std::clamp(p.pos.x, 1.0f, kWorldW - 1.0f);
+        p.pos.y = std::clamp(p.pos.y, 1.0f, kWorldH - 1.0f);
+        p.phase += (0.5f + simd_length(p.vel) * 0.4f) * dt * 6.0f;
+        p.spine[0] = p.pos;
+        float plink = 0.55f * p.size;
+        for (int s = 1; s < kSpineNodes; s++) {
+            simd_float2 dir = p.spine[s] - p.spine[s-1];
+            float dl = simd_length(dir);
+            if (dl > 1e-4f) p.spine[s] = p.spine[s-1] + dir / dl * plink;
+            simd_float2 perp = simd_make_float2(-sinf(p.heading), cosf(p.heading));
+            p.spine[s] += perp * sinf(p.phase - s * 0.9f) * 0.05f * p.size
+                        * simd_length(p.vel) / 9.0f;
+        }
+    }
+    _predators.erase(std::remove_if(_predators.begin(), _predators.end(),
+                     [](const Predator &p){ return !p.alive; }), _predators.end());
+
     // --- contagion: spread by proximity (cheap O(n^2) for the slice size) ---
     for (size_t i = 0; i < _critters.size(); i++) {
         Critter &a = _critters[i];
@@ -927,6 +1069,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         _histDark[i] = dd;
         _histRes[i]  = rr;
         _histPop[i]  = std::min(n / (float)kMaxCritters * 3.0f, 1.0f);
+        _histPred[i] = std::min((int)_predators.size() / 40.0f, 1.0f);
         _histHead = (i + 1) % kHistLen;
         if (_histCount < kHistLen) _histCount++;
     }
@@ -1028,6 +1171,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_TraitPick: _spliceGene = (int)wg.val; break;
             case WA_Splice:    [self spliceGene:_spliceGene expr:_spliceExpr count:4]; break;
             case WA_ToggleGraph: _showGraph = !_showGraph; break;
+            case WA_AddPredator: [self spawnPredator:[self randomPos]]; break;
+            case WA_CullPredators: [self cullPredators]; break;
             case WA_ClimateSlider:
             case WA_ExprSlider:
             case WA_FoodSlider:
@@ -1137,6 +1282,14 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         button(x0, y, w, 26, "ADD", WA_Introduce, 0, false);
         button(x0+w+4, y, w, 26, "CULL", WA_Cull, 0, false);
         button(x0+2*(w+4), y, w, 26, "RESET", WA_Reset, 0, false);
+    }
+
+    // --- PREDATORS ---
+    text(x0, row(11,5), "PREDATORS", 11, cLabel);
+    {
+        float y = row(26,14), w = (cw-4)/2.0f;
+        button(x0, y, w, 26, "ADD HUNTER", WA_AddPredator, 0, false);
+        button(x0+w+4, y, w, 26, "REMOVE ALL", WA_CullPredators, 0, false);
     }
 
     // --- GENE LAB ---
@@ -1266,6 +1419,32 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                   color:simd_make_float4(1.0f,0.5f,0.7f,1) p:simd_make_float4(0,0,0,0)];
     }
 
+    // predators: larger dark-red hunters, same procedural spine + glowing eyes
+    for (const Predator &p : _predators) {
+        if (!p.alive) continue;
+        simd_float2 fwd = simd_make_float2(cosf(p.heading), sinf(p.heading));
+        simd_float2 perp = simd_make_float2(-fwd.y, fwd.x);
+        simd_float3 body = simd_make_float3(0.58f, 0.11f, 0.12f);
+        simd_float3 dark = simd_make_float3(0.26f, 0.05f, 0.07f);
+        for (int sidx = kSpineNodes-1; sidx >= 0; sidx--) {
+            float un = sidx / (kSpineNodes - 1.0f);
+            float rr = p.size * 0.50f * (1.0f - 0.60f * un);
+            simd_float3 col = dark + (body - dark) * (1.0f - un);
+            [self push:p.spine[sidx] half:simd_make_float2(rr,rr) rot:0 shape:0
+                  color:simd_make_float4(col,1.0f) p:simd_make_float4(0,0,0,0)];
+        }
+        for (int k = 1; k < kSpineNodes-1; k++)   // dorsal spikes
+            [self push:p.spine[k] half:simd_make_float2(p.size*0.15f,p.size*0.15f) rot:0 shape:7
+                  color:simd_make_float4(0.80f,0.22f,0.16f,1) p:simd_make_float4(0,0,0,0)];
+        float er = 0.14f * p.size;
+        [self push:p.pos + fwd*0.22f*p.size + perp*0.22f*p.size
+              half:simd_make_float2(er,er) rot:0 shape:0
+              color:simd_make_float4(1.0f,0.82f,0.2f,1) p:simd_make_float4(0,0,0,0)];
+        [self push:p.pos + fwd*0.22f*p.size - perp*0.22f*p.size
+              half:simd_make_float2(er,er) rot:0 shape:0
+              color:simd_make_float4(1.0f,0.82f,0.2f,1) p:simd_make_float4(0,0,0,0)];
+    }
+
     // selection ring + inspector
     Critter *sel = [self critterById:_selected];
     if (sel) {
@@ -1316,9 +1495,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v2 [HUD] ▸ pop %d (%dM/%dF) ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
-        (int)_critters.size(), males, females, _generation, _births, _deaths, sick,
-        band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
+        @"09 — BIOME v3 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        (int)_critters.size(), males, females, (int)_predators.size(), _generation,
+        _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
 
 // ------------------------------------------------------------- Inspector ---
@@ -1365,19 +1544,20 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         }
     };
     if (count >= 2) {
-        plot(_histPop,  simd_make_float4(0.55f,0.55f,0.62f,0.7f), 2.0f);  // population
+        plot(_histPop,  simd_make_float4(0.55f,0.55f,0.62f,0.7f), 2.0f);  // prey population
         plot(_histClim, simd_make_float4(1.00f,1.00f,1.00f,0.9f), 2.5f);  // climate (driver)
         plot(_histRes,  simd_make_float4(0.95f,0.70f,0.30f,1.0f), 2.5f);  // resistance
         plot(_histSize, simd_make_float4(0.35f,0.75f,0.95f,1.0f), 2.5f);  // avg size
         plot(_histDark, simd_make_float4(0.45f,0.90f,0.50f,1.0f), 2.5f);  // coat darkness
+        plot(_histPred, simd_make_float4(0.90f,0.25f,0.20f,1.0f), 2.5f);  // predators
     }
-    // Colour key along the bottom margin: climate·size·darkness·resistance·pop.
-    simd_float4 key[5] = {
+    // Colour key (bottom): climate·size·darkness·resistance·prey·predators.
+    simd_float4 key[6] = {
         simd_make_float4(1.00f,1.00f,1.00f,0.9f), simd_make_float4(0.35f,0.75f,0.95f,1),
         simd_make_float4(0.45f,0.90f,0.50f,1),    simd_make_float4(0.95f,0.70f,0.30f,1),
-        simd_make_float4(0.55f,0.55f,0.62f,0.9f),
+        simd_make_float4(0.55f,0.55f,0.62f,0.9f), simd_make_float4(0.90f,0.25f,0.20f,1),
     };
-    for (int k = 0; k < 5; k++)
+    for (int k = 0; k < 6; k++)
         rect(gx + k*26.0f, gy - 7, 20, 5, key[k], 4);
 }
 
@@ -1447,7 +1627,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v2 [HUD]", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v3", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
