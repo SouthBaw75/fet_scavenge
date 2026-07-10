@@ -194,7 +194,11 @@ world is a **procedural biome** — grass, dirt, sand, and rock painted from
 moisture/elevation noise with relief shading, **snow** creeping over high ground
 when it turns cold, and the whole palette shifting frosty-blue to sun-baked-tan
 with the temperature; **soft contact shadows** ground every critter, nest, and
-plant. Critters have
+plant, and **pools of water** dot the map — critters build up thirst and head to
+the nearest shore to drink, dehydrating if they neglect it. **Scroll to zoom**
+(toward the cursor) and **drag to pan** around the world, or use the VIEW
+buttons; a top-center readout tracks living **organisms, total deaths, and
+net growth/decline** since the colony began. Critters have
 procedural Verlet-spine bodies, utility-AI needs (hunger / energy / reproduction
 / **flee**), forage regrowing food, court and breed, and catch a contagion whose
 spread is governed by disease-resistance genes. Click any critter to inspect its

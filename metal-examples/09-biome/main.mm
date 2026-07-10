@@ -39,6 +39,7 @@ static const int kMaxFood = 600;
 static const int kMaxPredators = 90;
 static const int kMaxNests = 200;
 static const float kNestRadius = 3.2f;   // shelter + build range
+static const int kMaxWater = 12;
 static const int kMaxInstances = 32768;
 static const int kMaxInFlight = 3;
 static const int kSpineNodes = 6;
@@ -234,7 +235,7 @@ static Phenotype phenotypeOf(const Genome &g) {
 
 // ------------------------------------------------------------------ World ---
 
-enum { AWander = 0, AForage = 1, ARest = 2, AMate = 3, AFlee = 4, ANest = 5 };
+enum { AWander = 0, AForage = 1, ARest = 2, AMate = 3, AFlee = 4, ANest = 5, ADrink = 6 };
 
 struct Critter {
     uint32_t id;
@@ -247,6 +248,7 @@ struct Critter {
     float age, maturity;
     float energy;      // 0..1
     float hunger;      // 0..1 (1 = starving)
+    float thirst;      // 0..1.5 (1 = parched)
     float urge;        // 0..1 reproduction
     float health;      // 0..1
     float sick;        // 0..1 infection load, 0 = healthy
@@ -308,6 +310,13 @@ struct Nest {
     bool alive;
 };
 
+// A pool of drinking water. Critters build up thirst and head to the nearest
+// pool to drink; neglecting it dehydrates them.
+struct Water {
+    simd_float2 pos;
+    float radius;
+};
+
 // -------------------------------------------------------------- Instances ---
 
 struct InstC {
@@ -324,7 +333,7 @@ enum {
     WA_ClimateSlider, WA_Food, WA_FoodSlider, WA_Introduce, WA_Cull, WA_Reset,
     WA_TraitPick, WA_ExprSlider, WA_Splice, WA_ToggleGraph,
     WA_AddPredator, WA_CullPredators, WA_StartPopSlider, WA_LifespanSlider,
-    WA_ClearColony,
+    WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -458,11 +467,12 @@ constant ushort kAlpha[26][7] = {
     {0x11,0x11,0x11,0x15,0x15,0x1B,0x11},{0x11,0x11,0x0A,0x04,0x0A,0x11,0x11}, // W X
     {0x11,0x11,0x0A,0x04,0x04,0x04,0x04},{0x1F,0x01,0x02,0x04,0x08,0x10,0x1F}, // Y Z
 };
-// A few symbols (codes 36+): '+', '-', '.'.
-constant ushort kSym[3][7] = {
+// A few symbols (codes 36+): '+', '-', '.', '%'.
+constant ushort kSym[4][7] = {
     {0x00,0x04,0x04,0x1F,0x04,0x04,0x00},   // 36 '+'
     {0x00,0x00,0x00,0x1F,0x00,0x00,0x00},   // 37 '-'
     {0x00,0x00,0x00,0x00,0x00,0x0C,0x0C},   // 38 '.'
+    {0x18,0x19,0x02,0x04,0x08,0x13,0x03},   // 39 '%'
 };
 
 fragment float4 entity_fragment(EOut in [[stage_in]]) {
@@ -501,7 +511,7 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
     } else if (shape == 7) {                // heart / sick pip (small diamond)
         float d = abs(p.x)+abs(p.y); a = smoothstep(1.0,0.4,d);
     } else if (shape == 8) {                // text glyph: params.x = 0-9 digit, 10-35 A-Z
-        int code = clamp(int(in.params.x + 0.5), 0, 38);
+        int code = clamp(int(in.params.x + 0.5), 0, 39);
         int cx = clamp(int((p.x*0.5+0.5)*5.0), 0, 4);
         int cy = clamp(int((1.0-(p.y*0.5+0.5))*7.0), 0, 6);
         ushort rowbits = (code < 10) ? kDigit[code][cy]
@@ -548,7 +558,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     std::vector<Food> _food;
     std::vector<Predator> _predators;
     std::vector<Nest> _nests;
+    std::vector<Water> _water;
     std::mt19937 _rng;
+    int _initialPop;        // colony size at start, for growth %
     uint32_t _nextId;
     int _generation;
     int _births, _deaths;
@@ -588,6 +600,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     simd_float2 _uScale, _uOffset;
     double _startTime, _lastFrameTime, _simAccum;
     float _smoothedFPS;
+
+    // Camera (zoom + pan) and world drag-to-pan / click-to-select state.
+    float _zoom;                   // 1 = whole world in view
+    simd_float2 _panCenter;        // world point held at screen center
+    bool _worldDrag, _worldMoved;
+    float _downPxX, _downPxY;
+    simd_float2 _panAtDown, _downWorld;
 }
 
 - (instancetype)initWithView:(MTKView *)view {
@@ -639,6 +658,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _food.reserve(kMaxFood);
     _predators.reserve(kMaxPredators);
     _nests.reserve(kMaxNests);
+    _water.reserve(kMaxWater);
 
     _rng.seed(0xB10E);
     _nextId = 1;
@@ -656,6 +676,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _flashT = 0;
     _startPop = 24;
     _lifespanMul = 1.0f;
+    _zoom = 1.0f;
+    _panCenter = simd_make_float2(kWorldW*0.5f, kWorldH*0.5f);
+    _worldDrag = false; _worldMoved = false;
     [self resetColony];
 
     __unsafe_unretained BiomeRenderer *weakSelf = self;
@@ -684,33 +707,67 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // 1) HUD widgets first (topmost wins → iterate in reverse).
         if ([weakSelf hudMouseDown:simd_make_float2((float)pt.x,(float)pt.y) bw:bw bh:bh])
             return nil;
-        // 2) otherwise a world click selects a critter.
+        // 2) world: begin a click/drag. A click selects on mouse-up; a drag pans.
         simd_float2 ndc = simd_make_float2((float)(pt.x/bw)*2.0f-1.0f,
                                            (float)(pt.y/bh)*2.0f-1.0f);
-        simd_float2 world = (ndc - weakSelf->_uOffset) / weakSelf->_uScale;
-        [weakSelf selectAt:world];
+        weakSelf->_worldDrag = true;
+        weakSelf->_worldMoved = false;
+        weakSelf->_downPxX = (float)pt.x; weakSelf->_downPxY = (float)pt.y;
+        weakSelf->_panAtDown = weakSelf->_panCenter;
+        weakSelf->_downWorld = (ndc - weakSelf->_uOffset) / weakSelf->_uScale;
         return e;
     }];
     [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDragged
                                           handler:^NSEvent *(NSEvent *e) {
-        if (weakSelf->_dragAct == WA_None || !e.window) return e;
+        if (!e.window) return e;
         MTKView *v = (MTKView *)e.window.contentView;
         if (![v isKindOfClass:[MTKView class]]) return e;
         NSPoint pt = [v convertPoint:e.locationInWindow fromView:nil];
-        float frac = ((float)pt.x - weakSelf->_dragX) / std::max(weakSelf->_dragW, 1.0f);
-        [weakSelf applySlider:weakSelf->_dragAct frac:std::clamp(frac,0.0f,1.0f)];
-        return nil;
+        float bw = (float)v.bounds.size.width, bh = (float)v.bounds.size.height;
+        if (weakSelf->_dragAct != WA_None) {                 // slider drag
+            float frac = ((float)pt.x - weakSelf->_dragX) / std::max(weakSelf->_dragW, 1.0f);
+            [weakSelf applySlider:weakSelf->_dragAct frac:std::clamp(frac,0.0f,1.0f)];
+            return nil;
+        }
+        if (weakSelf->_worldDrag) {                          // pan the camera
+            float dpx = (float)pt.x - weakSelf->_downPxX, dpy = (float)pt.y - weakSelf->_downPxY;
+            if (fabsf(dpx) + fabsf(dpy) > 3.0f) weakSelf->_worldMoved = true;
+            simd_float2 dndc = simd_make_float2(2.0f*dpx/bw, 2.0f*dpy/bh);
+            simd_float2 dworld = dndc / weakSelf->_uScale;
+            weakSelf->_panCenter = weakSelf->_panAtDown - dworld;
+            [weakSelf clampPan];
+            return nil;
+        }
+        return e;
     }];
     [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseUp
                                           handler:^NSEvent *(NSEvent *e) {
         weakSelf->_dragAct = WA_None;
+        if (weakSelf->_worldDrag) {
+            if (!weakSelf->_worldMoved) [weakSelf selectAt:weakSelf->_downWorld];  // a click
+            weakSelf->_worldDrag = false;
+        }
         return e;
     }];
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel
+                                          handler:^NSEvent *(NSEvent *e) {
+        if (!e.window) return e;
+        MTKView *v = (MTKView *)e.window.contentView;
+        if (![v isKindOfClass:[MTKView class]] || weakSelf->_uScale.x == 0) return e;
+        NSPoint pt = [v convertPoint:e.locationInWindow fromView:nil];
+        float bw = (float)v.bounds.size.width, bh = (float)v.bounds.size.height;
+        simd_float2 ndc = simd_make_float2((float)(pt.x/bw)*2.0f-1.0f,
+                                           (float)(pt.y/bh)*2.0f-1.0f);
+        float f = 1.0f + (float)e.scrollingDeltaY * 0.01f;   // scroll up = zoom in
+        f = std::clamp(f, 0.5f, 1.6f);
+        [weakSelf zoomBy:f atNdc:ndc];
+        return nil;
+    }];
 
-    printf("=== BIOME v5 (terrain + shadows) — if you don't see this line you're "
+    printf("=== BIOME v6 (zoom + water) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New biome ground (grass/dirt/sand/rock, relief + snow) and soft "
-           "shadows. POPULATION now has a CLEAR button; START POP goes to 0.\n");
+           "Scroll to zoom, drag to pan (or use the VIEW buttons). Water pools "
+           "critters drink from. Top-center readout shows population + growth.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -742,6 +799,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     c.maturity = 14.0f;
     c.energy = 0.7f + 0.3f * u(_rng);
     c.hunger = 0.2f * u(_rng);
+    c.thirst = 0.2f * u(_rng);
     c.urge = 0;
     c.health = 1.0f;
     c.sick = 0;
@@ -801,6 +859,28 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _selected = 0;
 }
 
+// ----------------------------------------------------------------- Camera ---
+
+- (void)clampPan {
+    // Keep the view over the world: allowable pan grows with zoom, so at fit
+    // zoom the center stays put and you can never drag the world off-screen.
+    float rx = kWorldW * 0.5f * std::max(0.0f, 1.0f - 1.0f/_zoom);
+    float ry = kWorldH * 0.5f * std::max(0.0f, 1.0f - 1.0f/_zoom);
+    _panCenter.x = std::clamp(_panCenter.x, kWorldW*0.5f - rx, kWorldW*0.5f + rx);
+    _panCenter.y = std::clamp(_panCenter.y, kWorldH*0.5f - ry, kWorldH*0.5f + ry);
+}
+
+// Zoom by factor f, keeping the world point under `ndc` fixed on screen.
+- (void)zoomBy:(float)f atNdc:(simd_float2)ndc {
+    if (_uScale.x == 0) { _zoom = std::clamp(_zoom * f, 1.0f, 8.0f); return; }
+    float oldZoom = _zoom;
+    _zoom = std::clamp(_zoom * f, 1.0f, 8.0f);
+    simd_float2 scaleNew = _uScale * (_zoom / oldZoom);
+    simd_float2 worldC = _panCenter + ndc / _uScale;      // world point under cursor
+    _panCenter = worldC - ndc / scaleNew;                 // hold it there
+    [self clampPan];
+}
+
 - (void)resetColony {
     _critters.clear();
     _food.clear();
@@ -815,11 +895,20 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _sampleTimer = 0;
     _histCount = _histHead = 0;
     _foodTarget = 320;
+    // A few water pools scattered around the world.
+    _water.clear();
+    std::uniform_real_distribution<float> ur(0,1);
+    int nPools = 2 + (int)(ur(_rng) * 2.5f);   // 2..4
+    for (int i = 0; i < nPools; i++) {
+        Water wtr; wtr.pos = [self randomPos]; wtr.radius = 4.0f + 4.0f * ur(_rng);
+        _water.push_back(wtr);
+    }
     for (int i = 0; i < _startPop; i++)
         [self spawnCritter:randomGenome(_rng, i % 2) at:[self randomPos] gen:0];
     [self scatterFood:220];
     if (_startPop > 0)
         for (int i = 0; i < 3; i++) [self spawnPredator:[self randomPos]];
+    _initialPop = (int)_critters.size();
 }
 
 - (void)selectAt:(simd_float2)world {
@@ -880,6 +969,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // --- needs ---
         c.age += dt;
         c.hunger = std::min(c.hunger + ph.metabolism * 0.05f * dt, 1.5f);
+        c.thirst = std::min(c.thirst + (0.03f + ph.metabolism*0.03f
+                                        + std::max(_climate,0.0f)*0.03f) * dt, 1.5f);
+        if (c.thirst > 1.0f) c.energy -= (c.thirst - 1.0f) * 0.12f * dt;   // dehydration
         float moving = simd_length(c.vel) / std::max(ph.speed, 0.1f);
         c.energy -= (0.01f + ph.metabolism * 0.012f + 0.02f * moving) * dt;
         if (c.hunger > 0.9f) c.energy -= (c.hunger - 0.9f) * 0.15f * dt;   // starving
@@ -932,9 +1024,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         float sWander = 0.15f;
         float sFlee = threatLvl * 2.0f;              // survival trumps everything
         float sNest = c.pregnant ? 0.8f : 0.0f;      // expectant mothers nest
+        float sDrink = _water.empty() ? 0.0f : c.thirst;
         c.action = AWander;
         float best = sWander;
         if (sForage > best) { best = sForage; c.action = AForage; }
+        if (sDrink > best)  { best = sDrink;  c.action = ADrink; }
         if (sRest > best)   { best = sRest;   c.action = ARest; }
         if (sMate > best)   { best = sMate;   c.action = AMate; }
         if (sNest > best)   { best = sNest;   c.action = ANest; }
@@ -1033,6 +1127,21 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     nst.quality = std::min(nst.quality + 0.06f * dt, 1.0f);
                     wantSpeed = 0.0f;
                     c.energy = std::min(c.energy + 0.03f * dt, 1.0f);
+                } else desire = to / std::max(dd, 1e-3f);
+            } else { wantSpeed *= 0.5f; desire = simd_make_float2(cosf(c.heading), sinf(c.heading)); }
+        } else if (c.action == ADrink) {
+            // Head to the nearest pool and drink at its shore.
+            int wi = -1; float bd = 1e9f;
+            for (int k = 0; k < (int)_water.size(); k++) {
+                float dd = simd_distance(_water[k].pos, c.pos);
+                if (dd < bd) { bd = dd; wi = k; }
+            }
+            if (wi >= 0) {
+                simd_float2 to = _water[wi].pos - c.pos;
+                float dd = simd_length(to);
+                if (dd < _water[wi].radius + 0.8f) {       // drinking
+                    c.thirst = std::max(c.thirst - 1.2f * dt, 0.0f);
+                    wantSpeed = 0.0f;
                 } else desire = to / std::max(dd, 1e-3f);
             } else { wantSpeed *= 0.5f; desire = simd_make_float2(cosf(c.heading), sinf(c.heading)); }
         } else {  // wander
@@ -1257,6 +1366,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         else if (ch == '+') code = 36;
         else if (ch == '-') code = 37;
         else if (ch == '.') code = 38;
+        else if (ch == '%') code = 39;
         if (code >= 0) {
             float cx = (x + gw*0.5f)/bw*2.0f-1.0f, cy = (y + h*0.5f)/bh*2.0f-1.0f;
             [self hud:cx cy:cy hw:gw/bw hh:h/bh shape:8 color:col p0:(float)code];
@@ -1324,6 +1434,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_AddPredator: [self spawnPredator:[self randomPos]]; break;
             case WA_CullPredators: [self cullPredators]; break;
             case WA_ClearColony: [self clearColony]; break;
+            case WA_ZoomIn:    [self zoomBy:1.4f atNdc:simd_make_float2(0,0)]; break;
+            case WA_ZoomOut:   [self zoomBy:1.0f/1.4f atNdc:simd_make_float2(0,0)]; break;
+            case WA_ResetView: _zoom = 1.0f;
+                               _panCenter = simd_make_float2(kWorldW*0.5f, kWorldH*0.5f); break;
             case WA_ClimateSlider:
             case WA_ExprSlider:
             case WA_FoodSlider:
@@ -1419,6 +1533,15 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                             : simd_make_float4(0.16f,0.18f,0.22f,1), 6);
     }
 
+    // --- VIEW (zoom) ---
+    text(x0, row(11,5), "VIEW", 11, cLabel);
+    {
+        float y = row(24,14), w = (cw-8)/3.0f;
+        button(x0, y, w, 24, "ZOOM-", WA_ZoomOut, 0, false);
+        button(x0+(w+4), y, w, 24, "ZOOM+", WA_ZoomIn, 0, false);
+        button(x0+2*(w+4), y, w, 24, "FIT", WA_ResetView, 0, false);
+    }
+
     // --- CLIMATE ---
     text(x0, row(11,5), "CLIMATE", 11, cLabel);
     slider(x0, row(18,5), cw, 18, (_climateTrend+0.75f)/1.5f, WA_ClimateSlider);
@@ -1507,9 +1630,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
 
     float aspect = (float)(view.drawableSize.width / view.drawableSize.height);
-    float s = std::min(2.0f*aspect/kWorldW, 2.0f/kWorldH) * 0.96f;
+    float s = std::min(2.0f*aspect/kWorldW, 2.0f/kWorldH) * 0.96f * _zoom;
     _uScale = simd_make_float2(s/aspect, s);
-    _uOffset = simd_make_float2(-kWorldW*0.5f*s/aspect, -kWorldH*0.5f*s);
+    _uOffset = simd_make_float2(-_panCenter.x * (s/aspect), -_panCenter.y * s);
 
     struct { simd_float2 scale, offset, resolution; float time, pad; } uni = {
         _uScale, _uOffset,
@@ -1520,6 +1643,16 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
     _scratch.clear();
     _hud.clear();
+
+    // water pools (lowest layer): deep-blue disc, lighter center, bright rim
+    for (const Water &wp : _water) {
+        [self push:wp.pos half:simd_make_float2(wp.radius, wp.radius) rot:0 shape:0
+              color:simd_make_float4(0.10f,0.26f,0.48f,0.92f) p:simd_make_float4(0,0,0,0)];
+        [self push:wp.pos half:simd_make_float2(wp.radius*0.68f, wp.radius*0.68f) rot:0 shape:0
+              color:simd_make_float4(0.20f,0.44f,0.64f,0.75f) p:simd_make_float4(0,0,0,0)];
+        [self push:wp.pos half:simd_make_float2(wp.radius, wp.radius) rot:0 shape:1
+              color:simd_make_float4(0.35f,0.60f,0.78f,0.85f) p:simd_make_float4(0,0,0,0)];
+    }
 
     // Soft contact shadows — drawn first so every entity sits on top of its own
     // shadow. Offset toward lower-right so the light reads as upper-left.
@@ -1666,6 +1799,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float bw = (float)view.bounds.size.width, bh = (float)view.bounds.size.height;
     _widgets.clear();
     [self buildEvoGraph:bw bh:bh];
+    [self buildStats:bw bh:bh];
     [self buildHUD:sel bw:bw bh:bh];
     [self buildControlPanel:bw bh:bh];
     id<MTLBuffer> hb = _hudBuffers[_frameIndex];
@@ -1701,12 +1835,42 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v5 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v6 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         (int)_critters.size(), males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
 
 // ------------------------------------------------------------- Inspector ---
+
+// Top-center population readout: living count, total deaths, and net growth /
+// decline since the colony started.
+- (void)buildStats:(float)bw bh:(float)bh {
+    auto rect = [&](float x, float y, float w, float h, simd_float4 c, float s) {
+        float cx = (x+w*0.5f)/bw*2.0f-1.0f, cy = (y+h*0.5f)/bh*2.0f-1.0f;
+        [self hud:cx cy:cy hw:w/bw hh:h/bh shape:s color:c p0:0];
+    };
+    float sw = 384, sh = 34, sx = (bw - sw) * 0.5f, sy = bh - 14 - sh;
+    rect(sx, sy, sw, sh, simd_make_float4(0.05f,0.06f,0.09f,0.85f), 6);
+    simd_float4 lab = simd_make_float4(0.55f,0.68f,0.85f,1);
+    simd_float4 val = simd_make_float4(0.96f,0.98f,1.0f,1);
+
+    int pop = (int)_critters.size();
+    int growth = _initialPop > 0 ? (int)lroundf((pop - _initialPop) * 100.0f / _initialPop) : 0;
+    simd_float4 gcol = growth >= 0 ? simd_make_float4(0.45f,0.90f,0.55f,1)   // green up
+                                   : simd_make_float4(0.95f,0.45f,0.40f,1);  // red down
+    char bPop[16], bDied[16], bGrow[16];
+    snprintf(bPop, sizeof bPop, "%d", pop);
+    snprintf(bDied, sizeof bDied, "%d", _deaths);
+    snprintf(bGrow, sizeof bGrow, "%+d%%", growth);
+
+    float ly = sy + 4, vy = sy + 17;
+    [self hudText:"ORGANISMS" x:sx+14  y:ly h:9  col:lab bw:bw bh:bh];
+    [self hudText:bPop        x:sx+14  y:vy h:13 col:val bw:bw bh:bh];
+    [self hudText:"DEATHS"    x:sx+150 y:ly h:9  col:lab bw:bw bh:bh];
+    [self hudText:bDied       x:sx+150 y:vy h:13 col:val bw:bw bh:bh];
+    [self hudText:"GROWTH"    x:sx+270 y:ly h:9  col:lab bw:bw bh:bh];
+    [self hudText:bGrow       x:sx+270 y:vy h:13 col:gcol bw:bw bh:bh];
+}
 
 // Evolution graph: the climate driver and the colony-average traits that
 // track it, scrolling over the last ~kHistLen sim-seconds. Can be hidden with
@@ -1833,7 +1997,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v5", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v6", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
