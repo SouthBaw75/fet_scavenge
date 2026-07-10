@@ -132,7 +132,7 @@ float3 sunTint(float elev) {
 // midday blue, golden-hour warmth, a full layered sunset (yellow -> orange ->
 // pink -> purple climbing from the horizon), and violet dusk after the sun
 // slips under. The water reflects all of it.
-float3 skyColor(float3 rd, float3 sun, float time, float4 moon) {
+float3 skyColor(float3 rd, float3 sun, float time, float4 moon, float storm) {
     float sd = max(dot(rd, sun), 0.0);
     float elev = sun.y;
     float sunset = clamp(1.0 - abs(elev - 0.04) / 0.24, 0.0, 1.0);
@@ -165,11 +165,17 @@ float3 skyColor(float3 rd, float3 sun, float time, float4 moon) {
     float horizon = pow(1.0 - h, 3.5);
     float3 col = mix(zenith, haze, horizon);
 
+    // Overcast: storms grey the sky out and swallow the sun.
+    float lum = dot(col, float3(0.299, 0.587, 0.114));
+    col = mix(col, lum * float3(0.80, 0.88, 1.00), storm * 0.55);
+    col *= 1.0 - 0.35 * storm;
+
     float3 st = sunTint(elev);
     col += st * pow(sd, 9.0) * (0.45 + 1.10 * sunset)
-              * (1.0 - night);                                  // aureole swells low
+              * (1.0 - night) * (1.0 - 0.8 * storm);            // aureole swells low
     col += st * pow(sd, 1400.0) * 60.0
-              * smoothstep(-0.025, 0.015, elev);                // disc sets below horizon
+              * smoothstep(-0.025, 0.015, elev)
+              * (1.0 - 0.85 * storm);                           // disc hides in cloud
 
     // Stars: hashed points on the dome, twinkling, fading toward the horizon
     // haze. Drawn before the clouds so clouds drift in front of them.
@@ -200,7 +206,8 @@ float3 skyColor(float3 rd, float3 sun, float time, float4 moon) {
         float2 cuv = rd.xz / (rd.y + 0.14) * 0.55
                    + float2(time * 0.008, time * 0.003);
         float shape = fbm(cuv);
-        float cover = smoothstep(0.52, 0.74, shape);
+        // Storm cloud decks close in: lower coverage threshold, full ceiling.
+        float cover = smoothstep(0.52 - 0.30 * storm, 0.74 - 0.28 * storm, shape);
         float detail = fbm(cuv * 2.7 + 11.0);
         float3 lit = mix(float3(1.08, 1.04, 0.98), float3(1.35, 0.52, 0.40), sunset);
         lit = mix(lit, float3(0.30, 0.20, 0.38), dusk);
@@ -208,8 +215,11 @@ float3 skyColor(float3 rd, float3 sun, float time, float4 moon) {
         float3 shad = mix(float3(0.52, 0.55, 0.60), float3(0.40, 0.22, 0.44), sunset);
         shad = mix(shad, float3(0.09, 0.07, 0.15), dusk);
         shad = mix(shad, float3(0.015, 0.020, 0.038), night);
+        shad *= 1.0 - 0.35 * storm;                        // brooding storm bases
         float3 cloud = mix(shad, lit, detail * 0.6 + 0.4 * pow(sd, 2.0));
-        cloud += st * pow(sd, 6.0) * (0.35 + 0.5 * sunset) * (1.0 - night);
+        cloud = mix(cloud, dot(cloud, float3(0.33, 0.34, 0.33)) * float3(0.85, 0.92, 1.0),
+                    storm * 0.5);
+        cloud += st * pow(sd, 6.0) * (0.35 + 0.5 * sunset) * (1.0 - night) * (1.0 - 0.8 * storm);
         cloud += float3(0.35, 0.42, 0.55) * pow(md, 8.0) * 0.5 * night;  // moonlit edges
         float fade = smoothstep(0.02, 0.15, rd.y);
         col = mix(col, cloud, cover * fade * 0.85);
@@ -252,7 +262,7 @@ fragment float4 sky_fragment(SkyVSOut in [[stage_in]],
     float3 rd = normalize(u.camFwd.xyz +
                           u.camRight.xyz * (ndc.x * aspect / focal) +
                           u.camUp.xyz * (ndc.y / focal));
-    float3 col = skyColor(rd, u.sun.xyz, u.sun.w, u.moon);
+    float3 col = skyColor(rd, u.sun.xyz, u.sun.w, u.moon, u.water.w);
     return float4(col, 1.0);   // linear HDR; tonemap happens in the composite
 }
 
@@ -313,7 +323,7 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     // What the mirror sees.
     float3 R = reflect(-V, n);
     R.y = max(R.y, 0.03);
-    float3 reflection = skyColor(normalize(R), sun, time, u.moon);
+    float3 reflection = skyColor(normalize(R), sun, time, u.moon, u.water.w);
 
     // What's under the surface: deep water, plus light scattering through
     // the top of backlit crests. Both derive from the user's water color so
@@ -359,8 +369,15 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
 
     // Fade the far edge of the grid into the sky so it has no visible border.
     float3 rd = -V;
-    float3 horizon = skyColor(normalize(float3(rd.x, 0.015, rd.z)), sun, time, u.moon);
+    float3 horizon = skyColor(normalize(float3(rd.x, 0.015, rd.z)), sun, time, u.moon, u.water.w);
     color = mix(color, horizon, smoothstep(60.0, 95.0, dist));
+
+    // Rain fizz: drops peppering the surface as a fine, flickering sparkle.
+    float rain = u.water.w;
+    if (rain > 0.02) {
+        float fizz = smoothstep(0.88, 1.0, vnoise(in.world.xz * 7.0 + float2(time * 3.1, time * 2.3)));
+        color += float3(0.45, 0.52, 0.60) * fizz * rain * 0.30 * (0.3 + 0.7 * day);
+    }
 
     return float4(color, 1.0);   // linear HDR; tonemap happens in the composite
 }
@@ -404,12 +421,52 @@ fragment float4 blur_fragment(PostVSOut in [[stage_in]],
     return float4(c, 1.0);
 }
 
+struct CompUni {
+    float2 resolution;
+    float time;
+    float rain;
+};
+
+// Three parallax layers of wind-slanted rain streaks, screen space.
+float rainStreaks(float2 uv, float aspect, float t, float rain) {
+    float acc = 0.0;
+    float slant = 0.16 + 0.05 * sin(t * 0.4);
+    for (int i = 0; i < 3; i++) {
+        float fi = float(i);
+        float dens = 70.0 + 55.0 * fi;               // far layers are denser
+        float speed = 1.5 - 0.38 * fi;               // near layers fall faster
+        float2 p = float2(uv.x * aspect + (1.0 - uv.y) * slant * (1.0 + 0.3 * fi),
+                          uv.y);
+        float gx = p.x * dens;
+        float colId = floor(gx);
+        float h = hash21(float2(colId, fi * 17.3 + 1.7));
+        float phase = fract(p.y * (0.55 + 0.30 * fi) + t * speed + h * 19.7);
+        float active = step(h, 0.22 + 0.30 * rain);  // heavier rain, more drops
+        float d = abs(fract(gx) - 0.5);
+        float width = smoothstep(0.10 - 0.02 * fi, 0.0, d);
+        float len = smoothstep(0.34, 0.02, phase);
+        acc += active * width * len * (0.50 - 0.13 * fi);
+    }
+    return acc * rain;
+}
+
 fragment float4 composite_fragment(PostVSOut in [[stage_in]],
                                    texture2d<float> scene [[texture(0)]],
                                    texture2d<float> bloom [[texture(1)]],
-                                   sampler smp [[sampler(0)]]) {
+                                   sampler smp [[sampler(0)]],
+                                   constant CompUni &cu [[buffer(0)]]) {
     float3 c = scene.sample(smp, in.uv).rgb;
     c += bloom.sample(smp, in.uv).rgb * 0.65;
+
+    // Rain in front of everything, catching the scene's ambient light.
+    if (cu.rain > 0.01) {
+        float sceneLum = dot(c, float3(0.299, 0.587, 0.114));
+        float lightScale = 0.25 + 1.4 * clamp(sceneLum, 0.0, 0.8);
+        float r = rainStreaks(in.uv, cu.resolution.x / cu.resolution.y,
+                              cu.time, cu.rain);
+        c += float3(0.55, 0.62, 0.72) * r * 0.55 * lightScale;
+    }
+
     float2 cc = in.uv - 0.5;
     c *= 1.0 - 0.30 * dot(cc, cc) * 2.0;     // gentle vignette
     c = tonemap(c);
@@ -696,7 +753,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         .misc = simd_make_float4((float)view.drawableSize.width,
                                  (float)view.drawableSize.height,
                                  _intensityShown, 0),
-        .water = simd_make_float4(_waterLinear, 0),
+        .water = simd_make_float4(_waterLinear,
+                                  std::clamp((_intensityShown - 1.45f) / 0.9f, 0.0f, 1.0f)),
         .moon = simd_make_float4(moonDir, night),
     };
 
@@ -763,14 +821,21 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         [enc endEncoding];
     }
 
-    // 4) Composite: scene + bloom, tonemap, gamma, vignette.
+    // 4) Composite: scene + bloom + rain, tonemap, gamma, vignette.
     {
+        struct { simd_float2 resolution; float time; float rain; } compUni = {
+            simd_make_float2((float)view.drawableSize.width,
+                             (float)view.drawableSize.height),
+            t,
+            std::clamp((_intensityShown - 1.45f) / 0.9f, 0.0f, 1.0f),
+        };
         id<MTLRenderCommandEncoder> enc =
             [commands renderCommandEncoderWithDescriptor:pass];
         [enc setRenderPipelineState:_compositePipeline];
         [enc setFragmentTexture:_sceneTex atIndex:0];
         [enc setFragmentTexture:_bloomA atIndex:1];
         [enc setFragmentSamplerState:_sampler atIndex:0];
+        [enc setFragmentBytes:&compUni length:sizeof(compUni) atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
     }
