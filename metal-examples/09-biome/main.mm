@@ -484,10 +484,18 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
     } else if (shape == 1) {                // selection ring
         float r = length(p); float aa = fwidth(r);
         a = smoothstep(2.5*aa, 0.0, abs(r-0.9));
-    } else if (shape == 2) {                // plant: little tri-leaf
-        float d = min(min(length(p-float2(0,0.4)), length(p-float2(0.42,-0.2))),
-                      length(p-float2(-0.42,-0.2)));
-        a = smoothstep(0.55, 0.15, d);
+    } else if (shape == 2) {                // organic leafy sprig (params.x = seed)
+        float seed = in.params.x;
+        float ang = atan2(p.y, p.x), rad = length(p);
+        float lobe = 0.5 + 0.5*cos(ang*5.0 + seed);          // a few leaf lobes
+        float wob = 0.18*vnoise(float2(ang*2.5, 1.3)+seed);  // broken edge
+        float edge = 0.40 + 0.42*lobe + wob;
+        float aa = fwidth(rad);
+        float av = smoothstep(edge, edge-0.14-aa, rad);
+        if (av < 0.02) discard_fragment();
+        float tex = 0.70 + 0.5*vnoise(p*5.0 + seed);         // leaf mottling
+        float3 leaf = in.color.rgb * (0.55 + 0.7*rad) * tex; // dark base, bright tips
+        return float4(gammaOut(leaf)*av, av);
     } else if (shape == 3) {                // eye
         float r = length(p);
         float3 c = (r < 0.45) ? float3(0.05) : float3(0.98);
@@ -519,6 +527,21 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         uint bit = (uint(rowbits) >> uint(4-cx)) & 1u;
         if (bit == 0u) discard_fragment();
         return float4(gammaOut(in.color.rgb), in.color.a);
+    } else if (shape == 9) {                // woven nest bowl (params.x = seed)
+        float seed = in.params.x;
+        float ang = atan2(p.y, p.x), rad = length(p);
+        float outer = 0.90 + 0.10*vnoise(float2(ang*3.0, 2.0)+seed) + 0.05*sin(ang*6.0+seed);
+        float aa = fwidth(rad);
+        float disc = smoothstep(outer, outer-0.12-aa, rad);
+        if (disc < 0.02) discard_fragment();
+        float inner = 0.46 + 0.09*vnoise(float2(ang*4.0, 6.0)+seed);
+        float cup = smoothstep(inner-0.06, inner+0.12, rad);       // 0 hollow .. 1 rim
+        float strands = vnoise(float2(ang*20.0, rad*9.0)+seed);    // woven look
+        float3 twig = in.color.rgb * (0.55 + 0.75*strands);
+        float3 hollow = in.color.rgb * 0.22;
+        float3 col = mix(hollow, twig, cup);
+        col += in.color.rgb * 0.30 * smoothstep(outer-0.18, outer, rad); // rim highlight
+        return float4(gammaOut(col)*disc, disc);
     }
     return float4(gammaOut(in.color.rgb) * a, a * in.color.a);
 }
@@ -1659,7 +1682,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     simd_float2 shOff = simd_make_float2(0.22f, -0.22f);
     simd_float4 shGrn = simd_make_float4(0,0,0,0);
     for (const Nest &n : _nests) if (n.alive) {
-        float r = (1.0f + 1.5f * n.quality) * 1.05f;
+        float r = (1.2f + 1.6f * n.quality) * 0.95f;
         [self push:n.pos+shOff half:simd_make_float2(r,r) rot:0 shape:0
               color:simd_make_float4(0,0,0,0.18f) p:shGrn];
     }
@@ -1673,25 +1696,25 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         [self push:p.pos+shOff half:simd_make_float2(p.size*0.55f, p.size*0.55f)
               rot:0 shape:0 color:simd_make_float4(0,0,0,0.28f) p:shGrn];
 
-    // food
+    // food: organic leafy sprigs, each seeded from its position so no two match
     for (const Food &f : _food) {
         if (!f.alive) continue;
         float g = f.growth;
-        [self push:f.pos half:simd_make_float2(0.5f*g+0.2f, 0.5f*g+0.2f) rot:0 shape:2
-              color:simd_make_float4(0.30f, 0.55f+0.25f*g, 0.18f, 1.0f) p:simd_make_float4(0,0,0,0)];
+        float seed = f.pos.x*1.7f + f.pos.y*0.9f;
+        [self push:f.pos half:simd_make_float2(0.6f*g+0.28f, 0.6f*g+0.28f)
+              rot:fmodf(seed, 6.2831f) shape:2
+              color:simd_make_float4(0.26f, 0.50f+0.28f*g, 0.16f, 1.0f)
+                 p:simd_make_float4(seed,0,0,0)];
     }
 
-    // nests: woven mounds on the ground (bigger + brighter with quality)
+    // nests: irregular woven bowls (a single seeded organic sprite)
     for (const Nest &n : _nests) {
         if (!n.alive) continue;
-        float r = 1.0f + 1.5f * n.quality;
-        simd_float3 rim = simd_make_float3(0.44f, 0.31f, 0.16f);
-        [self push:n.pos half:simd_make_float2(r,r) rot:0 shape:0
-              color:simd_make_float4(rim*0.55f, 1.0f) p:simd_make_float4(0,0,0,0)];
-        [self push:n.pos half:simd_make_float2(r*0.58f,r*0.58f) rot:0 shape:0
-              color:simd_make_float4(0.12f,0.09f,0.06f,1.0f) p:simd_make_float4(0,0,0,0)];
-        [self push:n.pos half:simd_make_float2(r,r) rot:0 shape:1
-              color:simd_make_float4(rim, 1.0f) p:simd_make_float4(0,0,0,0)];
+        float r = 1.2f + 1.6f * n.quality;
+        float seed = n.pos.x*2.3f + n.pos.y*1.1f;
+        simd_float3 twig = simd_make_float3(0.46f, 0.33f, 0.17f);
+        [self push:n.pos half:simd_make_float2(r,r) rot:fmodf(seed, 6.2831f) shape:9
+              color:simd_make_float4(twig, 1.0f) p:simd_make_float4(seed,0,0,0)];
     }
 
     // critters: spine of soft blobs, head + eyes, status pips
