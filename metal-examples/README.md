@@ -172,6 +172,18 @@ emboldens nearby troops — and whose death sends a shock through the whole
 army), and a **weapon-vs-armor matrix**: arrows bounce off shields, axes
 crush them, pikes and bolts punch through heavy armor.
 
+### 09 — BIOME (life simulator)
+Care for a colony of critters whose every trait is read from a real, inherited
+**nucleotide genome** — built to the spec in `09-biome/DESIGN.md`. Diploid A/C/G/T
+genes on chromosomes, traits translated from the sequence, dominance read from
+the sequence, **meiosis with crossing-over + point mutation**, and X/Y sex — so
+the colony genuinely evolves across generations. Critters have procedural
+Verlet-spine bodies, utility-AI needs (hunger / energy / reproduction), forage
+regrowing food, court and breed, and catch a contagion whose spread is governed
+by disease-resistance genes. Click any critter to inspect its trait bars and its
+genome (both homologs shown as colored base ticks). F scatters food, Space
+pauses, `[`/`]` change speed, K culls, I introduces a stranger, R resets.
+
 ## Where to go from here
 
 - **Textures & samplers** — `MTLTexture`, `MTKTextureLoader`
