@@ -234,10 +234,15 @@ static Phenotype phenotypeOf(const Genome &g) {
     float hue = L(GPatHue);
     simd_float3 comp = simd_make_float3(1.0f, 1.0f, 1.0f) - p.color;
     p.color2 = (p.color + (comp - p.color) * (0.35f + 0.55f * hue)) * 0.92f;
-    // Heritable iris color (its own loci, so it recombines independently).
-    p.eyeColor = simd_make_float3(0.12f + 0.85f * L(GEyeR),
-                                  0.12f + 0.85f * L(GEyeG),
-                                  0.12f + 0.85f * L(GEyeB));
+    // Heritable iris color (its own loci, so it recombines independently). The
+    // channels are saturation-boosted around their mean so eyes read as vivid,
+    // varied colors (blue, green, amber, red) rather than muddy grays.
+    float er0 = L(GEyeR), eg0 = L(GEyeG), eb0 = L(GEyeB);
+    float emean = (er0 + eg0 + eb0) / 3.0f;
+    auto sat = [&](float v){ return std::clamp(emean + (v - emean) * 2.6f, 0.0f, 1.0f); };
+    p.eyeColor = simd_make_float3(0.10f + 0.85f * sat(er0),
+                                  0.10f + 0.85f * sat(eg0),
+                                  0.10f + 0.85f * sat(eb0));
     p.eyeShine = L(GEyeShine);
     return p;
 }
@@ -266,7 +271,8 @@ struct Critter {
     uint32_t targetMate;
     bool pregnant;
     float gestation;
-    Genome unborn;     // offspring genome fixed at conception
+    Genome unborn;     // first offspring's genome, fixed at conception
+    Genome mateGenome; // the father's genome, for meiosis of litter-mates
     float phase;       // slither phase
     int generation;
     bool sheltered;    // within a nest's radius this step
@@ -348,7 +354,7 @@ enum {
     WA_ClimateSlider, WA_Food, WA_FoodSlider, WA_Introduce, WA_Cull, WA_Reset,
     WA_TraitPick, WA_ExprSlider, WA_Splice, WA_ToggleGraph,
     WA_AddPredator, WA_CullPredators, WA_StartPopSlider, WA_LifespanSlider,
-    WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView,
+    WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView, WA_BirthRateSlider,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -514,10 +520,10 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
     } else if (shape == 3) {                // eye: pupil + heritable iris + sclera
         float r = length(p);
         float3 iris = in.color.rgb;
-        float3 c = (r < 0.28) ? float3(0.03)                 // pupil
-                 : (r < 0.60) ? iris * (0.6 + 0.5*(0.60-r))  // iris (radial shade)
-                 : float3(0.95);                             // sclera
-        float av = smoothstep(1.0, 0.72, r);
+        float3 c = (r < 0.26) ? float3(0.03)                 // pupil
+                 : (r < 0.74) ? iris * (0.72 + 0.5*(0.74-r)) // iris fills most of eye
+                 : float3(0.95);                             // thin sclera rim
+        float av = smoothstep(1.0, 0.78, r);
         return float4(gammaOut(c) * av, av);
     } else if (shape == 4) {                // solid rect (bars, panels, ticks)
         return float4(gammaOut(in.color.rgb) * in.color.a, in.color.a);
@@ -672,6 +678,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     int _foodTarget;        // carrying-capacity target (set from the HUD)
     int _startPop;          // colony size at reset (HUD)
     float _lifespanMul;     // global multiplier on genetic lifespan (HUD)
+    float _birthRate;       // reproduction multiplier: urge speed + litter size (HUD)
 
     // Sliding control panel + mouse widget state.
     std::vector<UIWidget> _widgets;
@@ -764,6 +771,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _flashT = 0;
     _startPop = 24;
     _lifespanMul = 1.0f;
+    _birthRate = 1.6f;
     _zoom = 1.0f;
     _panCenter = simd_make_float2(kWorldW*0.5f, kWorldH*0.5f);
     _worldDrag = false; _worldMoved = false;
@@ -852,10 +860,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v8 (eye color + pond grass) — if you don't see this line "
+    printf("=== BIOME v9 (birth rate + visible eyes) — if you don't see this line "
            "you're running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Heritable eye color, reed grass ringing the ponds that parts as critters\n"
-           "pass, nests kept off the water, and easier population growth.\n");
+           "New BIRTH RATE slider (urge speed + litter size) so the colony can grow.\n"
+           "Bigger, vivid, heritable eye colors — zoom in to see them.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -884,7 +892,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     c.heading = u(_rng) * 6.28f;
     for (int i = 0; i < kSpineNodes; i++) c.spine[i] = pos;
     c.age = (gen == 0) ? u(_rng) * 20.0f : 0.0f;   // seed colony has mixed ages
-    c.maturity = 14.0f;
+    c.maturity = 9.0f;
     c.energy = 0.7f + 0.3f * u(_rng);
     c.hunger = 0.2f * u(_rng);
     c.thirst = 0.2f * u(_rng);
@@ -1094,7 +1102,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         float adapt = adaptation(ph, _climate);
         c.energy -= (1.0f - adapt) * kThermalCost * dt;
         if (c.age > c.maturity && c.energy > 0.45f && !c.pregnant)
-            c.urge = std::min(c.urge + ph.fertility * (0.5f + 0.7f * adapt) * 0.085f * dt, 1.0f);
+            c.urge = std::min(c.urge + ph.fertility * (0.5f + 0.7f * adapt)
+                                       * 0.085f * _birthRate * dt, 1.0f);
 
         // --- sickness ---
         if (c.sick > 0) {
@@ -1221,6 +1230,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     Critter *dad = c.male ? &c : mate;
                     if (!mom->pregnant && mom->urge > 0.5f && dad->urge > 0.4f) {
                         mom->unborn = breed(mom->genome, dad->genome, _rng);
+                        mom->mateGenome = dad->genome;   // for litter-mate meiosis
                         mom->pregnant = true;
                         mom->gestation = 5.0f;
                         mom->urge = 0; dad->urge = 0;
@@ -1298,12 +1308,17 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 float bonus = 0.0f;
                 int ni = [self nestForOwner:c.id at:c.pos];
                 if (ni >= 0) { bpos = _nests[ni].pos; bonus = 0.20f * _nests[ni].quality; }
-                size_t before = _critters.size();
-                [self spawnCritter:c.unborn at:(bpos + simd_make_float2(u(_rng)-0.5f, u(_rng)-0.5f))
-                               gen:gen];
-                if (_critters.size() > before)
-                    _critters.back().energy = std::min(_critters.back().energy + bonus, 1.0f);
-                _births++;
+                int litter = std::max(1, (int)lroundf(_birthRate));   // pups this birth
+                for (int L = 0; L < litter; L++) {
+                    Genome kid = (L == 0) ? c.unborn
+                                          : breed(c.genome, c.mateGenome, _rng);  // distinct sibling
+                    size_t before = _critters.size();
+                    [self spawnCritter:kid
+                                    at:(bpos + simd_make_float2(u(_rng)-0.5f, u(_rng)-0.5f)) gen:gen];
+                    if (_critters.size() > before)
+                        _critters.back().energy = std::min(_critters.back().energy + bonus, 1.0f);
+                    _births++;
+                }
                 _generation = std::max(_generation, gen);
                 c.pregnant = false;
             }
@@ -1532,6 +1547,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     else if (act == WA_FoodSlider) _foodTarget = (int)(40.0f + f * 460.0f);
     else if (act == WA_StartPopSlider) _startPop = (int)(f * 120.0f);          // 0..120
     else if (act == WA_LifespanSlider) _lifespanMul = 0.4f + f * 2.1f;          // 0.4x..2.5x
+    else if (act == WA_BirthRateSlider) _birthRate = 0.5f + f * 3.0f;           // 0.5x..3.5x
 }
 
 - (BOOL)hudMouseDown:(simd_float2)pt bw:(float)bw bh:(float)bh {
@@ -1563,6 +1579,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_FoodSlider:
             case WA_StartPopSlider:
             case WA_LifespanSlider:
+            case WA_BirthRateSlider:
                 _dragAct = wg.act; _dragX = wg.x; _dragW = wg.w;
                 [self applySlider:wg.act
                              frac:std::clamp((pt.x-wg.x)/std::max(wg.w,1.0f), 0.0f, 1.0f)];
@@ -1700,7 +1717,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         text(x0, y, "LIFESPAN PCT", 11, cLabel);
         [self hudNumber:(int)(_lifespanMul*100.0f) x:x0+cw-46 y:y dw:5 dh:9 col:cTxt bw:bw bh:bh];
     }
-    slider(x0, row(18,12), cw, 18, (_lifespanMul-0.4f)/2.1f, WA_LifespanSlider);
+    slider(x0, row(18,10), cw, 18, (_lifespanMul-0.4f)/2.1f, WA_LifespanSlider);
+    {
+        float y = row(11,5);
+        text(x0, y, "BIRTH RATE PCT", 11, cLabel);
+        [self hudNumber:(int)(_birthRate*100.0f) x:x0+cw-52 y:y dw:5 dh:9 col:cTxt bw:bw bh:bh];
+    }
+    slider(x0, row(18,12), cw, 18, (_birthRate-0.5f)/3.0f, WA_BirthRateSlider);
 
     // --- PREDATORS ---
     text(x0, row(11,5), "PREDATORS", 11, cLabel);
@@ -1900,9 +1923,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             [self push:c.spine[sidx] half:simd_make_float2(rr,rr) rot:0 shape:0
                   color:simd_make_float4(srgb,1.0f) p:simd_make_float4(0,0,0,0)];
         }
-        // Eyes (size and iris color are both heritable traits).
-        float er = ph.eyeSize * ph.size;
-        simd_float4 eyec = simd_make_float4(ph.eyeColor * (0.7f + 0.6f*ph.eyeShine), 1.0f);
+        // Eyes (size and iris color are both heritable traits). Drawn a bit
+        // larger than life so the iris color is legible.
+        float er = ph.eyeSize * ph.size * 1.3f + 0.05f;
+        simd_float4 eyec = simd_make_float4(ph.eyeColor * (0.8f + 0.4f*ph.eyeShine), 1.0f);
         [self push:c.pos + fwd*0.18f*ph.size + perp*0.26f*ph.size
               half:simd_make_float2(er,er) rot:0 shape:3
               color:eyec p:simd_make_float4(0,0,0,0)];
@@ -1993,7 +2017,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v8 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v9 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         (int)_critters.size(), males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2156,7 +2180,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v8", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v9", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
