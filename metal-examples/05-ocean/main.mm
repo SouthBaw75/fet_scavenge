@@ -121,33 +121,66 @@ float fbm(float2 p) {
     return v;
 }
 
-// Atmospheric sky: blue overhead falling to warm haze at the horizon, a hot
-// HDR sun with an aureole, and drifting fbm cumulus that catch the light.
-// Everything here reflects in the water, so the water inherits its realism.
+// The sun's light color: white-gold when high, deep orange-red as it sinks.
+float3 sunTint(float elev) {
+    float low = clamp(1.0 - abs(elev - 0.04) / 0.24, 0.0, 1.0);
+    return mix(float3(1.0, 0.92, 0.75), float3(1.30, 0.42, 0.15), low);
+}
+
+// Time-of-day atmospheric sky. Everything derives from the sun's elevation:
+// midday blue, golden-hour warmth, a full layered sunset (yellow -> orange ->
+// pink -> purple climbing from the horizon), and violet dusk after the sun
+// slips under. The water reflects all of it.
 float3 skyColor(float3 rd, float3 sun, float time) {
     float sd = max(dot(rd, sun), 0.0);
-    float horizon = pow(1.0 - saturate(rd.y), 3.5);
-    float3 zenith = float3(0.10, 0.28, 0.58);
-    float3 haze = mix(float3(0.58, 0.68, 0.78),          // cool haze
-                      float3(0.98, 0.68, 0.40),          // warm near the sun
-                      pow(sd, 4.0));
-    float3 col = mix(zenith, haze, horizon);
-    col += float3(1.0, 0.72, 0.42) * pow(sd, 9.0) * 0.45;    // aureole
-    col += float3(1.0, 0.92, 0.75) * pow(sd, 1400.0) * 60.0; // HDR disc -> bloom
+    float elev = sun.y;
+    float sunset = clamp(1.0 - abs(elev - 0.04) / 0.24, 0.0, 1.0);
+    float dusk = smoothstep(0.02, -0.12, elev);
 
-    // Clouds: flat fbm layer projected onto the sky dome, drifting slowly,
-    // brighter on the sunward side with shadowed undersides.
+    float h = saturate(rd.y);
+    float3 zenith = mix(float3(0.10, 0.28, 0.58),        // midday blue
+                        float3(0.15, 0.10, 0.36),        // sunset blue-violet
+                        sunset);
+    zenith = mix(zenith, float3(0.035, 0.025, 0.10), dusk);   // indigo night
+
+    // Sunset bands: yellow at the waterline, up through orange and hot pink
+    // into purple — strongest toward the sun's side of the sky.
+    float azim = pow(saturate(dot(normalize(float3(rd.x, 0.0, rd.z) + 1e-4),
+                                  normalize(float3(sun.x, 0.0, sun.z) + 1e-4))
+                              * 0.5 + 0.5), 2.0);
+    float3 band = mix(float3(1.25, 0.90, 0.35),          // yellow
+                      float3(1.30, 0.50, 0.16),          // orange
+                      smoothstep(0.0, 0.10, h));
+    band = mix(band, float3(1.10, 0.36, 0.55), smoothstep(0.08, 0.24, h));  // pink
+    band = mix(band, float3(0.46, 0.22, 0.60), smoothstep(0.20, 0.45, h));  // purple
+    band *= 0.45 + 0.75 * azim;
+
+    float3 haze = mix(float3(0.58, 0.68, 0.78), band, sunset);
+    haze = mix(haze, float3(0.34, 0.13, 0.40) * (0.35 + 0.65 * azim), dusk);
+
+    float horizon = pow(1.0 - h, 3.5);
+    float3 col = mix(zenith, haze, horizon);
+
+    float3 st = sunTint(elev);
+    col += st * pow(sd, 9.0) * (0.45 + 1.10 * sunset);          // aureole swells low
+    col += st * pow(sd, 1400.0) * 60.0
+              * smoothstep(-0.025, 0.015, elev);                // disc sets below horizon
+
+    // Clouds: shadowed bases go purple at sunset, sunlit sides catch pink
+    // and orange; everything dims into dusk.
     if (rd.y > 0.02) {
         float2 cuv = rd.xz / (rd.y + 0.14) * 0.55
                    + float2(time * 0.008, time * 0.003);
         float shape = fbm(cuv);
         float cover = smoothstep(0.52, 0.74, shape);
         float detail = fbm(cuv * 2.7 + 11.0);
-        float3 cloud = mix(float3(0.52, 0.55, 0.60),     // shadowed base
-                           float3(1.08, 1.04, 0.98),     // sunlit top
-                           detail * 0.6 + 0.4 * pow(sd, 2.0));
-        cloud += float3(0.9, 0.55, 0.25) * pow(sd, 6.0) * 0.35;
-        float fade = smoothstep(0.02, 0.15, rd.y);       // thin out at horizon
+        float3 lit = mix(float3(1.08, 1.04, 0.98), float3(1.35, 0.52, 0.40), sunset);
+        lit = mix(lit, float3(0.30, 0.20, 0.38), dusk);
+        float3 shad = mix(float3(0.52, 0.55, 0.60), float3(0.40, 0.22, 0.44), sunset);
+        shad = mix(shad, float3(0.09, 0.07, 0.15), dusk);
+        float3 cloud = mix(shad, lit, detail * 0.6 + 0.4 * pow(sd, 2.0));
+        cloud += st * pow(sd, 6.0) * (0.35 + 0.5 * sunset);
+        float fade = smoothstep(0.02, 0.15, rd.y);
         col = mix(col, cloud, cover * fade * 0.85);
     }
     return col;
@@ -254,10 +287,11 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     // What's under the surface: deep water, plus light scattering through
     // the top of backlit crests. Both derive from the user's water color so
     // the hue stays coherent from depths to sunlit crest.
+    float day = smoothstep(-0.05, 0.30, sun.y);   // ambient light fades at dusk
     float3 wc = u.water.rgb;
-    float3 deep = wc * 0.35;
+    float3 deep = wc * 0.35 * (0.30 + 0.70 * day);
     float scatter = pow(max(dot(-V, sun), 0.0), 3.0) * max(in.crest, 0.0);
-    float3 body = deep + wc * 1.35 * scatter * 0.9;
+    float3 body = deep + wc * 1.35 * scatter * 0.9 * (0.25 + 0.75 * day);
 
     float3 color = mix(body, reflection, fresnel);
 
@@ -268,7 +302,7 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     float NoH = max(dot(n, H), 0.0);
     float NoL = max(dot(n, sun), 0.0);
     float spec = D_GGX(NoH, alpha) * 0.25;
-    color += float3(1.0, 0.85, 0.60) * spec * fresnel * NoL * 3.0;
+    color += sunTint(sun.y) * spec * fresnel * NoL * 3.0;
 
     // Whitecaps where the surface FOLDS (Jacobian pinch), not where it's
     // merely high — foam hugs breaking crests the way real water does.
@@ -278,7 +312,10 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     float trail = smoothstep(0.30, 0.85, in.crest * (0.5 + 0.5 * rough))
                 * smoothstep(0.45, 0.8, foamMask) * 0.5;
     float foam = clamp(fold * (0.55 + 0.45 * foamMask) + trail, 0.0, 1.0);
-    color = mix(color, float3(0.92, 0.95, 0.97), foam * 0.85);
+    // Foam is lit by the sky: white at noon, warm at sunset, dim at dusk.
+    float3 foamCol = float3(0.92, 0.95, 0.97) * (0.30 + 0.70 * day)
+                   + sunTint(sun.y) * 0.12 * clamp(1.0 - abs(sun.y - 0.04) / 0.24, 0.0, 1.0);
+    color = mix(color, foamCol, foam * 0.85);
 
     // Fade the far edge of the grid into the sky so it has no visible border.
     float3 rd = -V;
@@ -376,6 +413,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 @implementation OceanRenderer {
     float _intensity;        // sea state: 0.2 calm .. 2.5 storm
     float _intensityShown;   // eased value actually sent to the GPU
+    float _dayT;             // time of day: 0 = high noon .. 1 = dusk
+    float _dayShown;         // eased value driving the sun
     simd_float3 _waterLinear; // water body color, linear space
     id<MTLCommandQueue> _queue;
     id<MTLRenderPipelineState> _skyPipeline;
@@ -495,6 +534,8 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
 
     _intensity = 1.0f;
     _intensityShown = 1.0f;
+    _dayT = 0.72f;           // start in the golden hour (matches the old look)
+    _dayShown = 0.72f;
     _waterLinear = simd_make_float3(0.06f, 0.31f, 0.46f);   // classic sea teal
 
     // Sea-state controls: up/down arrows (or +/-) adjust smoothly, 1-5 are
@@ -517,9 +558,18 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         if (c == 21) { inten = 1.60f; return nil; }   // 4 heavy
         if (c == 23) { inten = 2.40f; return nil; }   // 5 storm
         if (c == 8) { [weakSelf openColorWheel]; return nil; }   // C
+        // Time of day: left = earlier, right = later; 6-9 presets.
+        float &day = weakSelf->_dayT;
+        if (c == 123) { day = std::max(day - 0.05f, 0.0f); return nil; }  // ←
+        if (c == 124) { day = std::min(day + 0.05f, 1.0f); return nil; }  // →
+        if (c == 22) { day = 0.05f; return nil; }     // 6 high noon
+        if (c == 26) { day = 0.62f; return nil; }     // 7 golden hour
+        if (c == 28) { day = 0.88f; return nil; }     // 8 sunset
+        if (c == 25) { day = 1.00f; return nil; }     // 9 dusk
         return event;
     }];
     printf("Sea state: Up/Down (or +/-) adjust wave intensity, 1-5 presets.\n"
+           "Time of day: Left/Right, or 6 noon · 7 golden · 8 sunset · 9 dusk.\n"
            "Color: press C for the color wheel — the water re-tints live.\n");
 
     _startTime = CACurrentMediaTime();
@@ -560,8 +610,17 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
     float t = (float)(CACurrentMediaTime() - _startTime);
     float aspect = (float)(view.drawableSize.width / view.drawableSize.height);
 
-    // Glide toward the requested sea state so changes swell in smoothly.
+    // Glide toward the requested sea state / time of day so changes ease in.
     _intensityShown += (_intensity - _intensityShown) * 0.06f;
+    _dayShown += (_dayT - _dayShown) * 0.05f;
+
+    // Sun path: ~48 degrees up at noon, sliding to just below the horizon at
+    // dusk, along a fixed azimuth (the camera sways across it).
+    float elevA = (48.0f - 56.0f * _dayShown) * (float)M_PI / 180.0f;
+    simd_float3 hdir = simd_normalize(simd_make_float3(0.8f, 0, 0.55f));
+    simd_float3 sunDir = simd_normalize(simd_make_float3(hdir.x * cosf(elevA),
+                                                         sinf(elevA),
+                                                         hdir.z * cosf(elevA)));
 
     // A boat-like camera: fixed position with a gentle bob (heavier seas
     // toss the boat harder), slowly panning back and forth across the sun.
@@ -583,7 +642,7 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
         .camRight = simd_make_float4(right, 0),
         .camUp = simd_make_float4(up, 0),
         .camFwd = simd_make_float4(fwd, focal),
-        .sun = simd_make_float4(simd_normalize(simd_make_float3(0.8f, 0.12f, 0.55f)), t),
+        .sun = simd_make_float4(sunDir, t),
         .misc = simd_make_float4((float)view.drawableSize.width,
                                  (float)view.drawableSize.height,
                                  _intensityShown, 0),
@@ -672,8 +731,13 @@ static simd_float4x4 LookAt(simd_float3 eye, simd_float3 right, simd_float3 up, 
                           _intensity < 0.85f ? "light chop" :
                           _intensity < 1.30f ? "moderate" :
                           _intensity < 2.00f ? "heavy" : "STORM";
+    const char *dayName = _dayT < 0.25f ? "midday" :
+                          _dayT < 0.55f ? "afternoon" :
+                          _dayT < 0.78f ? "golden hour" :
+                          _dayT < 0.95f ? "sunset" : "dusk";
     _fps.tick(view.window, [NSString stringWithFormat:
-        @"05 — Ocean ▸ Sea state x%.2f (%s) [↑/↓, 1-5] ▸ [C] color", _intensity, seaName]);
+        @"05 — Ocean ▸ %s [←/→, 6-9] ▸ Sea x%.2f (%s) [↑/↓, 1-5] ▸ [C] color",
+        dayName, _intensity, seaName]);
 }
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}
