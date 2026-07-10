@@ -41,6 +41,7 @@ static const int kMaxNests = 200;
 static const float kNestRadius = 3.2f;   // shelter + build range
 static const int kMaxWater = 12;
 static const int kMaxRipples = 700;
+static const int kMaxDecor = 9000;
 static const int kMaxInstances = 32768;
 static const int kMaxInFlight = 3;
 static const int kSpineNodes = 6;
@@ -338,6 +339,15 @@ struct Ripple {
     float age, life;
 };
 
+// Static ground cover — moss, clover, flowers, pebbles, twigs — scattered once
+// to carpet the world with damp-forest-floor detail.
+struct Decor {
+    simd_float2 pos;
+    float size, rot, seed;
+    int kind;             // 0 moss  1 clover  2 flower  3 pebble  4 twig
+    simd_float3 color;
+};
+
 // -------------------------------------------------------------- Instances ---
 
 struct InstC {
@@ -407,19 +417,22 @@ fragment float4 ground_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(
     float moist = fbm(w * 0.018 + 11.3);
     float elev  = fbm(w * 0.030 + 3.7);
 
-    float3 grass = mix(float3(0.13,0.27,0.11), float3(0.22,0.37,0.16), moist);
-    float3 dirt  = float3(0.32,0.25,0.15);
-    float3 sand  = float3(0.44,0.39,0.25);
-    float3 rock  = float3(0.30,0.30,0.32);
+    // Damp forest-floor palette: mossy greens over dark wet earth.
+    float3 moss  = mix(float3(0.09,0.17,0.07), float3(0.17,0.30,0.11), moist);
+    float3 dirt  = float3(0.16,0.12,0.08);       // dark damp earth
+    float3 mud   = float3(0.24,0.19,0.12);       // wet mud patches
+    float3 stone = float3(0.20,0.20,0.19);       // dark stone
 
-    float3 col = grass;
-    col = mix(col, dirt, 1.0 - smoothstep(0.28, 0.46, moist));                 // dry -> dirt
-    col = mix(col, sand, (1.0 - smoothstep(0.16,0.30,moist)) * smoothstep(0.35,0.52,elev)); // arid highs -> sand
-    col = mix(col, rock, smoothstep(0.60, 0.80, elev));                        // high -> rock
+    float3 col = moss;
+    col = mix(col, dirt, 1.0 - smoothstep(0.30, 0.50, moist));                 // dry -> bare earth
+    col = mix(col, mud,  (1.0 - smoothstep(0.20,0.34,moist)) * smoothstep(0.35,0.55,elev));
+    col = mix(col, stone, smoothstep(0.66, 0.82, elev) * 0.7);                 // sparse stone
 
-    // Fine texture: speckle + a touch of high-frequency variation.
-    col *= 0.90 + 0.18 * fbm(w * 0.75);
-    col += 0.045 * (fbm(w * 2.3 + 7.0) - 0.5);
+    // Mossy micro-texture: clumpy green mottling + fine speckle.
+    float moss2 = fbm(w * 0.9 + 4.0);
+    col = mix(col, col * float3(1.25,1.35,1.05), smoothstep(0.55,0.8,moss2) * 0.5*moist);
+    col *= 0.88 + 0.22 * fbm(w * 1.7);
+    col += 0.04 * (fbm(w * 3.1 + 7.0) - 0.5);
 
     // Relief shading — light from the upper-left over the elevation field.
     float e0 = fbm(w*0.05), ex = fbm((w+float2(1.6,0))*0.05), ey = fbm((w+float2(0,1.6))*0.05);
@@ -622,6 +635,22 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         if (av < 0.02) discard_fragment();
         float3 g = in.color.rgb * shade * (0.5 + 0.65*up);   // dark base, bright tips
         return float4(gammaOut(g)*av, av);
+    } else if (shape == 13) {               // moss clump (params.x = seed)
+        float seed = in.params.x;
+        float ang = atan2(p.y, p.x), rad = length(p);
+        float edge = 0.72 + 0.26*vnoise(float2(ang*2.5, 1.0)+seed);   // lumpy outline
+        float m = smoothstep(edge, edge-0.30, rad);
+        if (m < 0.02) discard_fragment();
+        float tex = 0.55 + 0.65*vnoise(p*6.0 + seed);                 // granular moss
+        float3 c = in.color.rgb * tex;
+        return float4(gammaOut(c)*m, m);
+    } else if (shape == 14) {               // little flower
+        float ang = atan2(p.y, p.x), rad = length(p);
+        float pr = 0.52 + 0.34*cos(ang*5.0);                         // 5 petals
+        float m = smoothstep(pr, pr-0.18, rad);
+        if (m < 0.02) discard_fragment();
+        float3 c = (rad < 0.24) ? float3(0.95,0.82,0.20) : in.color.rgb; // yellow center
+        return float4(gammaOut(c)*m, m);
     }
     return float4(gammaOut(in.color.rgb) * a, a * in.color.a);
 }
@@ -663,6 +692,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     std::vector<Nest> _nests;
     std::vector<Water> _water;
     std::vector<Ripple> _ripples;
+    std::vector<Decor> _decor;
     std::mt19937 _rng;
     int _initialPop;        // colony size at start, for growth %
     uint32_t _nextId;
@@ -765,6 +795,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _nests.reserve(kMaxNests);
     _water.reserve(kMaxWater);
     _ripples.reserve(kMaxRipples);
+    _decor.reserve(kMaxDecor);
 
     _rng.seed(0xB10E);
     _nextId = 1;
@@ -871,10 +902,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v10 (photoreal ponds) — if you don't see this line you're "
+    printf("=== BIOME v11 (mossy ground cover) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Ponds now reflect a drifting cloudy sky with green algae in the shallows,\n"
-           "ringed by a thick irregular grass band. Zoom in to see it.\n");
+           "Damp mossy ground carpeted with clover, flowers, pebbles and twigs for a\n"
+           "lifelike forest-floor look. Zoom in to explore it.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -932,6 +963,47 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
 - (void)introduceRandom {
     [self spawnCritter:randomGenome(_rng, -1) at:[self randomPos] gen:_generation];
+}
+
+// Scatter static ground cover across the world (skipping the ponds) to carpet
+// it in moss, clover, flowers, pebbles and twigs.
+- (void)generateDecor {
+    _decor.clear();
+    std::uniform_real_distribution<float> u(0,1);
+    const float cell = 1.2f;
+    for (float gy = 2.0f; gy < kWorldH-2.0f; gy += cell) {
+        for (float gx = 2.0f; gx < kWorldW-2.0f; gx += cell) {
+            if ((int)_decor.size() >= kMaxDecor) return;
+            if (u(_rng) > 0.72f) continue;                       // leave gaps
+            simd_float2 pos = simd_make_float2(gx + (u(_rng)-0.5f)*cell,
+                                               gy + (u(_rng)-0.5f)*cell);
+            bool inWater = false;
+            for (const Water &wp : _water)
+                if (simd_distance(pos, wp.pos) < wp.radius*1.05f) { inWater = true; break; }
+            if (inWater) continue;
+            Decor d; d.pos = pos; d.seed = u(_rng)*100.0f; d.rot = u(_rng)*6.2831f;
+            float r = u(_rng);
+            if (r < 0.54f) {                    // moss clump
+                d.kind = 0; d.size = 0.35f + 0.45f*u(_rng);
+                d.color = simd_make_float3(0.09f+0.06f*u(_rng), 0.26f+0.18f*u(_rng), 0.08f+0.05f*u(_rng));
+            } else if (r < 0.82f) {             // clover sprig
+                d.kind = 1; d.size = 0.40f + 0.35f*u(_rng);
+                d.color = simd_make_float3(0.13f, 0.40f+0.20f*u(_rng), 0.12f);
+            } else if (r < 0.90f) {             // little flower
+                d.kind = 2; d.size = 0.22f + 0.12f*u(_rng);
+                d.color = (u(_rng) < 0.62f) ? simd_make_float3(0.95f,0.95f,0.90f)
+                                            : simd_make_float3(0.72f,0.66f,0.90f);
+            } else if (r < 0.96f) {             // pebble
+                d.kind = 3; d.size = 0.24f + 0.22f*u(_rng);
+                float s = 0.26f + 0.18f*u(_rng);
+                d.color = simd_make_float3(s, s*0.95f, s*0.86f);
+            } else {                            // twig
+                d.kind = 4; d.size = 0.6f + 0.8f*u(_rng);
+                d.color = simd_make_float3(0.25f, 0.18f, 0.10f);
+            }
+            _decor.push_back(d);
+        }
+    }
 }
 
 - (void)spawnPredator:(simd_float2)pos {
@@ -1027,6 +1099,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         Water wtr; wtr.pos = [self randomPos]; wtr.radius = 4.0f + 4.0f * ur(_rng);
         _water.push_back(wtr);
     }
+    [self generateDecor];                       // ground cover (skips the ponds)
     for (int i = 0; i < _startPop; i++)
         [self spawnCritter:randomGenome(_rng, i % 2) at:[self randomPos] gen:0];
     [self scatterFood:220];
@@ -1800,6 +1873,17 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _scratch.clear();
     _hud.clear();
 
+    // ground cover (drawn first, under everything): moss, clover, flowers,
+    // pebbles, twigs — the carpet of forest-floor detail
+    for (const Decor &d : _decor) {
+        int shp = (d.kind==0) ? 13 : (d.kind==1) ? 2 : (d.kind==2) ? 14
+                : (d.kind==3) ? 0 : 4;
+        simd_float2 hlf = (d.kind==4) ? simd_make_float2(d.size, d.size*0.16f)   // twig: thin
+                                      : simd_make_float2(d.size, d.size);
+        [self push:d.pos half:hlf rot:d.rot shape:(float)shp
+              color:simd_make_float4(d.color, 1.0f) p:simd_make_float4(d.seed,0,0,0)];
+    }
+
     // water pools (lowest layer): one animated water sprite per pool
     for (const Water &wp : _water) {
         float seed = wp.pos.x*0.7f + wp.pos.y*1.3f;
@@ -2048,7 +2132,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v10 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v11 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         (int)_critters.size(), males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2211,7 +2295,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v10", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v11", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
