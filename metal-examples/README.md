@@ -215,8 +215,8 @@ nest with an energy **head start** scaled by its quality, and a nest gives
 Everything is driven from a **sliding control panel** — click the tab on the
 right edge to slide it in or out. It carries all the caretaker tools, worked
 entirely with the mouse: play/pause and time-scale, a **climate slider** and
-food **abundance** slider, scatter-food, add/cull/reset, **add/remove
-predators**, and a **gene lab**.
+food **abundance** slider, scatter-food, add/cull/reset, **start-population**
+and **lifespan** sliders, **add/remove predators**, and a **gene lab**.
 Pick a trait, set an expression dial, and hit *Splice Into Colony* to introduce
 individuals carrying an engineered **dominant** allele — then watch that
 experimental gene sweep through the population or get selected out. (The old

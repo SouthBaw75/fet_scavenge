@@ -323,7 +323,7 @@ enum {
     WA_None = 0, WA_Toggle, WA_Pause, WA_SpeedDn, WA_SpeedUp,
     WA_ClimateSlider, WA_Food, WA_FoodSlider, WA_Introduce, WA_Cull, WA_Reset,
     WA_TraitPick, WA_ExprSlider, WA_Splice, WA_ToggleGraph,
-    WA_AddPredator, WA_CullPredators,
+    WA_AddPredator, WA_CullPredators, WA_StartPopSlider, WA_LifespanSlider,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -544,6 +544,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float _histPred[kHistLen];   // predator population (normalized)
 
     int _foodTarget;        // carrying-capacity target (set from the HUD)
+    int _startPop;          // colony size at reset (HUD)
+    float _lifespanMul;     // global multiplier on genetic lifespan (HUD)
 
     // Sliding control panel + mouse widget state.
     std::vector<UIWidget> _widgets;
@@ -620,6 +622,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _spliceExpr = 0.9f;
     _showGraph = true;
     _dragAct = WA_None;
+    _startPop = 24;
+    _lifespanMul = 1.0f;
     [self resetColony];
 
     __unsafe_unretained BiomeRenderer *weakSelf = self;
@@ -770,7 +774,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _sampleTimer = 0;
     _histCount = _histHead = 0;
     _foodTarget = 320;
-    for (int i = 0; i < 24; i++)
+    for (int i = 0; i < _startPop; i++)
         [self spawnCritter:randomGenome(_rng, i % 2) at:[self randomPos] gen:0];
     [self scatterFood:220];
     for (int i = 0; i < 3; i++) [self spawnPredator:[self randomPos]];
@@ -856,7 +860,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         c.health = std::min(c.health + 0.02f * dt, 1.0f);
 
         // --- death ---
-        if (c.age > ph.lifespan || c.energy <= 0 || c.health <= 0) {
+        if (c.age > ph.lifespan * _lifespanMul || c.energy <= 0 || c.health <= 0) {
             c.alive = false; _deaths++;
             if (c.id == _selected) _selected = 0;
             continue;
@@ -1254,6 +1258,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     if (act == WA_ClimateSlider) _climateTrend = f * 1.5f - 0.75f;
     else if (act == WA_ExprSlider) _spliceExpr = std::clamp(f, 0.0f, 1.0f);
     else if (act == WA_FoodSlider) _foodTarget = (int)(40.0f + f * 460.0f);
+    else if (act == WA_StartPopSlider) _startPop = (int)(4.0f + f * 116.0f);   // 4..120
+    else if (act == WA_LifespanSlider) _lifespanMul = 0.4f + f * 2.1f;          // 0.4x..2.5x
 }
 
 - (BOOL)hudMouseDown:(simd_float2)pt bw:(float)bw bh:(float)bh {
@@ -1384,6 +1390,20 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         button(x0+w+4, y, w, 26, "CULL", WA_Cull, 0, false);
         button(x0+2*(w+4), y, w, 26, "RESET", WA_Reset, 0, false);
     }
+
+    // --- LIFE (start population + lifespan multiplier) ---
+    {
+        float y = row(11,5);
+        text(x0, y, "START POP", 11, cLabel);
+        [self hudNumber:_startPop x:x0+cw-46 y:y dw:5 dh:9 col:cTxt bw:bw bh:bh];
+    }
+    slider(x0, row(18,10), cw, 18, (_startPop-4)/116.0f, WA_StartPopSlider);
+    {
+        float y = row(11,5);
+        text(x0, y, "LIFESPAN PCT", 11, cLabel);
+        [self hudNumber:(int)(_lifespanMul*100.0f) x:x0+cw-46 y:y dw:5 dh:9 col:cTxt bw:bw bh:bh];
+    }
+    slider(x0, row(18,12), cw, 18, (_lifespanMul-0.4f)/2.1f, WA_LifespanSlider);
 
     // --- PREDATORS ---
     text(x0, row(11,5), "PREDATORS", 11, cLabel);
@@ -1698,7 +1718,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         {q.aspect, cMorph}, {q.girth, cMorph}, {q.eyeSize/0.25f, cMorph},
         {q.snout, cMorph}, {q.spikes, cMorph}, {q.pattern, cMorph},
         {sel->energy, cState}, {sel->hunger, cState}, {sel->health, cState},
-        {std::clamp(sel->age/q.lifespan,0.0f,1.0f), cState},
+        {std::clamp(sel->age/(q.lifespan*_lifespanMul),0.0f,1.0f), cState},
     };
     float by0 = py + 34;
     for (int i = 0; i < 16; i++) {
