@@ -223,9 +223,16 @@ static Phenotype phenotypeOf(const Genome &g) {
     p.fertility = 0.4f + 0.9f * L(GFert);
     p.resistance = L(GResist);
     p.lifespan = 55.0f + 70.0f * (1.0f - L(GMetab)) + 20.0f * (1.0f - sz);
-    p.color = simd_make_float3(0.35f + 0.6f * L(GColR),
-                               0.35f + 0.6f * L(GColG),
-                               0.35f + 0.6f * L(GColB));
+    // Coat color from three heritable loci (R/G/B), saturation-boosted around
+    // their mean so a "red" reads as vivid red and a "blue" as vivid blue — and
+    // a red x blue cross (high R + high B) comes out clearly purple. New hues
+    // keep emerging as the color genes recombine and mutate.
+    float cr0 = L(GColR), cg0 = L(GColG), cb0 = L(GColB);
+    float cmean = (cr0 + cg0 + cb0) / 3.0f;
+    auto csat = [&](float v){ return std::clamp(cmean + (v - cmean) * 2.1f, 0.0f, 1.0f); };
+    p.color = simd_make_float3(0.08f + 0.90f * csat(cr0),
+                               0.08f + 0.90f * csat(cg0),
+                               0.08f + 0.90f * csat(cb0));
     p.aspect = L(GAspect);
     p.girth = L(GGirth);
     p.snout = L(GSnout);
@@ -906,10 +913,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v12 (aging + decay) — if you don't see this line you're "
+    printf("=== BIOME v13 (vivid coats) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Critters slow and fade with age; the dead now settle into a corpse that\n"
-           "gradually rots and dissolves over ~22s instead of vanishing.\n");
+           "Coat colors are now vivid and saturated — breed a red with a blue and\n"
+           "watch purple offspring (and new hues) emerge over generations.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -2168,7 +2175,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v12 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v13 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2331,7 +2338,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v12", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v13", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
