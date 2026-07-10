@@ -132,7 +132,8 @@ float3 sunTint(float elev) {
 // midday blue, golden-hour warmth, a full layered sunset (yellow -> orange ->
 // pink -> purple climbing from the horizon), and violet dusk after the sun
 // slips under. The water reflects all of it.
-float3 skyColor(float3 rd, float3 sun, float time, float4 moon, float storm) {
+float3 skyColor(float3 rd, float3 sun, float time, float4 moon, float storm,
+                float cloudSeed) {
     float sd = max(dot(rd, sun), 0.0);
     float elev = sun.y;
     float sunset = clamp(1.0 - abs(elev - 0.04) / 0.24, 0.0, 1.0);
@@ -203,12 +204,22 @@ float3 skyColor(float3 rd, float3 sun, float time, float4 moon, float storm) {
     // Clouds: shadowed bases go purple at sunset, sunlit sides catch pink
     // and orange; everything dims into dusk.
     if (rd.y > 0.02) {
-        float2 cuv = rd.xz / (rd.y + 0.14) * 0.55
-                   + float2(time * 0.008, time * 0.003);
+        // Clouds drift with the wind AND deform as they go: a slowly moving
+        // domain warp makes them billow, merge, and dissolve rather than
+        // sliding rigidly. cloudSeed randomizes the whole sky per launch.
+        float2 base = rd.xz / (rd.y + 0.14) * 0.55 + cloudSeed;
+        float2 wind = float2(time * 0.012, time * 0.005) * (1.0 + 0.8 * storm);
+        float2 warp = (float2(vnoise(base * 0.6 + time * 0.007),
+                              vnoise(base * 0.6 - time * 0.0055 + 9.7)) - 0.5) * 1.3;
+        float2 cuv = base + wind + warp;
         float shape = fbm(cuv);
-        // Storm cloud decks close in: lower coverage threshold, full ceiling.
-        float cover = smoothstep(0.52 - 0.30 * storm, 0.74 - 0.28 * storm, shape);
-        float detail = fbm(cuv * 2.7 + 11.0);
+        // Coverage wanders over minutes, so the sky clears and fills on its
+        // own; storms (or live weather) override toward a closed ceiling.
+        float wander = (vnoise(float2(time * 0.006, cloudSeed * 3.1)) - 0.5)
+                     * 0.22 * (1.0 - storm);
+        float cover = smoothstep(0.52 - 0.30 * storm + wander,
+                                 0.74 - 0.28 * storm + wander, shape);
+        float detail = fbm(cuv * 2.7 + wind * 1.6 + 11.0);
         float3 lit = mix(float3(1.08, 1.04, 0.98), float3(1.35, 0.52, 0.40), sunset);
         lit = mix(lit, float3(0.30, 0.20, 0.38), dusk);
         lit = mix(lit, float3(0.14, 0.17, 0.24), night);   // moon-grey
@@ -262,7 +273,7 @@ fragment float4 sky_fragment(SkyVSOut in [[stage_in]],
     float3 rd = normalize(u.camFwd.xyz +
                           u.camRight.xyz * (ndc.x * aspect / focal) +
                           u.camUp.xyz * (ndc.y / focal));
-    float3 col = skyColor(rd, u.sun.xyz, u.sun.w, u.moon, u.water.w);
+    float3 col = skyColor(rd, u.sun.xyz, u.sun.w, u.moon, u.water.w, u.misc.w);
     return float4(col, 1.0);   // linear HDR; tonemap happens in the composite
 }
 
@@ -323,7 +334,7 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
     // What the mirror sees.
     float3 R = reflect(-V, n);
     R.y = max(R.y, 0.03);
-    float3 reflection = skyColor(normalize(R), sun, time, u.moon, u.water.w);
+    float3 reflection = skyColor(normalize(R), sun, time, u.moon, u.water.w, u.misc.w);
 
     // What's under the surface: deep water, plus light scattering through
     // the top of backlit crests. Both derive from the user's water color so
@@ -369,7 +380,8 @@ fragment float4 ocean_fragment(OceanVSOut in [[stage_in]],
 
     // Fade the far edge of the grid into the sky so it has no visible border.
     float3 rd = -V;
-    float3 horizon = skyColor(normalize(float3(rd.x, 0.015, rd.z)), sun, time, u.moon, u.water.w);
+    float3 horizon = skyColor(normalize(float3(rd.x, 0.015, rd.z)), sun, time, u.moon,
+                              u.water.w, u.misc.w);
     color = mix(color, horizon, smoothstep(60.0, 95.0, dist));
 
     // Rain fizz: drops peppering the surface as a fine, flickering sparkle.
@@ -546,6 +558,7 @@ static const char *NameForCode(int c) {
     float _intensityShown;   // eased value actually sent to the GPU
     float _dayT;             // time of day: 0 = high noon .. 1 = dusk
     float _dayShown;         // eased value driving the sun
+    float _cloudSeed;        // randomizes the cloud field per launch
     simd_float3 _waterLinear; // water body color, linear space
 
     // LIVE mode: mirror the real time of day and the real weather outside.
@@ -677,6 +690,7 @@ static const char *NameForCode(int c) {
     _intensityShown = 1.0f;
     _dayT = 0.72f;           // start in the golden hour (matches the old look)
     _dayShown = 0.72f;
+    _cloudSeed = (float)(arc4random_uniform(100000)) * 0.013f;  // fresh sky every run
     _waterLinear = simd_make_float3(0.06f, 0.31f, 0.46f);   // classic sea teal
 
     // Sea-state controls: up/down arrows (or +/-) adjust smoothly, 1-5 are
@@ -921,7 +935,7 @@ static const char *NameForCode(int c) {
         .sun = simd_make_float4(sunDir, t),
         .misc = simd_make_float4((float)view.drawableSize.width,
                                  (float)view.drawableSize.height,
-                                 _intensityShown, 0),
+                                 _intensityShown, _cloudSeed),
         .water = simd_make_float4(_waterLinear, overcast),
         .moon = simd_make_float4(moonDir, night),
     };
