@@ -200,8 +200,17 @@ trait bars and its genome (both homologs shown as colored base ticks).
 numbers rise and fall in out-of-phase **population cycles** (visible on the
 graph), sharp-eyed critters spot hunters and sprint away, and — because a coat
 that **matches the ground is spotted only up close** — predation selects for
-**camouflage**, reinforcing the climate's pressure on coloration. Predators
-breed when well-fed and starve when prey are scarce.
+**camouflage**. Predators breed when well-fed and starve when prey are scarce.
+
+**Sexual selection & nests.** Females don't just mate with whoever's nearest —
+they **choose the showiest male** in sight (vivid colour + prominent fins +
+size, scaled by condition, so it's an honest signal). That spreads ornament
+genes… but vivid coats are exactly what predators spot from farthest away, so
+**display trades off against survival** — the classic evolutionary tension, and
+you can watch it swing as you add or remove hunters. Expectant mothers **build
+nests**: woven mounds they return to and improve over time. Pups are born at the
+nest with an energy **head start** scaled by its quality, and a nest gives
+**cover** — critters near one are harder for predators to spot.
 
 Everything is driven from a **sliding control panel** — click the tab on the
 right edge to slide it in or out. It carries all the caretaker tools, worked

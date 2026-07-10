@@ -37,6 +37,8 @@ static const float kWorldH = 72.0f;
 static const int kMaxCritters = 500;
 static const int kMaxFood = 600;
 static const int kMaxPredators = 90;
+static const int kMaxNests = 200;
+static const float kNestRadius = 3.2f;   // shelter + build range
 static const int kMaxInstances = 32768;
 static const int kMaxInFlight = 3;
 static const int kSpineNodes = 6;
@@ -182,6 +184,13 @@ struct Phenotype {
 static inline float coatLuma(simd_float3 c) {
     return 0.299f * c.x + 0.587f * c.y + 0.114f * c.z;
 }
+// Colour vividness (saturation): how far the coat is from a drab gray. Vivid
+// coats are attractive to mates but also easier for predators to spot.
+static inline float coatVividness(simd_float3 c) {
+    float mx = std::max(std::max(c.x, c.y), c.z);
+    float mn = std::min(std::min(c.x, c.y), c.z);
+    return std::clamp((mx - mn) * 1.6f, 0.0f, 1.0f);
+}
 
 // How well a phenotype suits the current climate, 0 (lethal mismatch) .. 1
 // (ideal). want=1 in the cold (favor big + dark), want=0 in the heat.
@@ -225,7 +234,7 @@ static Phenotype phenotypeOf(const Genome &g) {
 
 // ------------------------------------------------------------------ World ---
 
-enum { AWander = 0, AForage = 1, ARest = 2, AMate = 3, AFlee = 4 };
+enum { AWander = 0, AForage = 1, ARest = 2, AMate = 3, AFlee = 4, ANest = 5 };
 
 struct Critter {
     uint32_t id;
@@ -249,8 +258,21 @@ struct Critter {
     Genome unborn;     // offspring genome fixed at conception
     float phase;       // slither phase
     int generation;
+    bool sheltered;    // within a nest's radius this step
     bool alive;
 };
+
+// Mate attractiveness (sexual-selection signal): vivid colour + prominent fins
+// + size, scaled by condition (energy·health) so it's an honest signal. Females
+// prefer high-ornament males — which also makes those males more visible to
+// predators, the classic survival-vs-display trade-off.
+static inline float ornament(const Critter &c) {
+    float vivid = coatVividness(c.ph.color);
+    float sizeN = std::clamp((c.ph.size - 0.6f) / 1.1f, 0.0f, 1.0f);
+    float condition = c.energy * c.health;
+    return (0.42f*vivid + 0.30f*c.ph.spikes + 0.18f*sizeN + 0.10f)
+         * (0.55f + 0.45f*condition);
+}
 
 struct Food {
     simd_float2 pos;
@@ -272,6 +294,17 @@ struct Predator {
     uint32_t targetPrey;
     float cooldown;    // brief pause after a kill
     float phase;
+    bool alive;
+};
+
+// A nest: a built breeding site. A female returns to hers to give birth (pups
+// start with an energy bonus scaled by nest quality) and it offers cover —
+// prey near a nest are harder for predators to spot. Nests improve while
+// tended and decay when abandoned.
+struct Nest {
+    simd_float2 pos;
+    uint32_t owner;
+    float quality;     // 0..1, built up over time
     bool alive;
 };
 
@@ -487,6 +520,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     std::vector<Critter> _critters;
     std::vector<Food> _food;
     std::vector<Predator> _predators;
+    std::vector<Nest> _nests;
     std::mt19937 _rng;
     uint32_t _nextId;
     int _generation;
@@ -573,6 +607,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _critters.reserve(kMaxCritters);
     _food.reserve(kMaxFood);
     _predators.reserve(kMaxPredators);
+    _nests.reserve(kMaxNests);
 
     _rng.seed(0xB10E);
     _nextId = 1;
@@ -636,10 +671,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return e;
     }];
 
-    printf("=== BIOME v3 (predators) — if you don't see this line you're running "
-           "an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Control panel is OPEN on the right edge. Add predators to see prey/"
-           "predator cycles and camouflage evolve. Splice genes; hide the graph with X.\n");
+    printf("=== BIOME v4 (mate choice + nests) — if you don't see this line you're "
+           "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
+           "Females now choose showy mates (sexual selection) and build nests to "
+           "raise young. Add predators to pit camouflage against display.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -725,6 +760,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _critters.clear();
     _food.clear();
     _predators.clear();
+    _nests.clear();
     _generation = 0;
     _births = _deaths = 0;
     _selected = 0;
@@ -758,6 +794,16 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 - (Critter *)critterById:(uint32_t)cid {
     for (Critter &c : _critters) if (c.id == cid && c.alive) return &c;
     return nullptr;
+}
+
+// Index of the nest owned by `owner`, creating one at `pos` if she has none.
+- (int)nestForOwner:(uint32_t)owner at:(simd_float2)pos {
+    for (size_t i = 0; i < _nests.size(); i++)
+        if (_nests[i].alive && _nests[i].owner == owner) return (int)i;
+    if ((int)_nests.size() >= kMaxNests) return -1;
+    Nest n; n.pos = pos; n.owner = owner; n.quality = 0.12f; n.alive = true;
+    _nests.push_back(n);
+    return (int)_nests.size() - 1;
 }
 
 // -------------------------------------------------------------------- Sim ---
@@ -816,6 +862,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             continue;
         }
 
+        // --- nest shelter status (cover from predators) ---
+        c.sheltered = false;
+        for (const Nest &nst : _nests)
+            if (nst.alive && simd_distance(nst.pos, c.pos) < kNestRadius) { c.sheltered = true; break; }
+
         // --- detect predators (sharper-eyed critters see them sooner) ---
         simd_float2 threatDir = simd_make_float2(0,0);
         float threatLvl = 0.0f;
@@ -834,11 +885,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         float sMate = (c.age > c.maturity && c.energy > 0.5f && !c.pregnant) ? c.urge : 0.0f;
         float sWander = 0.15f;
         float sFlee = threatLvl * 2.0f;              // survival trumps everything
+        float sNest = c.pregnant ? 0.8f : 0.0f;      // expectant mothers nest
         c.action = AWander;
         float best = sWander;
         if (sForage > best) { best = sForage; c.action = AForage; }
         if (sRest > best)   { best = sRest;   c.action = ARest; }
         if (sMate > best)   { best = sMate;   c.action = AMate; }
+        if (sNest > best)   { best = sNest;   c.action = ANest; }
         if (sFlee > best)   { best = sFlee;   c.action = AFlee; }
 
         // --- act ---
@@ -881,12 +934,28 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             Critter *mate = [self critterById:c.targetMate];
             bool ok = mate && mate->male != c.male && mate->age > mate->maturity;
             if (!ok) {
-                c.targetMate = 0; float bd = ph.sensory;
-                for (Critter &o : _critters) {
-                    if (!o.alive || o.id == c.id || o.male == c.male) continue;
-                    if (o.age <= o.maturity || o.energy < 0.4f) continue;
-                    float dd = simd_distance(o.pos, c.pos);
-                    if (dd < bd) { bd = dd; c.targetMate = o.id; }
+                c.targetMate = 0;
+                if (!c.male) {
+                    // Female choice: pick the showiest male within sight (weighted
+                    // toward nearer ones). Sexual selection on ornament genes.
+                    float bestScore = 0.0f;
+                    for (Critter &o : _critters) {
+                        if (!o.alive || o.male == c.male) continue;
+                        if (o.age <= o.maturity || o.energy < 0.4f) continue;
+                        float dd = simd_distance(o.pos, c.pos);
+                        if (dd > ph.sensory) continue;
+                        float score = ornament(o) * (1.0f - 0.5f * dd / ph.sensory);
+                        if (score > bestScore) { bestScore = score; c.targetMate = o.id; }
+                    }
+                } else {
+                    // Males court the nearest receptive female.
+                    float bd = ph.sensory;
+                    for (Critter &o : _critters) {
+                        if (!o.alive || o.male == c.male) continue;
+                        if (o.age <= o.maturity || o.energy < 0.4f) continue;
+                        float dd = simd_distance(o.pos, c.pos);
+                        if (dd < bd) { bd = dd; c.targetMate = o.id; }
+                    }
                 }
                 mate = [self critterById:c.targetMate];
             }
@@ -906,6 +975,20 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     }
                 } else desire = to / std::max(dd, 1e-3f);
             } else { wantSpeed *= 0.6f; desire = simd_make_float2(cosf(c.heading), sinf(c.heading)); }
+        } else if (c.action == ANest) {
+            // Expectant mother: head to her nest (build a new one if she has
+            // none) and tend it — a better nest gives her pups a head start.
+            int ni = [self nestForOwner:c.id at:c.pos];
+            if (ni >= 0) {
+                Nest &nst = _nests[ni];
+                simd_float2 to = nst.pos - c.pos;
+                float dd = simd_length(to);
+                if (dd < kNestRadius * 0.5f) {
+                    nst.quality = std::min(nst.quality + 0.06f * dt, 1.0f);
+                    wantSpeed = 0.0f;
+                    c.energy = std::min(c.energy + 0.03f * dt, 1.0f);
+                } else desire = to / std::max(dd, 1e-3f);
+            } else { wantSpeed *= 0.5f; desire = simd_make_float2(cosf(c.heading), sinf(c.heading)); }
         } else {  // wander
             c.heading += (u(_rng) - 0.5f) * 1.5f * dt;
             desire = simd_make_float2(cosf(c.heading), sinf(c.heading));
@@ -937,19 +1020,34 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                         * simd_length(c.vel) / std::max(ph.speed,1.0f);
         }
 
-        // --- gestation / birth ---
+        // --- gestation / birth (at the nest, with a quality-scaled head start) ---
         if (c.pregnant) {
             c.gestation -= dt;
             if (c.gestation <= 0) {
                 int gen = c.generation + 1;
-                [self spawnCritter:c.unborn at:(c.pos + simd_make_float2(u(_rng)-0.5f, u(_rng)-0.5f))
+                simd_float2 bpos = c.pos;
+                float bonus = 0.0f;
+                int ni = [self nestForOwner:c.id at:c.pos];
+                if (ni >= 0) { bpos = _nests[ni].pos; bonus = 0.20f * _nests[ni].quality; }
+                size_t before = _critters.size();
+                [self spawnCritter:c.unborn at:(bpos + simd_make_float2(u(_rng)-0.5f, u(_rng)-0.5f))
                                gen:gen];
+                if (_critters.size() > before)
+                    _critters.back().energy = std::min(_critters.back().energy + bonus, 1.0f);
                 _births++;
                 _generation = std::max(_generation, gen);
                 c.pregnant = false;
             }
         }
     }
+
+    // --- nests decay when untended; remove the empty ones ---
+    for (Nest &nst : _nests) if (nst.alive) {
+        nst.quality -= 0.012f * dt;
+        if (nst.quality <= 0.0f) nst.alive = false;
+    }
+    _nests.erase(std::remove_if(_nests.begin(), _nests.end(),
+                 [](const Nest &n){ return !n.alive; }), _nests.end());
 
     // --- predators: hunt prey; numbers rise and fall with the prey supply ---
     float groundLuma = 0.24f + 0.06f * _climate;   // grass tone by climate
@@ -970,9 +1068,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 if (!o.alive) continue;
                 float dd = simd_distance(o.pos, p.pos);
                 // Camouflaged coats (matching the ground) are spotted only up
-                // close; conspicuous ones are seen from far off.
+                // close; conspicuous / vivid ones — the ones mates prefer — are
+                // seen from far off. Nests offer cover.
                 float contrast = fabsf(coatLuma(o.ph.color) - groundLuma);
-                float visRange = sight * (0.35f + 1.5f * std::clamp(contrast,0.0f,1.0f));
+                float visRange = sight * (0.35f + 1.3f * std::clamp(contrast,0.0f,1.0f)
+                                          + 0.5f * coatVividness(o.ph.color));
+                if (o.sheltered) visRange *= 0.55f;
                 if (dd < visRange && dd < bestD) { bestD = dd; p.targetPrey = o.id; }
             }
             prey = [self critterById:p.targetPrey];
@@ -1355,6 +1456,19 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
               color:simd_make_float4(0.30f, 0.55f+0.25f*g, 0.18f, 1.0f) p:simd_make_float4(0,0,0,0)];
     }
 
+    // nests: woven mounds on the ground (bigger + brighter with quality)
+    for (const Nest &n : _nests) {
+        if (!n.alive) continue;
+        float r = 1.0f + 1.5f * n.quality;
+        simd_float3 rim = simd_make_float3(0.44f, 0.31f, 0.16f);
+        [self push:n.pos half:simd_make_float2(r,r) rot:0 shape:0
+              color:simd_make_float4(rim*0.55f, 1.0f) p:simd_make_float4(0,0,0,0)];
+        [self push:n.pos half:simd_make_float2(r*0.58f,r*0.58f) rot:0 shape:0
+              color:simd_make_float4(0.12f,0.09f,0.06f,1.0f) p:simd_make_float4(0,0,0,0)];
+        [self push:n.pos half:simd_make_float2(r,r) rot:0 shape:1
+              color:simd_make_float4(rim, 1.0f) p:simd_make_float4(0,0,0,0)];
+    }
+
     // critters: spine of soft blobs, head + eyes, status pips
     for (const Critter &c : _critters) {
         if (!c.alive) continue;
@@ -1495,9 +1609,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v3 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
-        (int)_critters.size(), males, females, (int)_predators.size(), _generation,
-        _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
+        @"09 — BIOME v4 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        (int)_critters.size(), males, females, (int)_predators.size(), (int)_nests.size(),
+        _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
 
 // ------------------------------------------------------------- Inspector ---
@@ -1627,7 +1741,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v3", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v4", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
