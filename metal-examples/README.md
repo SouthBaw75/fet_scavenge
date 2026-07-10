@@ -189,8 +189,12 @@ rules), so mismatched critters burn energy faster, breed less, and die younger �
 and the colony's average size and coloration visibly **track the environment
 over generations**. An **evolution graph** (top-left, hide it with its X
 button) plots the climate against the colony-average size, coat darkness,
-resistance, prey and predator populations so you can watch the drift happen; the
-ground tints frosty-blue to sun-baked-tan with the temperature. Critters have
+resistance, prey and predator populations so you can watch the drift happen. The
+world is a **procedural biome** — grass, dirt, sand, and rock painted from
+moisture/elevation noise with relief shading, **snow** creeping over high ground
+when it turns cold, and the whole palette shifting frosty-blue to sun-baked-tan
+with the temperature; **soft contact shadows** ground every critter, nest, and
+plant. Critters have
 procedural Verlet-spine bodies, utility-AI needs (hunger / energy / reproduction
 / **flee**), forage regrowing food, court and breed, and catch a contagion whose
 spread is governed by disease-resistance genes. Click any critter to inspect its
@@ -215,8 +219,9 @@ nest with an energy **head start** scaled by its quality, and a nest gives
 Everything is driven from a **sliding control panel** — click the tab on the
 right edge to slide it in or out. It carries all the caretaker tools, worked
 entirely with the mouse: play/pause and time-scale, a **climate slider** and
-food **abundance** slider, scatter-food, add/cull/reset, **start-population**
-and **lifespan** sliders, **add/remove predators**, and a **gene lab**.
+food **abundance** slider, scatter-food, add/cull/reset/**clear**,
+**start-population** and **lifespan** sliders, **add/remove predators**, and a
+**gene lab**.
 Pick a trait, set an expression dial, and hit *Splice Into Colony* to introduce
 individuals carrying an engineered **dominant** allele — then watch that
 experimental gene sweep through the population or get selected out. (The old

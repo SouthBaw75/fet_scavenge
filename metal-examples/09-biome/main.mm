@@ -324,6 +324,7 @@ enum {
     WA_ClimateSlider, WA_Food, WA_FoodSlider, WA_Introduce, WA_Cull, WA_Reset,
     WA_TraitPick, WA_ExprSlider, WA_Splice, WA_ToggleGraph,
     WA_AddPredator, WA_CullPredators, WA_StartPopSlider, WA_LifespanSlider,
+    WA_ClearColony,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -371,13 +372,39 @@ vertex FSOut fs_vertex(uint vid [[vertex_id]]) {
 fragment float4 ground_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(0)]]) {
     float2 ndc = float2(in.uv.x*2.0-1.0, 1.0-in.uv.y*2.0);
     float2 w = (ndc - u.offset) / u.scale;
-    float n = fbm(w * 0.08);
-    float3 col = mix(float3(0.14,0.26,0.12), float3(0.20,0.34,0.15), n);
-    col *= 0.9 + 0.15 * fbm(w * 0.6 + 5.0);
-    // Climate tint (u.pad = -1 cold .. +1 hot): frosty blue vs sun-baked tan.
+
+    // Biome fields: large-scale moisture + elevation choose the ground type.
+    float moist = fbm(w * 0.018 + 11.3);
+    float elev  = fbm(w * 0.030 + 3.7);
+
+    float3 grass = mix(float3(0.13,0.27,0.11), float3(0.22,0.37,0.16), moist);
+    float3 dirt  = float3(0.32,0.25,0.15);
+    float3 sand  = float3(0.44,0.39,0.25);
+    float3 rock  = float3(0.30,0.30,0.32);
+
+    float3 col = grass;
+    col = mix(col, dirt, 1.0 - smoothstep(0.28, 0.46, moist));                 // dry -> dirt
+    col = mix(col, sand, (1.0 - smoothstep(0.16,0.30,moist)) * smoothstep(0.35,0.52,elev)); // arid highs -> sand
+    col = mix(col, rock, smoothstep(0.60, 0.80, elev));                        // high -> rock
+
+    // Fine texture: speckle + a touch of high-frequency variation.
+    col *= 0.90 + 0.18 * fbm(w * 0.75);
+    col += 0.045 * (fbm(w * 2.3 + 7.0) - 0.5);
+
+    // Relief shading — light from the upper-left over the elevation field.
+    float e0 = fbm(w*0.05), ex = fbm((w+float2(1.6,0))*0.05), ey = fbm((w+float2(0,1.6))*0.05);
+    float shade = clamp(0.85 + (-(ex-e0)*0.8 - (ey-e0)*0.6) * 4.0, 0.55, 1.35);
+    col *= shade;
+
+    // Climate: frosty-blue cold vs sun-baked warm; snow on higher ground when
+    // it gets truly cold.
     float clim = clamp(u.pad, -1.0, 1.0);
-    float3 cold = float3(0.13, 0.20, 0.26), warm = float3(0.32, 0.28, 0.13);
-    col = mix(col, mix(cold, warm, clim*0.5+0.5), 0.28 * abs(clim));
+    float3 cold = float3(0.14,0.20,0.26), warm = float3(0.34,0.29,0.14);
+    col = mix(col, mix(cold, warm, clim*0.5+0.5), 0.24 * abs(clim));
+    float snow = smoothstep(0.45, 0.9, -clim) * smoothstep(0.35, 0.65, elev);
+    col = mix(col, float3(0.82,0.86,0.92), clamp(snow, 0.0, 0.85));
+
+    // Darken beyond the world bounds.
     float2 bd = max(float2(0.0)-w, w-float2(120.0,72.0));
     col *= 1.0 / (1.0 + max(max(bd.x,bd.y),0.0)*0.15);
     return float4(gammaOut(col), 1.0);
@@ -675,10 +702,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return e;
     }];
 
-    printf("=== BIOME v4 (mate choice + nests) — if you don't see this line you're "
+    printf("=== BIOME v5 (terrain + shadows) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Females now choose showy mates (sexual selection) and build nests to "
-           "raise young. Add predators to pit camouflage against display.\n");
+           "New biome ground (grass/dirt/sand/rock, relief + snow) and soft "
+           "shadows. POPULATION now has a CLEAR button; START POP goes to 0.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -760,6 +787,15 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _predators.clear();
 }
 
+// Empty the world of animals and nests (leaves the food and climate history),
+// so you can start from nothing or hand-place critters with ADD.
+- (void)clearColony {
+    _critters.clear();
+    _predators.clear();
+    _nests.clear();
+    _selected = 0;
+}
+
 - (void)resetColony {
     _critters.clear();
     _food.clear();
@@ -777,7 +813,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (int i = 0; i < _startPop; i++)
         [self spawnCritter:randomGenome(_rng, i % 2) at:[self randomPos] gen:0];
     [self scatterFood:220];
-    for (int i = 0; i < 3; i++) [self spawnPredator:[self randomPos]];
+    if (_startPop > 0)
+        for (int i = 0; i < 3; i++) [self spawnPredator:[self randomPos]];
 }
 
 - (void)selectAt:(simd_float2)world {
@@ -1258,7 +1295,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     if (act == WA_ClimateSlider) _climateTrend = f * 1.5f - 0.75f;
     else if (act == WA_ExprSlider) _spliceExpr = std::clamp(f, 0.0f, 1.0f);
     else if (act == WA_FoodSlider) _foodTarget = (int)(40.0f + f * 460.0f);
-    else if (act == WA_StartPopSlider) _startPop = (int)(4.0f + f * 116.0f);   // 4..120
+    else if (act == WA_StartPopSlider) _startPop = (int)(f * 120.0f);          // 0..120
     else if (act == WA_LifespanSlider) _lifespanMul = 0.4f + f * 2.1f;          // 0.4x..2.5x
 }
 
@@ -1280,6 +1317,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_ToggleGraph: _showGraph = !_showGraph; break;
             case WA_AddPredator: [self spawnPredator:[self randomPos]]; break;
             case WA_CullPredators: [self cullPredators]; break;
+            case WA_ClearColony: [self clearColony]; break;
             case WA_ClimateSlider:
             case WA_ExprSlider:
             case WA_FoodSlider:
@@ -1385,10 +1423,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // --- POPULATION ---
     text(x0, row(11,5), "POPULATION", 11, cLabel);
     {
-        float y = row(26,14), w = (cw-8)/3.0f;
-        button(x0, y, w, 26, "ADD", WA_Introduce, 0, false);
-        button(x0+w+4, y, w, 26, "CULL", WA_Cull, 0, false);
-        button(x0+2*(w+4), y, w, 26, "RESET", WA_Reset, 0, false);
+        float y = row(24,14), w = (cw-12)/4.0f;
+        button(x0, y, w, 24, "ADD", WA_Introduce, 0, false);
+        button(x0+(w+4), y, w, 24, "CULL", WA_Cull, 0, false);
+        button(x0+2*(w+4), y, w, 24, "RESET", WA_Reset, 0, false);
+        button(x0+3*(w+4), y, w, 24, "CLEAR", WA_ClearColony, 0, false);
     }
 
     // --- LIFE (start population + lifespan multiplier) ---
@@ -1397,7 +1436,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         text(x0, y, "START POP", 11, cLabel);
         [self hudNumber:_startPop x:x0+cw-46 y:y dw:5 dh:9 col:cTxt bw:bw bh:bh];
     }
-    slider(x0, row(18,10), cw, 18, (_startPop-4)/116.0f, WA_StartPopSlider);
+    slider(x0, row(18,10), cw, 18, _startPop/120.0f, WA_StartPopSlider);
     {
         float y = row(11,5);
         text(x0, y, "LIFESPAN PCT", 11, cLabel);
@@ -1467,6 +1506,25 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
     _scratch.clear();
     _hud.clear();
+
+    // Soft contact shadows — drawn first so every entity sits on top of its own
+    // shadow. Offset toward lower-right so the light reads as upper-left.
+    simd_float2 shOff = simd_make_float2(0.22f, -0.22f);
+    simd_float4 shGrn = simd_make_float4(0,0,0,0);
+    for (const Nest &n : _nests) if (n.alive) {
+        float r = (1.0f + 1.5f * n.quality) * 1.05f;
+        [self push:n.pos+shOff half:simd_make_float2(r,r) rot:0 shape:0
+              color:simd_make_float4(0,0,0,0.18f) p:shGrn];
+    }
+    for (const Food &f : _food) if (f.alive)
+        [self push:f.pos+simd_make_float2(0.10f,-0.10f) half:simd_make_float2(0.34f,0.34f)
+              rot:0 shape:0 color:simd_make_float4(0,0,0,0.13f) p:shGrn];
+    for (const Critter &c : _critters) if (c.alive)
+        [self push:c.pos+shOff half:simd_make_float2(c.ph.size*0.62f, c.ph.size*0.62f)
+              rot:0 shape:0 color:simd_make_float4(0,0,0,0.24f) p:shGrn];
+    for (const Predator &p : _predators) if (p.alive)
+        [self push:p.pos+shOff half:simd_make_float2(p.size*0.55f, p.size*0.55f)
+              rot:0 shape:0 color:simd_make_float4(0,0,0,0.28f) p:shGrn];
 
     // food
     for (const Food &f : _food) {
@@ -1629,7 +1687,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v4 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v5 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         (int)_critters.size(), males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -1761,7 +1819,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v4", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v5", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
