@@ -34,7 +34,8 @@
 
 static const float kWorldW = 120.0f;
 static const float kWorldH = 72.0f;
-static const int kMaxCritters = 500;
+static const int kMaxCritters = 800;   // living + still-decaying corpses
+static const float kDecaySecs = 22.0f; // how long a corpse takes to fade away
 static const int kMaxFood = 600;
 static const int kMaxPredators = 90;
 static const int kMaxNests = 200;
@@ -278,6 +279,7 @@ struct Critter {
     int generation;
     bool sheltered;    // within a nest's radius this step
     bool alive;
+    float decay;       // 0 while alive; 0->1 as a corpse rots, then removed
 };
 
 // Mate attractiveness (sexual-selection signal): vivid colour + prominent fins
@@ -652,7 +654,9 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         float3 c = (rad < 0.24) ? float3(0.95,0.82,0.20) : in.color.rgb; // yellow center
         return float4(gammaOut(c)*m, m);
     }
-    return float4(gammaOut(in.color.rgb) * a, a * in.color.a);
+    // Premultiplied by in.color.a so fading sprites (e.g. decaying corpses)
+    // dissolve correctly instead of brightening.
+    return float4(gammaOut(in.color.rgb) * a * in.color.a, a * in.color.a);
 }
 
 // HUD instances positioned directly in NDC.
@@ -902,10 +906,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v11 (mossy ground cover) — if you don't see this line you're "
+    printf("=== BIOME v12 (aging + decay) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Damp mossy ground carpeted with clover, flowers, pebbles and twigs for a\n"
-           "lifelike forest-floor look. Zoom in to explore it.\n");
+           "Critters slow and fade with age; the dead now settle into a corpse that\n"
+           "gradually rots and dissolves over ~22s instead of vanishing.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -948,6 +952,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     c.phase = u(_rng) * 6.28f;
     c.generation = gen;
     c.alive = true;
+    c.decay = 0.0f;
     _critters.push_back(c);
 }
 
@@ -1168,7 +1173,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
     for (size_t i = 0; i < _critters.size(); i++) {
         Critter &c = _critters[i];
-        if (!c.alive) continue;
+        if (!c.alive) {
+            // Corpse: coast to a stop, then slowly rot away over kDecaySecs.
+            c.vel *= std::max(0.0f, 1.0f - 5.0f * dt);
+            c.pos += c.vel * dt;
+            c.decay = std::min(c.decay + dt / kDecaySecs, 1.0f);
+            continue;
+        }
         const Phenotype &ph = c.ph;
 
         // --- needs ---
@@ -1357,9 +1368,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             wantSpeed *= 0.5f;
         }
 
-        // --- steer + integrate ---
+        // --- steer + integrate (the old move slower) ---
+        float ageT = std::clamp(c.age / (ph.lifespan * _lifespanMul), 0.0f, 1.0f);
+        float ageSlow = 1.0f - 0.45f * std::clamp((ageT - 0.5f) / 0.5f, 0.0f, 1.0f);
         simd_float2 wantVel = (simd_length(desire) > 1e-3f)
-            ? simd_normalize(desire) * wantSpeed : simd_make_float2(0,0);
+            ? simd_normalize(desire) * wantSpeed * ageSlow : simd_make_float2(0,0);
         c.vel += (wantVel - c.vel) * std::min(4.0f * dt, 1.0f);
         if (simd_length(c.vel) > 0.05f) c.heading = atan2f(c.vel.y, c.vel.x);
         c.pos += c.vel * dt;
@@ -1521,8 +1534,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
 
     // compact dead
+    // Remove only corpses that have fully decayed (living critters and rotting
+    // ones both stay).
     _critters.erase(std::remove_if(_critters.begin(), _critters.end(),
-                    [](const Critter &c){ return !c.alive; }), _critters.end());
+                    [](const Critter &c){ return !c.alive && c.decay >= 1.0f; }), _critters.end());
     _food.erase(std::remove_if(_food.begin(), _food.end(),
                 [](const Food &f){ return !f.alive; }), _food.end());
 
@@ -1532,6 +1547,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         _sampleTimer = kSampleSecs;
         float ss = 0, dd = 0, rr = 0; int n = 0;
         for (const Critter &c : _critters) {
+            if (!c.alive) continue;                    // corpses don't count
             ss += std::clamp((c.ph.size - 0.6f) / 1.1f, 0.0f, 1.0f);
             dd += 1.0f - coatLuma(c.ph.color);
             rr += c.ph.resistance;
@@ -1961,9 +1977,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (const Food &f : _food) if (f.alive)
         [self push:f.pos+simd_make_float2(0.10f,-0.10f) half:simd_make_float2(0.34f,0.34f)
               rot:0 shape:0 color:simd_make_float4(0,0,0,0.13f) p:shGrn];
-    for (const Critter &c : _critters) if (c.alive)
+    for (const Critter &c : _critters) {
+        if (!c.alive && c.decay >= 1.0f) continue;
+        float sa = 0.24f * (c.alive ? 1.0f : (1.0f - c.decay));   // corpse shadow fades
         [self push:c.pos+shOff half:simd_make_float2(c.ph.size*0.62f, c.ph.size*0.62f)
-              rot:0 shape:0 color:simd_make_float4(0,0,0,0.24f) p:shGrn];
+              rot:0 shape:0 color:simd_make_float4(0,0,0,sa) p:shGrn];
+    }
     for (const Predator &p : _predators) if (p.alive)
         [self push:p.pos+shOff half:simd_make_float2(p.size*0.55f, p.size*0.55f)
               rot:0 shape:0 color:simd_make_float4(0,0,0,0.28f) p:shGrn];
@@ -1989,70 +2008,84 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
               color:simd_make_float4(twig, 1.0f) p:simd_make_float4(seed,0,0,0)];
     }
 
-    // critters: spine of soft blobs, head + eyes, status pips
+    // critters: spine of soft blobs, head + eyes; age visibly and, once dead,
+    // settle into a corpse that rots and fades away over kDecaySecs.
     for (const Critter &c : _critters) {
-        if (!c.alive) continue;
+        if (!c.alive && c.decay >= 1.0f) continue;      // fully gone
+        bool corpse = !c.alive;
+        float A = corpse ? std::max(0.0f, 1.0f - c.decay) : 1.0f;  // fade out
+        float sink = corpse ? (1.0f - 0.35f * c.decay) : 1.0f;     // body settles
         const Phenotype &ph = c.ph;
-        // Primary + secondary coat colors, tinted by sickness and dimmed by
-        // failing health.
+
         simd_float3 base = ph.color;
         simd_float3 sec = ph.color2;
-        if (c.sick > 0) {
-            simd_float3 ill = simd_make_float3(0.70f, 0.85f, 0.30f);
-            base = base + (ill - base) * (c.sick * 0.6f);
-            sec  = sec  + (ill - sec)  * (c.sick * 0.6f);
+        if (!corpse) {
+            if (c.sick > 0) {
+                simd_float3 ill = simd_make_float3(0.70f, 0.85f, 0.30f);
+                base = base + (ill - base) * (c.sick * 0.6f);
+                sec  = sec  + (ill - sec)  * (c.sick * 0.6f);
+            }
+            if (c.health < 0.5f) { float f = 0.6f + 0.4f*c.health; base = base*f; sec = sec*f; }
+            // Aging: elders fade toward a worn, desaturated tone.
+            float ageT = std::clamp(c.age / (ph.lifespan * _lifespanMul), 0.0f, 1.0f);
+            float old = std::clamp((ageT - 0.55f) / 0.45f, 0.0f, 1.0f);
+            simd_float3 worn = simd_make_float3(0.46f, 0.43f, 0.37f);
+            base = base + (worn - base) * old * 0.5f;
+            sec  = sec  + (worn - sec)  * old * 0.5f;
+        } else {
+            // Corpse: desaturate toward decayed brown, darkening as it rots.
+            simd_float3 rotc = simd_make_float3(0.20f, 0.15f, 0.10f);
+            float k = 0.35f + 0.55f * c.decay;
+            base = base + (rotc - base) * k;
+            sec  = sec  + (rotc - sec)  * k;
         }
-        if (c.health < 0.5f) { float f = 0.6f + 0.4f*c.health; base = base*f; sec = sec*f; }
 
-        float widthMul = 1.15f - 0.40f * ph.aspect;   // longer bodies are slimmer
+        float widthMul = 1.15f - 0.40f * ph.aspect;
         simd_float2 fwd = simd_make_float2(cosf(c.heading), sinf(c.heading));
         simd_float2 perp = simd_make_float2(-fwd.y, fwd.x);
 
-        // Snout: a forward-projecting muzzle blob.
         if (ph.snout > 0.10f) {
-            float sr = ph.size * 0.28f * (0.5f + 0.6f * ph.snout);
+            float sr = ph.size * 0.28f * (0.5f + 0.6f * ph.snout) * sink;
             [self push:c.pos + fwd * (0.55f*ph.size*(0.4f+0.7f*ph.snout))
                   half:simd_make_float2(sr,sr) rot:0 shape:0
-                  color:simd_make_float4(base,1.0f) p:simd_make_float4(0,0,0,0)];
+                  color:simd_make_float4(base,A) p:simd_make_float4(0,0,0,0)];
         }
-        // Side fins / spines along the flanks.
         int nf = (int)(ph.spikes * 3.5f + 0.5f);
         for (int k = 0; k < nf && (k+1) < kSpineNodes; k++) {
             int node = k + 1;
             float un = node / (kSpineNodes - 1.0f);
             float rr = ph.size * 0.55f * (1.0f - 0.72f*un) * widthMul;
-            float fr = ph.size * 0.20f * (0.5f + 0.7f * ph.spikes);
+            float fr = ph.size * 0.20f * (0.5f + 0.7f * ph.spikes) * sink;
             float side = (k % 2 == 0) ? 1.0f : -1.0f;
             [self push:c.spine[node] + perp * side * (rr + fr*0.5f)
                   half:simd_make_float2(fr,fr) rot:0 shape:7
-                  color:simd_make_float4(sec*0.85f,1.0f) p:simd_make_float4(0,0,0,0)];
+                  color:simd_make_float4(sec*0.85f,A) p:simd_make_float4(0,0,0,0)];
         }
-        // Body: tapered, belly-bulged, banded segments (tail first).
         for (int sidx = kSpineNodes-1; sidx >= 0; sidx--) {
-            float un = sidx / (kSpineNodes - 1.0f);              // 0 head .. 1 tail
+            float un = sidx / (kSpineNodes - 1.0f);
             float taper = 1.0f - 0.72f * un;
             float bulge = 1.0f + ph.girth * 0.70f * sinf(un * 3.14159f);
-            float rr = ph.size * 0.55f * taper * bulge * widthMul;
+            float rr = ph.size * 0.55f * taper * bulge * widthMul * sink;
             float band = ph.pattern * (0.5f + 0.5f * sinf(un * 3.0f * 6.2831853f));
             simd_float3 srgb = base + (sec - base) * band;
             [self push:c.spine[sidx] half:simd_make_float2(rr,rr) rot:0 shape:0
-                  color:simd_make_float4(srgb,1.0f) p:simd_make_float4(0,0,0,0)];
+                  color:simd_make_float4(srgb,A) p:simd_make_float4(0,0,0,0)];
         }
-        // Eyes (size and iris color are both heritable traits). Drawn a bit
-        // larger than life so the iris color is legible.
-        float er = ph.eyeSize * ph.size * 1.3f + 0.05f;
-        simd_float4 eyec = simd_make_float4(ph.eyeColor * (0.8f + 0.4f*ph.eyeShine), 1.0f);
-        [self push:c.pos + fwd*0.18f*ph.size + perp*0.26f*ph.size
-              half:simd_make_float2(er,er) rot:0 shape:3
-              color:eyec p:simd_make_float4(0,0,0,0)];
-        [self push:c.pos + fwd*0.18f*ph.size - perp*0.26f*ph.size
-              half:simd_make_float2(er,er) rot:0 shape:3
-              color:eyec p:simd_make_float4(0,0,0,0)];
-        // Pregnancy pip.
-        if (c.pregnant)
-            [self push:c.pos + simd_make_float2(0, ph.size * 0.95f)
-                  half:simd_make_float2(0.18f,0.18f) rot:0 shape:7
-                  color:simd_make_float4(1.0f,0.5f,0.7f,1) p:simd_make_float4(0,0,0,0)];
+        // Eyes and pregnancy pip only while alive (eyes close in death).
+        if (!corpse) {
+            float er = ph.eyeSize * ph.size * 1.3f + 0.05f;
+            simd_float4 eyec = simd_make_float4(ph.eyeColor * (0.8f + 0.4f*ph.eyeShine), 1.0f);
+            [self push:c.pos + fwd*0.18f*ph.size + perp*0.26f*ph.size
+                  half:simd_make_float2(er,er) rot:0 shape:3
+                  color:eyec p:simd_make_float4(0,0,0,0)];
+            [self push:c.pos + fwd*0.18f*ph.size - perp*0.26f*ph.size
+                  half:simd_make_float2(er,er) rot:0 shape:3
+                  color:eyec p:simd_make_float4(0,0,0,0)];
+            if (c.pregnant)
+                [self push:c.pos + simd_make_float2(0, ph.size * 0.95f)
+                      half:simd_make_float2(0.18f,0.18f) rot:0 shape:7
+                      color:simd_make_float4(1.0f,0.5f,0.7f,1) p:simd_make_float4(0,0,0,0)];
+        }
     }
 
     // predators: larger dark-red hunters, same procedural spine + glowing eyes
@@ -2128,12 +2161,15 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     [cmd commit];
     _frameIndex = (_frameIndex + 1) % kMaxInFlight;
 
-    int males = 0, females = 0, sick = 0;
-    for (const Critter &c : _critters) { if (c.male) males++; else females++; if (c.sick>0) sick++; }
+    int males = 0, females = 0, sick = 0, living = 0;
+    for (const Critter &c : _critters) {
+        if (!c.alive) continue;
+        living++; if (c.male) males++; else females++; if (c.sick>0) sick++;
+    }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v11 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
-        (int)_critters.size(), males, females, (int)_predators.size(), (int)_nests.size(),
+        @"09 — BIOME v12 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
 
@@ -2151,7 +2187,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     simd_float4 lab = simd_make_float4(0.55f,0.68f,0.85f,1);
     simd_float4 val = simd_make_float4(0.96f,0.98f,1.0f,1);
 
-    int pop = (int)_critters.size();
+    int pop = 0; for (const Critter &c : _critters) if (c.alive) pop++;
     int growth = _initialPop > 0 ? (int)lroundf((pop - _initialPop) * 100.0f / _initialPop) : 0;
     simd_float4 gcol = growth >= 0 ? simd_make_float4(0.45f,0.90f,0.55f,1)   // green up
                                    : simd_make_float4(0.95f,0.45f,0.40f,1);  // red down
@@ -2295,7 +2331,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v11", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v12", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
