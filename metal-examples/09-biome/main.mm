@@ -582,6 +582,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     bool  _showGraph;              // evolution graph visible?
     int   _dragAct;                // slider being dragged (WA_None if none)
     float _dragX, _dragW;
+    int   _flashAct;               // last-clicked widget, for a click flash
+    float _flashVal, _flashT;      // _flashT counts down (seconds)
 
     simd_float2 _uScale, _uOffset;
     double _startTime, _lastFrameTime, _simAccum;
@@ -649,6 +651,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _spliceExpr = 0.9f;
     _showGraph = true;
     _dragAct = WA_None;
+    _flashAct = WA_None;
+    _flashVal = 0;
+    _flashT = 0;
     _startPop = 24;
     _lifespanMul = 1.0f;
     [self resetColony];
@@ -1303,6 +1308,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (int i = (int)_widgets.size() - 1; i >= 0; i--) {
         UIWidget &wg = _widgets[i];
         if (pt.x < wg.x || pt.x > wg.x+wg.w || pt.y < wg.y || pt.y > wg.y+wg.h) continue;
+        _flashAct = wg.act; _flashVal = wg.val; _flashT = 0.30f;   // click feedback
         switch (wg.act) {
             case WA_Toggle:    _panelTarget = (_panelTarget > 0.5f) ? 0.0f : 1.0f; break;
             case WA_Pause:     _paused = !_paused; break;
@@ -1365,11 +1371,18 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     simd_float4 cLabel = simd_make_float4(0.55f,0.68f,0.85f,1);
     simd_float4 cTxt   = simd_make_float4(0.92f,0.95f,1.0f,1);
     std::vector<UIWidget> &widgets = _widgets;
+    int flashAct = _flashAct; float flashVal = _flashVal, flashT = _flashT;
 
     auto button = [&](float x, float y, float w, float h, const char *t,
                       int act, float val, bool hot) {
-        rect(x, y, w, h, hot ? simd_make_float4(0.18f,0.42f,0.62f,1)
-                             : simd_make_float4(0.14f,0.17f,0.22f,1), 6);
+        simd_float4 bg = hot ? simd_make_float4(0.18f,0.42f,0.62f,1)
+                             : simd_make_float4(0.14f,0.17f,0.22f,1);
+        // Momentary click flash: light up and fade back over ~0.3s.
+        if (flashT > 0.0f && act == flashAct && val == flashVal) {
+            simd_float4 hi = simd_make_float4(0.45f,0.85f,1.0f,1.0f);
+            bg = bg + (hi - bg) * (flashT / 0.30f);
+        }
+        rect(x, y, w, h, bg, 6);
         float gh = h*0.5f, adv = gh*0.62f + gh*0.30f;
         float tw = (float)strlen(t) * adv - gh*0.30f;
         text(x + std::max((w-tw)*0.5f, 3.0f), y + (h-gh)*0.5f, t, gh, cTxt);
@@ -1484,6 +1497,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _lastFrameTime = now;
     if (dtRaw > 0) _smoothedFPS += (1.0f/dtRaw - _smoothedFPS) * 0.05f;
     _panelT += (_panelTarget - _panelT) * std::min(1.0f, 12.0f * dtRaw);  // slide
+    if (_flashT > 0) _flashT = std::max(0.0f, _flashT - dtRaw);           // click flash fades
 
     if (!_paused) {
         _simAccum += std::min(dtRaw * _timeScale, 0.5f);
