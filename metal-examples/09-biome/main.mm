@@ -40,6 +40,7 @@ static const int kMaxPredators = 90;
 static const int kMaxNests = 200;
 static const float kNestRadius = 3.2f;   // shelter + build range
 static const int kMaxWater = 12;
+static const int kMaxRipples = 700;
 static const int kMaxInstances = 32768;
 static const int kMaxInFlight = 3;
 static const int kSpineNodes = 6;
@@ -317,6 +318,12 @@ struct Water {
     float radius;
 };
 
+// An expanding ring left in the water as something moves across it (a wake).
+struct Ripple {
+    simd_float2 pos;
+    float age, life;
+};
+
 // -------------------------------------------------------------- Instances ---
 
 struct InstC {
@@ -582,6 +589,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     std::vector<Predator> _predators;
     std::vector<Nest> _nests;
     std::vector<Water> _water;
+    std::vector<Ripple> _ripples;
     std::mt19937 _rng;
     int _initialPop;        // colony size at start, for growth %
     uint32_t _nextId;
@@ -682,6 +690,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _predators.reserve(kMaxPredators);
     _nests.reserve(kMaxNests);
     _water.reserve(kMaxWater);
+    _ripples.reserve(kMaxRipples);
 
     _rng.seed(0xB10E);
     _nextId = 1;
@@ -873,6 +882,20 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _predators.clear();
 }
 
+// If something is moving across a pool, occasionally drop a ripple at its feet.
+- (void)waterRippleAt:(simd_float2)pos vel:(simd_float2)vel dt:(float)dt {
+    if (simd_length(vel) < 1.2f) return;
+    std::uniform_real_distribution<float> u(0,1);
+    for (const Water &wp : _water)
+        if (simd_distance(pos, wp.pos) < wp.radius) {
+            if (u(_rng) < 6.0f * dt && (int)_ripples.size() < kMaxRipples) {
+                Ripple rp; rp.pos = pos; rp.age = 0; rp.life = 1.3f;
+                _ripples.push_back(rp);
+            }
+            return;
+        }
+}
+
 // Empty the world of animals and nests (leaves the food and climate history),
 // so you can start from nothing or hand-place critters with ADD.
 - (void)clearColony {
@@ -909,6 +932,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _food.clear();
     _predators.clear();
     _nests.clear();
+    _ripples.clear();
     _generation = 0;
     _births = _deaths = 0;
     _selected = 0;
@@ -930,7 +954,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         [self spawnCritter:randomGenome(_rng, i % 2) at:[self randomPos] gen:0];
     [self scatterFood:220];
     if (_startPop > 0)
-        for (int i = 0; i < 3; i++) [self spawnPredator:[self randomPos]];
+        for (int i = 0; i < 2; i++) [self spawnPredator:[self randomPos]];
     _initialPop = (int)_critters.size();
 }
 
@@ -1004,7 +1028,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         float adapt = adaptation(ph, _climate);
         c.energy -= (1.0f - adapt) * kThermalCost * dt;
         if (c.age > c.maturity && c.energy > 0.45f && !c.pregnant)
-            c.urge = std::min(c.urge + ph.fertility * (0.5f + 0.7f * adapt) * 0.06f * dt, 1.0f);
+            c.urge = std::min(c.urge + ph.fertility * (0.5f + 0.7f * adapt) * 0.085f * dt, 1.0f);
 
         // --- sickness ---
         if (c.sick > 0) {
@@ -1183,6 +1207,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         if (c.sick > 0) c.pos -= c.vel * dt * c.sick * 0.5f;
         c.pos.x = std::clamp(c.pos.x, 1.0f, kWorldW - 1.0f);
         c.pos.y = std::clamp(c.pos.y, 1.0f, kWorldH - 1.0f);
+        [self waterRippleAt:c.pos vel:c.vel dt:dt];
         c.phase += (0.5f + simd_length(c.vel) * 0.5f) * dt * 6.0f;
 
         // --- Verlet spine follows the head (elongated bodies stretch it) ---
@@ -1226,6 +1251,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     _nests.erase(std::remove_if(_nests.begin(), _nests.end(),
                  [](const Nest &n){ return !n.alive; }), _nests.end());
+
+    // --- age water ripples and drop the faded ones ---
+    for (Ripple &rp : _ripples) rp.age += dt;
+    _ripples.erase(std::remove_if(_ripples.begin(), _ripples.end(),
+                   [](const Ripple &rp){ return rp.age >= rp.life; }), _ripples.end());
 
     // --- predators: hunt prey; numbers rise and fall with the prey supply ---
     float groundLuma = 0.24f + 0.06f * _climate;   // grass tone by climate
@@ -1291,6 +1321,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         p.pos += p.vel * dt;
         p.pos.x = std::clamp(p.pos.x, 1.0f, kWorldW - 1.0f);
         p.pos.y = std::clamp(p.pos.y, 1.0f, kWorldH - 1.0f);
+        [self waterRippleAt:p.pos vel:p.vel dt:dt];
         p.phase += (0.5f + simd_length(p.vel) * 0.4f) * dt * 6.0f;
         p.spine[0] = p.pos;
         float plink = 0.55f * p.size;
@@ -1675,6 +1706,14 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
               color:simd_make_float4(0.20f,0.44f,0.64f,0.75f) p:simd_make_float4(0,0,0,0)];
         [self push:wp.pos half:simd_make_float2(wp.radius, wp.radius) rot:0 shape:1
               color:simd_make_float4(0.35f,0.60f,0.78f,0.85f) p:simd_make_float4(0,0,0,0)];
+    }
+    // expanding wake ripples on the water surface
+    for (const Ripple &rp : _ripples) {
+        float t = rp.age / rp.life;                 // 0..1
+        float rad = 0.3f + 2.4f * t;                // grows outward
+        float alpha = (1.0f - t) * 0.5f;            // fades
+        [self push:rp.pos half:simd_make_float2(rad, rad) rot:0 shape:1
+              color:simd_make_float4(0.80f,0.90f,1.0f, alpha) p:simd_make_float4(0,0,0,0)];
     }
 
     // Soft contact shadows — drawn first so every entity sits on top of its own
