@@ -60,6 +60,7 @@ static const float kThermalCost  = 0.055f;  // energy/sec drain at full mismatch
 // species. Pairs bond, invest heavily in one or two young, follow experienced
 // elders, and play when times are good.
 static const float kPackRange    = 16.0f;   // hunters within this range hunt as one pack
+static const float kFeedSecs     = 1.3f;    // bite-and-shake duration before the prey is consumed
 static const float kElderFrac    = 0.68f;   // age fraction at which a critter is an "elder"
 static const float kCareSecs     = 16.0f;   // post-birth parental-care cooldown before urge rebuilds
 static const float kCamoRate     = 0.11f;   // camouflage ease speed (~1/9s to full → the spec's 5-15s)
@@ -332,6 +333,7 @@ struct Critter {
     bool sheltered;    // within a nest's radius this step
     bool alive;
     float decay;       // 0 while alive; 0->1 as a corpse rots, then removed
+    float grab;        // >0 while seized in a predator's jaws (can't flee)
     // --- Bubble Burrower life history ---
     uint32_t partner;  // bonded mate (0 = unbonded); pairs stay together for life
     float care;        // parental-care cooldown after a birth; urge stays low while >0
@@ -380,6 +382,7 @@ struct Predator {
     bool alive;
     uint32_t pack;     // pack identity (nearby hunters merge into one)
     int role;          // PR_Chaser / PR_FlankL / PR_FlankR / PR_Ambush this step
+    float feedT;       // >0 while biting/shaking a caught prey before consuming it
 };
 
 // A nest: a built breeding site. A female returns to hers to give birth (pups
@@ -1136,12 +1139,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v23 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v24 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: top-down RAIN as ground impacts — bright drop ticks + faint\n"
-           "expanding rings (world-space, tracks the camera). Plus the earlier\n"
-           "BLUE-GREEN base coat, night BIOLUMINESCENCE (now drawn over the\n"
-           "night wash so it actually glows), per-element SKY toggles, and a\n"
+           "New: predators now BITE, SHAKE, then CONSUME their catch (a ~1.3s\n"
+           "thrash before the prey is gone) instead of an instant kill. Plus\n"
+           "top-down RAIN impacts, BLUE-GREEN coat, night BIOLUMINESCENCE, the\n"
+           "per-element SKY toggles, and a\n"
            "SCROLLABLE control panel (scroll with the cursor over it to reach\n"
            "every control).\n");
 
@@ -1191,6 +1194,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     c.care = 0.0f;
     c.camo = 0.0f;
     c.bubbleAcc = u(_rng);
+    c.grab = 0.0f;
     _critters.push_back(c);
 }
 
@@ -1267,6 +1271,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     p.alive = true;
     p.pack = _nextPack++;        // its own pack until it meets others
     p.role = PR_Chaser;
+    p.feedT = 0.0f;
     _predators.push_back(p);
 }
 
@@ -1466,6 +1471,15 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             c.vel *= std::max(0.0f, 1.0f - 5.0f * dt);
             c.pos += c.vel * dt;
             c.decay = std::min(c.decay + dt / kDecaySecs, 1.0f);
+            continue;
+        }
+        if (c.grab > 0.0f) {
+            // Seized in a predator's jaws: it can't flee or act — the predator
+            // drives its position and the violent shake. Just count down the hold
+            // (the predator refreshes it each frame) and struggle a little.
+            c.grab = std::max(0.0f, c.grab - dt);
+            c.vel = simd_make_float2(0,0);
+            for (int s = 0; s < kSpineNodes; s++) c.spine[s] = c.pos;
             continue;
         }
         const Phenotype &ph = c.ph;
@@ -1926,7 +1940,34 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
         simd_float2 desire = simd_make_float2(0,0);
         float wantSpeed = 8.6f;                      // fast prey can outrun it
-        if (prey) {
+        float wt = (float)_worldTime;
+        if (p.feedT > 0.0f) {
+            // FEEDING: the prey is caught. Clamp it in the jaws, thrash it side to
+            // side, then swallow it. The hunter plants itself and whips its head.
+            p.feedT -= dt;
+            simd_float2 fwd = simd_make_float2(cosf(p.heading), sinf(p.heading));
+            simd_float2 perp = simd_make_float2(-fwd.y, fwd.x);
+            float whip = sinf(wt * 34.0f) * (0.6f + 0.4f * sinf(wt * 6.0f));  // violent shake
+            if (prey) {
+                prey->pos = p.pos + fwd*(p.size*0.55f) + perp*whip*(0.42f*p.size);
+                prey->vel = simd_make_float2(0,0);
+                prey->heading = p.heading + whip*0.6f;
+                prey->grab = 0.2f;                    // stays seized (refreshed each frame)
+            }
+            p.pos += perp * whip * 0.05f * p.size;    // hunter recoils with the shake
+            wantSpeed = 0.0f;
+            if (p.feedT <= 0.0f) {                    // swallow — the prey is consumed
+                if (prey) {
+                    prey->alive = false; _deaths++;
+                    prey->decay = 1.0f;               // eaten: gone, not a lingering corpse
+                    prey->grab = 0.0f;
+                    if (prey->id == _selected) _selected = 0;
+                }
+                p.energy = std::min(p.energy + 0.5f, 1.4f);
+                p.cooldown = 1.6f;
+                p.targetPrey = 0;
+            }
+        } else if (prey) {
             // Predict the prey's escape and take a geometric role around it.
             simd_float2 pv = prey->vel;
             float ps = simd_length(pv);
@@ -1943,12 +1984,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
             float catchR = 0.9f + p.size * 0.3f + prey->ph.size * 0.3f;
             if (rd < catchR) {
-                if (p.cooldown <= 0.0f) {             // kill
-                    prey->alive = false; _deaths++;
-                    if (prey->id == _selected) _selected = 0;
-                    p.energy = std::min(p.energy + 0.5f, 1.4f);
-                    p.cooldown = 1.6f;
-                    p.targetPrey = 0;
+                if (p.cooldown <= 0.0f) {             // seize it and start biting
+                    p.feedT = kFeedSecs;
+                    prey->grab = 0.2f;
+                    wantSpeed = 0.0f;
                 }
             } else {
                 float lead = std::clamp(rd / 12.0f, 0.0f, 2.0f);
@@ -2576,6 +2615,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             // on the move, and settles deep enough that a motionless burrower is
             // genuinely hard to spot.
             base = base + (simd_make_float3(0.20f,0.30f,0.15f)-base)*std::clamp(c.camo,0.0f,1.0f)*0.72f;
+            // Seized in a predator's jaws: flush an injured red as it's shaken.
+            if (c.grab > 0.0f) base = base + (simd_make_float3(0.62f,0.08f,0.08f)-base)*0.55f;
         } else {
             base = base + (simd_make_float3(0.20f,0.15f,0.10f)-base)*(0.35f+0.55f*c.decay);
         }
@@ -2751,7 +2792,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v23 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v24 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2914,7 +2955,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v23 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v24 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }

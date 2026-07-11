@@ -239,7 +239,10 @@ each member takes a **geometric role**: red **chasers** drive from behind, amber
 ahead to intercept the escape line, so the pack **encircles** its target instead
 of all charging the same spot (their dorsal spikes are tinted by role, so you can
 read the strategy). The pack shares sightings, so members converge even when they
-can't personally see the quarry. Sharp-eyed critters still spot hunters and
+can't personally see the quarry. On a catch a hunter doesn't kill instantly — it
+**seizes the prey in its jaws, thrashes it side to side** for a moment (the prey
+flushes an injured red and can't escape), and only then **consumes** it. Sharp-
+eyed critters still spot hunters and
 sprint away, and — because a coat that **matches the ground is spotted only up
 close** — predation selects for **camouflage**; and because packs cut out
 stragglers, it also rewards **staying in the group and trailing the elders**.
