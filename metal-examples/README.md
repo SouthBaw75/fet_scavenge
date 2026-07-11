@@ -205,6 +205,13 @@ panel scrubs the time of day, sets the day length, has **MAKE RAIN**, and
 carries independent **on/off toggles for each element** (DAY/NIGHT, CLOUDS,
 RAIN) so you can switch any of them off entirely.
 
+**Ambient audio.** Three looping layers — **day**, **night**, and **rain** —
+**crossfade** with the time of day and the weather (rain fades up and ducks the
+others). On top, a soft **crawl texture** rises and falls with how much of the
+colony is on the move, burrowers **blow bubbles**, and a prey **cries** the
+moment a predator seizes it (pooled so a pack's kills can overlap). Toggle it all
+with **SKY ▸ SOUND**. Audio files live in `09-biome/assets/`.
+
 A drifting **climate** (gentle seasons over a slow-wandering baseline) turns
 that variation into **directional natural selection**: cold favors large, dark
 bodies that hold heat, warmth favors small, pale ones (Bergmann's + Gloger's

@@ -22,6 +22,7 @@
 // CPU fixed-timestep sim; instanced-quad rendering (SDF shapes + digit font).
 
 #include "../common/app.h"
+#import <AVFoundation/AVFoundation.h>
 #include <simd/simd.h>
 #include <algorithm>
 #include <cmath>
@@ -443,7 +444,7 @@ enum {
     WA_AddPredator, WA_CullPredators, WA_StartPopSlider, WA_LifespanSlider,
     WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView, WA_BirthRateSlider,
     WA_DayLenSlider, WA_TimeOfDaySlider, WA_MakeRain,
-    WA_ToggleDayNight, WA_ToggleClouds, WA_ToggleRain, WA_SpawnPack,
+    WA_ToggleDayNight, WA_ToggleClouds, WA_ToggleRain, WA_SpawnPack, WA_ToggleSound,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -926,6 +927,18 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     bool _dayNightOn, _cloudsOn, _rainOn;   // HUD toggles for each sky element
     uint32_t _nextPack;             // next unique pack id to hand out
 
+    // Ambient audio: three looping layers (day / night / rain) whose volumes
+    // crossfade with the time of day and the weather, plus event one-shots.
+    AVAudioPlayer *_sndDay, *_sndNight, *_sndRain;
+    float _volDay, _volNight, _volRain;     // current eased volumes
+    bool _muted;                            // HUD sound toggle
+    NSArray<AVAudioPlayer *> *_cries;       // prey distress-cry pool (on seize)
+    int _cryIdx;
+    NSArray<AVAudioPlayer *> *_crawls;      // crawl-texture pool (colony movement)
+    int _crawlIdx; float _crawlTimer;
+    NSArray<AVAudioPlayer *> *_bubbleSfx;   // bubble-blowing pool
+    int _bubbleIdx; float _bubbleTimer;
+
     // Sliding control panel + mouse widget state.
     std::vector<UIWidget> _widgets;
     float _panelT, _panelTarget;   // 0 hidden .. 1 shown
@@ -1138,13 +1151,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v27 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v28 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: use PREDATORS > PACK to spawn a coordinated pack of 5 — they take\n"
-           "assigned roles (driver / flankers / ambusher) and encircle. Lone\n"
-           "hunters just chase. Also: organisms no longer pile up (they walk\n"
-           "around each other), and the EVOLUTION graph now has a labelled legend.\n");
+           "New: AMBIENT AUDIO — day / night / rain layers crossfade with the sky,\n"
+           "a crawl texture rises with colony movement, bubbles blow, and prey cry\n"
+           "when a predator seizes them. Toggle it with SKY > SOUND.\n");
 
+    [self setupAudio];
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
     _simAccum = 0;
@@ -1207,6 +1220,122 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
 - (void)introduceRandom {
     [self spawnCritter:randomGenome(_rng, -1) at:[self randomPos] gen:_generation];
+}
+
+// Locate an asset by name, trying a few paths relative to where the binary is
+// typically run from. Returns nil if the file is missing.
+- (NSString *)assetPath:(NSString *)name {
+    NSString *exeDir = [[[NSBundle mainBundle] executablePath] stringByDeletingLastPathComponent] ?: @".";
+    NSArray<NSString *> *candidates = @[
+        [NSString stringWithFormat:@"09-biome/assets/%@.mp3", name],          // run from metal-examples/
+        [NSString stringWithFormat:@"assets/%@.mp3", name],                   // run from 09-biome/
+        [NSString stringWithFormat:@"../09-biome/assets/%@.mp3", name],       // run from build/
+        [exeDir stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"../09-biome/assets/%@.mp3", name]],  // relative to the exe
+    ];
+    for (NSString *path in candidates)
+        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) return path;
+    fprintf(stderr, "audio: could not find %s.mp3 (place it in 09-biome/assets/)\n", name.UTF8String);
+    return nil;
+}
+
+// A looping ambience track, started at volume 0 (crossfaded up later).
+- (AVAudioPlayer *)loadLoop:(NSString *)name {
+    NSString *path = [self assetPath:name];
+    if (!path) return nil;
+    AVAudioPlayer *p = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL fileURLWithPath:path] error:nil];
+    if (p) { p.numberOfLoops = -1; p.volume = 0.0f; [p prepareToPlay]; [p play]; }
+    return p;
+}
+
+// Build a pool of `count` independent players for one clip, so the one-shot can
+// overlap with itself. `names` may list several variant files to draw from.
+- (NSArray<AVAudioPlayer *> *)loadPool:(NSArray<NSString *> *)names count:(int)count {
+    NSMutableArray<AVAudioPlayer *> *pool = [NSMutableArray array];
+    for (int i = 0; i < count; i++) {
+        NSString *path = [self assetPath:names[i % names.count]];
+        if (!path) continue;
+        AVAudioPlayer *p = [[AVAudioPlayer alloc]
+            initWithContentsOfURL:[NSURL fileURLWithPath:path] error:nil];
+        if (p) { p.numberOfLoops = 0; p.enableRate = YES; [p prepareToPlay]; [pool addObject:p]; }
+    }
+    return pool;
+}
+
+- (void)setupAudio {
+    _muted = false;
+    _volDay = _volNight = _volRain = 0.0f;
+    _sndDay   = [self loadLoop:@"day"];
+    _sndNight = [self loadLoop:@"night"];
+    _sndRain  = [self loadLoop:@"rain"];
+    // Event one-shots (pooled so they can overlap).
+    _cries      = [self loadPool:@[@"cry"] count:4];
+    _crawls     = [self loadPool:@[@"crawl1",@"crawl2",@"crawl3",@"crawl4"] count:4];
+    _bubbleSfx  = [self loadPool:@[@"bubble"] count:3];
+    _cryIdx = _crawlIdx = _bubbleIdx = 0;
+    _crawlTimer = 0.4f; _bubbleTimer = 1.0f;
+}
+
+// One-shot: a prey's cry when it's seized. Cycles the pool so overlaps play,
+// with a little random volume/pitch variation so repeats don't sound identical.
+- (void)playCry {
+    if (_muted || _cries.count == 0) return;
+    AVAudioPlayer *p = _cries[_cryIdx % _cries.count];
+    _cryIdx++;
+    std::uniform_real_distribution<float> u(0,1);
+    p.volume = 0.7f + 0.25f * u(_rng);
+    p.enableRate = YES;
+    p.rate = 0.92f + 0.16f * u(_rng);
+    p.currentTime = 0.0;
+    [p play];
+}
+
+// Crossfade the three ambience layers from the current game state each frame:
+// day vs night by the light level, ducking under rain, which fades up on top.
+- (void)updateAudio:(float)dt {
+    const float master = 0.75f;
+    float rainMix = std::clamp(_rain, 0.0f, 1.0f);
+    float mute = _muted ? 0.0f : 1.0f;
+    float dayT   = _daylight * (1.0f - 0.85f*rainMix) * master * mute;
+    float nightT = (1.0f - _daylight) * (1.0f - 0.85f*rainMix) * master * mute;
+    float rainT  = rainMix * master * mute;
+    float k = std::min(2.5f * dt, 1.0f);                 // ~0.4s crossfade
+    _volDay   += (dayT   - _volDay)   * k;
+    _volNight += (nightT - _volNight) * k;
+    _volRain  += (rainT  - _volRain)  * k;
+    if (_sndDay)   _sndDay.volume   = _volDay;
+    if (_sndNight) _sndNight.volume = _volNight;
+    if (_sndRain)  _sndRain.volume  = _volRain;
+
+    if (_muted || _paused) return;
+    std::uniform_real_distribution<float> u(0,1);
+    // Ambient crawl texture: occasional soft crawl sounds, more often the more
+    // of the colony is on the move — the sound of critters shuffling around you.
+    _crawlTimer -= dt;
+    if (_crawlTimer <= 0.0f) {
+        int moving = 0;
+        for (const Critter &c : _critters)
+            if (c.alive && simd_length(c.vel) > 1.2f) moving++;
+        if (moving > 0 && _crawls.count) {
+            AVAudioPlayer *p = _crawls[_crawlIdx % _crawls.count]; _crawlIdx++;
+            p.volume = 0.10f + 0.16f * u(_rng);
+            p.enableRate = YES; p.rate = 0.88f + 0.28f * u(_rng);
+            p.currentTime = 0.0; [p play];
+        }
+        float busy = std::clamp(moving / 45.0f, 0.0f, 1.0f);
+        _crawlTimer = 0.55f - 0.38f * busy + 0.25f * u(_rng);   // busier colony → more shuffling
+    }
+    // Bubble blowing: soft, occasional, only while bubbles are actually rising.
+    _bubbleTimer -= dt;
+    if (_bubbleTimer <= 0.0f) {
+        if (!_bubbles.empty() && _bubbleSfx.count) {
+            AVAudioPlayer *p = _bubbleSfx[_bubbleIdx % _bubbleSfx.count]; _bubbleIdx++;
+            p.volume = 0.14f + 0.16f * u(_rng);
+            p.enableRate = YES; p.rate = 0.9f + 0.25f * u(_rng);
+            p.currentTime = 0.0; [p play];
+        }
+        _bubbleTimer = 0.9f + 1.6f * u(_rng);
+    }
 }
 
 // Spawn a whole coordinated pack at once: n hunters clustered at one spot and
@@ -2041,6 +2170,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     p.feedT = kFeedSecs;
                     prey->grab = 0.2f;
                     wantSpeed = 0.0f;
+                    [self playCry];                   // the prey's distress cry
                 }
             } else {
                 float lead = std::clamp(rd / 12.0f, 0.0f, 2.0f);
@@ -2271,6 +2401,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_ToggleGraph: _showGraph = !_showGraph; break;
             case WA_AddPredator: [self spawnPredator:[self randomPos]]; break;
             case WA_SpawnPack:   [self spawnPack:5]; break;
+            case WA_ToggleSound: _muted = !_muted; break;
             case WA_CullPredators: [self cullPredators]; break;
             case WA_MakeRain:  _rainOn = true; _cloudsOn = true;
                                _cloudTarget = 0.9f; _rainTarget = 0.9f; _weatherTimer = 25.0f; break;
@@ -2465,7 +2596,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         button(x0+(w+4),    y, w, 22, "CLOUDS",  WA_ToggleClouds,   0, _cloudsOn);
         button(x0+2*(w+4),  y, w, 22, "RAIN",    WA_ToggleRain,     0, _rainOn);
     }
-    button(x0, row(24,12), cw, 24, "MAKE RAIN", WA_MakeRain, 0, _rain > 0.4f);
+    {
+        float y = row(24,12), w = (cw-4)/2.0f;
+        button(x0,       y, w, 24, "MAKE RAIN", WA_MakeRain, 0, _rain > 0.4f);
+        button(x0+w+4,   y, w, 24, _muted ? "SOUND OFF" : "SOUND ON", WA_ToggleSound, 0, !_muted);
+    }
 
     // --- GENE LAB ---
     text(x0, row(12,6), "SPLICE GENE", 12, simd_make_float4(0.70f,0.92f,0.66f,1));
@@ -2513,6 +2648,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         int guard = 0;
         while (_simAccum >= step && guard++ < 40) { [self simStep:(float)step]; _simAccum -= step; }
     }
+    [self updateAudio:std::min(dtRaw, 0.1f)];    // crossfade ambience even while paused
 
     float aspect = (float)(view.drawableSize.width / view.drawableSize.height);
     float s = std::min(2.0f*aspect/kWorldW, 2.0f/kWorldH) * 0.96f * _zoom;
@@ -2851,7 +2987,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v27 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v28 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -3031,7 +3167,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v27 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v28 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
