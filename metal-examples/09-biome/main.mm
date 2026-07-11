@@ -119,11 +119,37 @@ static uint32_t randomGene(std::mt19937 &rng) {
     return ((uint32_t)rng() ) ^ ((uint32_t)rng() << 1);
 }
 
+// Build a gene whose expression (GC content) lands near a target value, with
+// randomized base positions/identities so it still carries genetic variation.
+static uint32_t tintGene(float v, std::mt19937 &rng) {
+    std::uniform_real_distribution<float> u(0, 1);
+    int k = (int)lroundf(std::clamp(v, 0.0f, 1.0f) * 16.0f);
+    int idx[16]; for (int i = 0; i < 16; i++) idx[i] = i;
+    for (int i = 15; i > 0; i--) { int j = (int)(u(rng)*(i+1)); std::swap(idx[i], idx[j]); }
+    uint32_t g = 0;
+    for (int i = 0; i < 16; i++) {
+        int b = (i < k) ? (u(rng) < 0.5f ? 1 : 2)    // C or G  → GC (expressed)
+                        : (u(rng) < 0.5f ? 0 : 3);   // A or T  → AT
+        g |= ((uint32_t)b) << (2 * idx[i]);
+    }
+    return g;
+}
+
 static Genome randomGenome(std::mt19937 &rng, int forcedSex /* -1 any */) {
     Genome g;
     for (int h = 0; h < 2; h++)
         for (int i = 0; i < kNumGenes; i++) g.hom[h][i] = randomGene(rng);
     std::uniform_real_distribution<float> u(0, 1);
+    // Base coat: the species is naturally blue-green (jade → turquoise). Seed the
+    // colour genes low-red / mid-green / high-blue, with jitter so the founding
+    // colony varies around teal — and can still evolve toward other hues, or be
+    // spliced red/green, from there.
+    auto jit = [&](float c){ return std::clamp(c + (u(rng)-0.5f)*0.30f, 0.0f, 1.0f); };
+    for (int h = 0; h < 2; h++) {
+        g.hom[h][GColR] = tintGene(jit(0.20f), rng);
+        g.hom[h][GColG] = tintGene(jit(0.52f), rng);
+        g.hom[h][GColB] = tintGene(jit(0.82f), rng);
+    }
     int sex = (forcedSex >= 0) ? forcedSex : (u(rng) < 0.5f ? 0 : 1);
     g.sexAllele[0] = 0;                    // one X always
     g.sexAllele[1] = (sex == 0) ? 0 : 1;   // female XX, male XY
@@ -414,6 +440,7 @@ enum {
     WA_AddPredator, WA_CullPredators, WA_StartPopSlider, WA_LifespanSlider,
     WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView, WA_BirthRateSlider,
     WA_DayLenSlider, WA_TimeOfDaySlider, WA_MakeRain,
+    WA_ToggleDayNight, WA_ToggleClouds, WA_ToggleRain,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -763,11 +790,11 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         col*=0.88+0.32*smoothstep(0.25,edge,rr);                        // thin rim brighter
         float2 gp=floor(p*15.0+seed*3.0);                              // internal sparkle (glitter)
         float glit=smoothstep(0.90,0.99, fract(sin(dot(gp,float2(12.9898,78.233)))*43758.5453));
-        col+=glit*float3(1.0,1.0,0.85)*0.75; A=max(A, glit*0.9*in.color.a);
+        col+=glit*float3(0.80,0.92,1.0)*0.55; A=max(A, glit*0.9*in.color.a);  // cool sparkle, keeps the hue
         float gloss=smoothstep(0.6,0.0,length(p-float2(-0.16,0.42)));  // top specular sheen
-        col+=gloss*0.5; A=mix(A,0.8*in.color.a,gloss*0.55);
+        col+=gloss*float3(0.72,0.82,0.95)*0.40; A=mix(A,0.8*in.color.a,gloss*0.5);
         float rim=smoothstep(edge-0.13,edge-0.005,rr);                 // bright membrane edge
-        col=mix(col, bcol*1.6+0.18, rim*0.55); A=mix(A,0.72*in.color.a,rim);
+        col=mix(col, bcol*1.7+0.08, rim*0.55); A=mix(A,0.72*in.color.a,rim);
         A*=m; return float4(gammaOut(col)*A, A);
     } else if (shape == 16) {               // bubble dome (transparent air chamber)
         float rr=length(p), aa=fwidth(rr);
@@ -883,6 +910,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float _cloud, _rain;            // current overcast / rainfall, 0..1
     float _cloudTarget, _rainTarget;// where the weather is drifting toward
     float _weatherTimer;            // time until the next weather regime
+    bool _dayNightOn, _cloudsOn, _rainOn;   // HUD toggles for each sky element
     uint32_t _nextPack;             // next unique pack id to hand out
 
     // Sliding control panel + mouse widget state.
@@ -993,6 +1021,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _daylight = 1.0f; _skyWarm = 0.0f; _activity = 1.0f;
     _cloud = 0.15f; _rain = 0.0f;
     _cloudTarget = 0.15f; _rainTarget = 0.0f; _weatherTimer = 20.0f;
+    _dayNightOn = true; _cloudsOn = true; _rainOn = true;
     _nextPack = 1;
     _zoom = 1.0f;
     _panCenter = simd_make_float2(kWorldW*0.5f, kWorldH*0.5f);
@@ -1082,13 +1111,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v20 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v21 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: PACK-HUNTING predators. Nearby hunters coalesce into a pack that\n"
-           "focus-fires one isolated/weak quarry and takes geometric roles —\n"
-           "red chasers drive, amber flankers cut off the sides, violet ambushers\n"
-           "slip ahead to intercept — so the pack encircles instead of charging.\n"
-           "Tip: a tight colony that trails its elders is far safer than a straggler.\n");
+           "New: a naturally BLUE-GREEN base coat (evolves/splices from there),\n"
+           "a BIOLUMINESCENT night glow in each animal's dominant colour, and\n"
+           "per-element SKY toggles (DAY/NGT, CLOUDS, RAIN) in the control panel.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1368,25 +1395,31 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float season = sinf((float)_worldTime * (6.2831853f / kSeasonSecs));
     _climate = std::clamp(0.35f * season + _climateTrend, -1.0f, 1.0f);
 
-    // --- day/night: advance the clock and derive the light level ---
-    _timeOfDay += dt / std::max(_dayLen, 8.0f);
-    _timeOfDay -= floorf(_timeOfDay);                        // wrap 0..1
-    float sun = -cosf(_timeOfDay * 6.2831853f);              // -1 midnight .. +1 noon
-    _daylight = std::clamp(smoothstepf(-0.32f, 0.32f, sun), 0.0f, 1.0f);
-    _skyWarm  = (1.0f - smoothstepf(0.0f, 0.42f, fabsf(sun))) * 0.85f;  // peaks at dawn/dusk
-    // Crepuscular: most active at dawn & dusk, dozy at deep night, easy by day.
-    _activity = 0.35f + 0.65f * _daylight + 0.45f * _skyWarm;
-    _activity = std::clamp(_activity, 0.35f, 1.25f);
+    // --- day/night: advance the clock and derive the light level (toggleable) ---
+    if (_dayNightOn) {
+        _timeOfDay += dt / std::max(_dayLen, 8.0f);
+        _timeOfDay -= floorf(_timeOfDay);                    // wrap 0..1
+        float sun = -cosf(_timeOfDay * 6.2831853f);          // -1 midnight .. +1 noon
+        _daylight = std::clamp(smoothstepf(-0.32f, 0.32f, sun), 0.0f, 1.0f);
+        _skyWarm  = (1.0f - smoothstepf(0.0f, 0.42f, fabsf(sun))) * 0.85f;  // peaks at dawn/dusk
+        // Crepuscular: most active at dawn & dusk, dozy at deep night, easy by day.
+        _activity = std::clamp(0.35f + 0.65f * _daylight + 0.45f * _skyWarm, 0.35f, 1.25f);
+    } else {
+        _daylight = 1.0f; _skyWarm = 0.0f; _activity = 1.0f;   // permanent daylight
+    }
 
-    // --- weather: drift between clear, cloudy and rainy regimes ---
+    // --- weather: drift between clear, cloudy and rainy regimes; each element is
+    //     gated by its HUD toggle so it can be switched off entirely ---
     _weatherTimer -= dt;
     if (_weatherTimer <= 0.0f) {
         float r = u(_rng);
-        if (r < 0.45f)      { _cloudTarget = 0.08f + 0.18f*u(_rng); _rainTarget = 0.0f; }   // clear
-        else if (r < 0.78f) { _cloudTarget = 0.45f + 0.35f*u(_rng); _rainTarget = 0.0f; }   // cloudy
-        else                { _cloudTarget = 0.75f + 0.25f*u(_rng); _rainTarget = 0.45f + 0.5f*u(_rng); } // rain
+        if (_rainOn && r < 0.32f)        { _cloudTarget = 0.75f + 0.25f*u(_rng); _rainTarget = 0.45f + 0.5f*u(_rng); } // rain
+        else if (_cloudsOn && r < 0.68f) { _cloudTarget = 0.45f + 0.35f*u(_rng); _rainTarget = 0.0f; }   // cloudy
+        else                             { _cloudTarget = 0.08f + 0.18f*u(_rng); _rainTarget = 0.0f; }   // clear
         _weatherTimer = 18.0f + 30.0f * u(_rng);
     }
+    if (!_cloudsOn) _cloudTarget = 0.0f;                     // hard off-switches
+    if (!_rainOn)   _rainTarget  = 0.0f;
     _cloud += (_cloudTarget - _cloud) * std::min(0.5f * dt, 1.0f);   // ease over ~2s
     _rain  += (_rainTarget  - _rain ) * std::min(0.4f * dt, 1.0f);
 
@@ -2114,7 +2147,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_ToggleGraph: _showGraph = !_showGraph; break;
             case WA_AddPredator: [self spawnPredator:[self randomPos]]; break;
             case WA_CullPredators: [self cullPredators]; break;
-            case WA_MakeRain:  _cloudTarget = 0.9f; _rainTarget = 0.9f; _weatherTimer = 25.0f; break;
+            case WA_MakeRain:  _rainOn = true; _cloudsOn = true;
+                               _cloudTarget = 0.9f; _rainTarget = 0.9f; _weatherTimer = 25.0f; break;
+            case WA_ToggleDayNight: _dayNightOn = !_dayNightOn; break;
+            case WA_ToggleClouds:   _cloudsOn = !_cloudsOn; break;
+            case WA_ToggleRain:     _rainOn = !_rainOn; break;
             case WA_ClearColony: [self clearColony]; break;
             case WA_ZoomIn:    [self zoomBy:1.4f atNdc:simd_make_float2(0,0)]; break;
             case WA_ZoomOut:   [self zoomBy:1.0f/1.4f atNdc:simd_make_float2(0,0)]; break;
@@ -2290,11 +2327,18 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         const char *wx = _rain > 0.25f ? "RAIN" : (_cloud > 0.45f ? "CLOUDY" : "CLEAR");
         float y = row(11,5);
         text(x0, y, "SKY", 11, cLabel);
-        char sky[24]; snprintf(sky, sizeof sky, "%s  %s", phase, wx);
+        char sky[24]; snprintf(sky, sizeof sky, "%s  %s", _dayNightOn ? phase : "DAY", wx);
         text(x0+52, y, sky, 11, cTxt);
     }
     slider(x0, row(16,3), cw, 16, _timeOfDay, WA_TimeOfDaySlider);            // scrub time of day
     slider(x0, row(16,3), cw, 16, (_dayLen-20.0f)/220.0f, WA_DayLenSlider);   // day length
+    {
+        // Independent on/off toggles for each sky element (lit when enabled).
+        float y = row(22,4), w = (cw-8)/3.0f;
+        button(x0,          y, w, 22, "DAY/NGT", WA_ToggleDayNight, 0, _dayNightOn);
+        button(x0+(w+4),    y, w, 22, "CLOUDS",  WA_ToggleClouds,   0, _cloudsOn);
+        button(x0+2*(w+4),  y, w, 22, "RAIN",    WA_ToggleRain,     0, _rainOn);
+    }
     button(x0, row(24,12), cw, 24, "MAKE RAIN", WA_MakeRain, 0, _rain > 0.4f);
 
     // --- GENE LAB ---
@@ -2510,6 +2554,21 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         float sweep = 0.45f * sinf(c.phase);                          // fin power stroke
         simd_float4 finCol = simd_make_float4(base*1.05f + simd_make_float3(0.04f,0.06f,0.05f), A);
 
+        // Bioluminescence: after dark, a soft halo glows in the animal's dominant
+        // coat colour (drawn first so the body sits inside its own glow).
+        if (!corpse) {
+            float night = std::clamp(1.0f - _daylight, 0.0f, 1.0f);
+            if (night > 0.03f) {
+                simd_float3 gc = ph.color;                            // true genetic hue, not camouflaged
+                float mx = std::max(gc.x, std::max(gc.y, gc.z));
+                gc = gc * (1.0f / std::max(mx, 0.05f));               // vivid version of the dominant hue
+                float pulse = 0.82f + 0.18f * sinf(t * 1.7f + seed);  // gentle breathing shimmer
+                float ga = 0.55f * night * pulse * A;
+                [self push:c.pos half:simd_make_float2(S*2.1f, S*2.1f) rot:0 shape:0
+                      color:simd_make_float4(gc, ga) p:simd_make_float4(0,0,0,0)];
+            }
+        }
+
         // Four splayed translucent veined webbed fins (drawn first; the body overlaps their roots).
         // rear pair — the main paddles
         [self fin:c.pos - fwd*0.35f*S + perp*0.60f*S ang:c.heading + 2.15f + sweep
@@ -2644,7 +2703,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v20 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v21 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2807,7 +2866,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v20 (Bubble Burrower)", 1280, 960, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v21 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
