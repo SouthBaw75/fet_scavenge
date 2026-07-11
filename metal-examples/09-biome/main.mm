@@ -42,6 +42,7 @@ static const int kMaxNests = 200;
 static const float kNestRadius = 3.2f;   // shelter + build range
 static const int kMaxWater = 12;
 static const int kMaxRipples = 700;
+static const int kMaxBubbles = 900;
 static const int kMaxDecor = 9000;
 static const int kMaxInstances = 32768;
 static const int kMaxInFlight = 3;
@@ -55,6 +56,14 @@ static const int kSpineNodes = 6;
 // visible directional selection on top of drift and mutation.
 static const float kSeasonSecs   = 120.0f;  // one seasonal cycle (sim seconds)
 static const float kThermalCost  = 0.055f;  // energy/sec drain at full mismatch
+// Bubble Burrower life history: a slow-breeding, long-lived, deeply social
+// species. Pairs bond, invest heavily in one or two young, follow experienced
+// elders, and play when times are good.
+static const float kElderFrac    = 0.68f;   // age fraction at which a critter is an "elder"
+static const float kCareSecs     = 16.0f;   // post-birth parental-care cooldown before urge rebuilds
+static const float kCamoRate     = 0.11f;   // camouflage ease speed (~1/9s to full → the spec's 5-15s)
+static const float kColonyRange  = 14.0f;   // how far a critter senses colony-mates for cohesion
+static const float kElderRange   = 22.0f;   // how far followers look for an elder to trail
 static const int   kHistLen      = 120;     // trait-history samples (~sim minutes)
 static const float kSampleSecs   = 1.0f;    // one history sample per sim second
 
@@ -222,7 +231,9 @@ static Phenotype phenotypeOf(const Genome &g) {
     p.sensory = 10.0f + 62.0f * p.eyeSize;
     p.fertility = 0.4f + 0.9f * L(GFert);
     p.resistance = L(GResist);
-    p.lifespan = 55.0f + 70.0f * (1.0f - L(GMetab)) + 20.0f * (1.0f - sz);
+    // Long-lived (the spec's 10–15 "years"): a high floor so most reach the
+    // elder stage, with metabolism and size shading the exact span.
+    p.lifespan = 72.0f + 78.0f * (1.0f - L(GMetab)) + 24.0f * (1.0f - sz);
     // Coat color from three heritable loci (R/G/B), saturation-boosted around
     // their mean so a "red" reads as vivid red and a "blue" as vivid blue — and
     // a red x blue cross (high R + high B) comes out clearly purple. New hues
@@ -258,7 +269,8 @@ static Phenotype phenotypeOf(const Genome &g) {
 
 // ------------------------------------------------------------------ World ---
 
-enum { AWander = 0, AForage = 1, ARest = 2, AMate = 3, AFlee = 4, ANest = 5, ADrink = 6 };
+enum { AWander = 0, AForage = 1, ARest = 2, AMate = 3, AFlee = 4, ANest = 5, ADrink = 6,
+       APlay = 7, AHunker = 8 };
 
 struct Critter {
     uint32_t id;
@@ -287,6 +299,11 @@ struct Critter {
     bool sheltered;    // within a nest's radius this step
     bool alive;
     float decay;       // 0 while alive; 0->1 as a corpse rots, then removed
+    // --- Bubble Burrower life history ---
+    uint32_t partner;  // bonded mate (0 = unbonded); pairs stay together for life
+    float care;        // parental-care cooldown after a birth; urge stays low while >0
+    float camo;        // eased camouflage 0..1 (ramps up when still, decays when moving)
+    float bubbleAcc;   // accumulator that paces rising bubble emission
 };
 
 // Mate attractiveness (sexual-selection signal): vivid colour + prominent fins
@@ -346,6 +363,13 @@ struct Water {
 struct Ripple {
     simd_float2 pos;
     float age, life;
+};
+
+// A small air bubble a Bubble Burrower blows — rising and wobbling before it
+// pops. Emitted near water, during playful bouts, and in courtship displays.
+struct Bubble {
+    simd_float2 pos, vel;
+    float age, life, size, seed;
 };
 
 // Static ground cover — moss, clover, flowers, pebbles, twigs — scattered once
@@ -751,6 +775,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     std::vector<Nest> _nests;
     std::vector<Water> _water;
     std::vector<Ripple> _ripples;
+    std::vector<Bubble> _bubbles;
     std::vector<Decor> _decor;
     std::mt19937 _rng;
     int _initialPop;        // colony size at start, for growth %
@@ -854,6 +879,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _nests.reserve(kMaxNests);
     _water.reserve(kMaxWater);
     _ripples.reserve(kMaxRipples);
+    _bubbles.reserve(kMaxBubbles);
     _decor.reserve(kMaxDecor);
 
     _rng.seed(0xB10E);
@@ -961,10 +987,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v15 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v16 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "The colony is now Bubble Burrowers: big translucent speckled membrane\n"
-           "bodies that paddle along on four splayed veined webbed fins, low navy eyes.\n");
+           "Bubble Burrower life history is now live: slow breeding (1-2 young,\n"
+           "long parental care, bonded pairs, long lives), colony grouping that\n"
+           "trails elders, playful bubble-blowing bouts, and hunker-and-hide\n"
+           "camouflage that eases in over several seconds.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1008,6 +1036,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     c.generation = gen;
     c.alive = true;
     c.decay = 0.0f;
+    c.partner = 0;
+    c.care = 0.0f;
+    c.camo = 0.0f;
+    c.bubbleAcc = u(_rng);
     _critters.push_back(c);
 }
 
@@ -1105,6 +1137,25 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         }
 }
 
+// Blow a little air bubble that rises and pops. `strength` (0..1) paces how
+// often bubbles appear; each critter carries an accumulator so emission is
+// smooth and frame-rate independent.
+- (void)emitBubble:(Critter &)c strength:(float)strength dt:(float)dt {
+    if ((int)_bubbles.size() >= kMaxBubbles) return;
+    std::uniform_real_distribution<float> u(0,1);
+    c.bubbleAcc += strength * 3.0f * dt;
+    if (c.bubbleAcc < 1.0f) return;
+    c.bubbleAcc -= 1.0f;
+    simd_float2 fwd = simd_make_float2(cosf(c.heading), sinf(c.heading));
+    Bubble b;
+    b.pos = c.pos + fwd * (0.6f * c.ph.size) + simd_make_float2((u(_rng)-0.5f)*0.4f, (u(_rng)-0.5f)*0.4f);
+    b.vel = simd_make_float2((u(_rng)-0.5f)*0.6f, 0.8f + u(_rng)*0.7f);   // drifts up
+    b.age = 0; b.life = 1.1f + u(_rng)*0.9f;
+    b.size = 0.10f + u(_rng)*0.14f;
+    b.seed = u(_rng)*10.0f;
+    _bubbles.push_back(b);
+}
+
 // Empty the world of animals and nests (leaves the food and climate history),
 // so you can start from nothing or hand-place critters with ADD.
 - (void)clearColony {
@@ -1142,6 +1193,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _predators.clear();
     _nests.clear();
     _ripples.clear();
+    _bubbles.clear();
     _generation = 0;
     _births = _deaths = 0;
     _selected = 0;
@@ -1251,9 +1303,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // pushes the colony's size and coloration to track the environment.
         float adapt = adaptation(ph, _climate);
         c.energy -= (1.0f - adapt) * kThermalCost * dt;
-        if (c.age > c.maturity && c.energy > 0.45f && !c.pregnant)
+        // Parental care: after a birth both parents spend a long stretch raising
+        // the young before the urge to breed rebuilds — the spec's "reproduce
+        // slowly and invest heavily in each offspring."
+        if (c.care > 0.0f) c.care = std::max(0.0f, c.care - dt);
+        if (c.age > c.maturity && c.energy > 0.45f && !c.pregnant && c.care <= 0.0f)
             c.urge = std::min(c.urge + ph.fertility * (0.5f + 0.7f * adapt)
-                                       * 0.085f * _birthRate * dt, 1.0f);
+                                       * 0.050f * _birthRate * dt, 1.0f);
 
         // --- sickness ---
         if (c.sick > 0) {
@@ -1289,21 +1345,53 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             }
         }
 
+        // --- colony sense: local cohesion centroid + the nearest elder to trail ---
+        // Bubble Burrowers stay close as an extended family and let experienced
+        // elders lead. One neighbour scan feeds both the cohesion drive and the
+        // "follow an elder" steering below.
+        simd_float2 flockSum = simd_make_float2(0,0);
+        int flockN = 0;
+        simd_float2 elderPos = c.pos; float elderBest = kElderRange; bool haveElder = false;
+        simd_float2 playmate = c.pos; float playBest = kColonyRange; bool havePlaymate = false;
+        for (const Critter &o : _critters) {
+            if (!o.alive || o.id == c.id) continue;
+            float dd = simd_distance(o.pos, c.pos);
+            if (dd < kColonyRange) { flockSum += o.pos; flockN++; }
+            float oAgeT = o.ph.lifespan > 0 ? o.age / (o.ph.lifespan * _lifespanMul) : 0.0f;
+            if (oAgeT > kElderFrac && dd < elderBest) { elderBest = dd; elderPos = o.pos; haveElder = true; }
+            if (dd < playBest && dd > 1.0f) { playBest = dd; playmate = o.pos; havePlaymate = true; }
+        }
+        simd_float2 flockCentroid = flockN > 0 ? flockSum / (float)flockN : c.pos;
+        float ageTnow = std::clamp(c.age / (ph.lifespan * _lifespanMul), 0.0f, 1.0f);
+        bool isElder = ageTnow > kElderFrac;
+        bool isJuvenile = c.age <= c.maturity;
+
         // --- utility AI: pick the most pressing drive ---
         float sForage = c.hunger;
         float sRest = (1.0f - c.energy) * 0.9f;
-        float sMate = (c.age > c.maturity && c.energy > 0.45f && !c.pregnant) ? c.urge : 0.0f;
+        float sMate = (c.age > c.maturity && c.energy > 0.45f && !c.pregnant && c.care <= 0.0f) ? c.urge : 0.0f;
         float sWander = 0.15f;
         float sFlee = threatLvl * 2.0f;              // survival trumps everything
         float sNest = c.pregnant ? 0.8f : 0.0f;      // expectant mothers nest
         float sDrink = _water.empty() ? 0.0f : std::max(0.0f, c.thirst - 0.45f) * 2.2f;
+        // Hunker-and-hide: a moderate, not-yet-close threat triggers the freeze +
+        // camouflage response rather than a panicked sprint (juveniles hide sooner).
+        float sHunker = (threatLvl > 0.15f && threatLvl < 0.6f)
+                        ? threatLvl * (isJuvenile ? 2.4f : 1.7f) : 0.0f;
+        // Play: only when life is easy — fed, watered, healthy, rested, and no
+        // predator in sight. Juveniles and, per the spec, adults too.
+        bool easy = threatLvl < 0.02f && c.hunger < 0.4f && c.thirst < 0.5f
+                    && c.energy > 0.65f && c.health > 0.7f && havePlaymate;
+        float sPlay = easy ? (isJuvenile ? 0.55f : 0.32f) : 0.0f;
         c.action = AWander;
         float best = sWander;
         if (sForage > best) { best = sForage; c.action = AForage; }
         if (sDrink > best)  { best = sDrink;  c.action = ADrink; }
         if (sRest > best)   { best = sRest;   c.action = ARest; }
+        if (sPlay > best)   { best = sPlay;   c.action = APlay; }
         if (sMate > best)   { best = sMate;   c.action = AMate; }
         if (sNest > best)   { best = sNest;   c.action = ANest; }
+        if (sHunker > best) { best = sHunker; c.action = AHunker; }
         if (sFlee > best)   { best = sFlee;   c.action = AFlee; }
 
         // --- act ---
@@ -1347,7 +1435,15 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             bool ok = mate && mate->male != c.male && mate->age > mate->maturity;
             if (!ok) {
                 c.targetMate = 0;
-                if (!c.male) {
+                // Pair fidelity: a bonded partner is preferred above all else —
+                // pairs stay together across seasons, often for life.
+                if (c.partner != 0) {
+                    Critter *p = [self critterById:c.partner];
+                    if (p && p->alive && p->male != c.male && p->age > p->maturity
+                        && simd_distance(p->pos, c.pos) < ph.sensory * 1.5f)
+                        c.targetMate = p->id;
+                }
+                if (c.targetMate == 0 && !c.male) {
                     // Female choice: pick the showiest male within sight (weighted
                     // toward nearer ones). Sexual selection on ornament genes.
                     float bestScore = 0.0f;
@@ -1359,7 +1455,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                         float score = ornament(o) * (1.0f - 0.5f * dd / ph.sensory);
                         if (score > bestScore) { bestScore = score; c.targetMate = o.id; }
                     }
-                } else {
+                } else if (c.targetMate == 0) {
                     // Males court the nearest receptive female.
                     float bd = ph.sensory;
                     for (Critter &o : _critters) {
@@ -1385,6 +1481,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                         mom->gestation = 5.0f;
                         mom->urge = 0; dad->urge = 0;
                         mom->energy -= 0.12f; dad->energy -= 0.06f;
+                        // Bond the pair for future seasons and give both parents a
+                        // long parental-care period before they breed again.
+                        mom->partner = dad->id; dad->partner = mom->id;
+                        dad->care = kCareSecs;
                     }
                 } else desire = to / std::max(dd, 1e-3f);
             } else { wantSpeed *= 0.6f; desire = simd_make_float2(cosf(c.heading), sinf(c.heading)); }
@@ -1417,10 +1517,42 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     wantSpeed = 0.0f;
                 } else desire = to / std::max(dd, 1e-3f);
             } else { wantSpeed *= 0.5f; desire = simd_make_float2(cosf(c.heading), sinf(c.heading)); }
-        } else {  // wander
+        } else if (c.action == AHunker) {
+            // Freeze low and let the chromatophores do the work — the spec's
+            // startle response: stop, hunker, and blend into the surroundings.
+            wantSpeed = 0.0f;
+            c.energy = std::min(c.energy + 0.01f * dt, 1.0f);
+        } else if (c.action == APlay) {
+            // Playful bout: dart around a nearby companion (chase / short races),
+            // blowing bubbles. Frisky, quick direction changes, never far.
+            simd_float2 to = playmate - c.pos;
+            float dd = simd_length(to);
+            if (dd > 2.2f) desire = to / std::max(dd, 1e-3f);
+            else {
+                // circle and juke around the playmate
+                simd_float2 tang = simd_make_float2(-to.y, to.x);
+                float wob = sinf(c.phase * 1.7f + (float)(c.id % 61));
+                desire = simd_normalize(tang * wob + to * 0.3f);
+            }
+            wantSpeed = ph.speed * (0.7f + 0.5f * fabsf(sinf(c.phase * 2.0f)));
+            [self emitBubble:c strength:0.6f dt:dt];
+        } else {  // wander — but as a colony: stay near family, trail the elders
             c.heading += (u(_rng) - 0.5f) * 1.5f * dt;
-            desire = simd_make_float2(cosf(c.heading), sinf(c.heading));
-            wantSpeed *= 0.5f;
+            simd_float2 rove = simd_make_float2(cosf(c.heading), sinf(c.heading));
+            // Cohesion toward the local family cluster.
+            simd_float2 toFlock = flockCentroid - c.pos;
+            float fd = simd_length(toFlock);
+            simd_float2 cohere = (flockN > 0 && fd > 3.0f) ? toFlock / fd : simd_make_float2(0,0);
+            // Elders lead; the rest follow the nearest elder they can see.
+            simd_float2 lead = simd_make_float2(0,0);
+            if (!isElder && haveElder) {
+                simd_float2 toElder = elderPos - c.pos;
+                float ed = simd_length(toElder);
+                if (ed > 2.5f) lead = toElder / ed;
+            }
+            desire = simd_normalize(rove * 0.5f + cohere * 0.6f + lead * 0.8f
+                                    + simd_make_float2(1e-4f, 0));
+            wantSpeed *= isElder ? 0.42f : 0.5f;     // elders amble; nobody hurries
         }
 
         // --- steer + integrate (the old move slower) ---
@@ -1437,6 +1569,22 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         c.pos.y = std::clamp(c.pos.y, 1.0f, kWorldH - 1.0f);
         [self waterRippleAt:c.pos vel:c.vel dt:dt];
         c.phase += (0.5f + simd_length(c.vel) * 0.5f) * dt * 6.0f;
+
+        // --- camouflage: chromatophores ease toward the ground when the animal
+        // holds still, and wash back out once it moves (the spec's 5–15s shift) ---
+        float moveFrac = simd_length(c.vel) / std::max(ph.speed, 0.1f);
+        bool hiding = (c.action == AHunker || c.action == ARest || moveFrac < 0.12f);
+        float camoTarget = hiding ? 1.0f : 0.0f;
+        c.camo += (camoTarget - c.camo) * std::min(kCamoRate * dt, 1.0f);
+
+        // --- bubbles: blown near water ("bubble sounds while near water") and in
+        // courtship displays when close to a mate ---
+        for (const Water &wp : _water)
+            if (simd_distance(c.pos, wp.pos) < wp.radius + 1.2f) { [self emitBubble:c strength:0.5f dt:dt]; break; }
+        if (c.action == AMate && c.targetMate != 0) {
+            Critter *mt = [self critterById:c.targetMate];
+            if (mt && simd_distance(mt->pos, c.pos) < 3.0f) [self emitBubble:c strength:0.8f dt:dt];
+        }
 
         // --- Verlet spine follows the head (elongated bodies stretch it) ---
         c.spine[0] = c.pos;
@@ -1460,7 +1608,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 float bonus = 0.0f;
                 int ni = [self nestForOwner:c.id at:c.pos];
                 if (ni >= 0) { bpos = _nests[ni].pos; bonus = 0.20f * _nests[ni].quality; }
-                int litter = std::max(1, (int)lroundf(_birthRate));   // pups this birth
+                // One or two fully-formed live young — the Bubble Burrower invests
+                // heavily in a tiny brood. Twins are the exception, made likelier by
+                // good condition and the caretaker's fecundity (birth-rate) setting.
+                float twinChance = std::clamp(0.10f + 0.30f * (_birthRate - 1.0f)
+                                              + 0.25f * (c.ph.fertility - 0.8f) * c.energy, 0.02f, 0.85f);
+                int litter = (u(_rng) < twinChance) ? 2 : 1;
                 for (int L = 0; L < litter; L++) {
                     Genome kid = (L == 0) ? c.unborn
                                           : breed(c.genome, c.mateGenome, _rng);  // distinct sibling
@@ -1473,6 +1626,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 }
                 _generation = std::max(_generation, gen);
                 c.pregnant = false;
+                c.care = kCareSecs;        // the mother now devotes herself to the young
+                c.energy = std::min(c.energy + 0.10f, 1.0f);
             }
         }
     }
@@ -1489,6 +1644,16 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (Ripple &rp : _ripples) rp.age += dt;
     _ripples.erase(std::remove_if(_ripples.begin(), _ripples.end(),
                    [](const Ripple &rp){ return rp.age >= rp.life; }), _ripples.end());
+
+    // --- bubbles rise, wobble, and pop ---
+    for (Bubble &b : _bubbles) {
+        b.age += dt;
+        b.vel.y += 0.35f * dt;                                   // buoyant acceleration
+        b.vel.x += sinf(b.age * 5.0f + b.seed) * 0.5f * dt;      // gentle wobble
+        b.pos += b.vel * dt;
+    }
+    _bubbles.erase(std::remove_if(_bubbles.begin(), _bubbles.end(),
+                   [](const Bubble &b){ return b.age >= b.life; }), _bubbles.end());
 
     // --- predators: hunt prey; numbers rise and fall with the prey supply ---
     float groundLuma = 0.24f + 0.06f * _climate;   // grass tone by climate
@@ -2088,14 +2253,18 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             float ageT = std::clamp(c.age/(ph.lifespan*_lifespanMul), 0.0f, 1.0f);
             float old = std::clamp((ageT-0.55f)/0.45f, 0.0f, 1.0f);
             base = base + (simd_make_float3(0.46f,0.43f,0.37f)-base)*old*0.5f;
-            // Camouflage: blend toward the mossy ground when standing still.
-            float still = 1.0f - std::clamp(simd_length(c.vel)/std::max(ph.speed,0.1f)*2.0f, 0.0f, 1.0f);
-            base = base + (simd_make_float3(0.20f,0.30f,0.15f)-base)*still*0.40f;
+            // Camouflage: chromatophores blend the coat toward the mossy ground.
+            // c.camo eases in over several seconds when still and washes back out
+            // on the move, and settles deep enough that a motionless burrower is
+            // genuinely hard to spot.
+            base = base + (simd_make_float3(0.20f,0.30f,0.15f)-base)*std::clamp(c.camo,0.0f,1.0f)*0.72f;
         } else {
             base = base + (simd_make_float3(0.20f,0.15f,0.10f)-base)*(0.35f+0.55f*c.decay);
         }
 
-        float S = ph.size * 0.85f;                                    // body radius (membrane)
+        // Hunkering / hiding pulls the body in low and tight against the ground.
+        float tuck = (!corpse && c.action == AHunker) ? 0.88f : 1.0f;
+        float S = ph.size * 0.85f * tuck;                             // body radius (membrane)
         simd_float2 fwd = simd_make_float2(cosf(c.heading), sinf(c.heading));
         simd_float2 perp = simd_make_float2(-fwd.y, fwd.x);
         float seed = (float)(c.id % 97) * 0.7f;
@@ -2133,6 +2302,16 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 [self push:c.pos + simd_make_float2(0, S*0.95f) half:simd_make_float2(0.18f,0.18f)
                       rot:0 shape:7 color:simd_make_float4(1.0f,0.5f,0.7f,1) p:simd_make_float4(0,0,0,0)];
         }
+    }
+
+    // Bubbles rising from playful, courting, and water-side burrowers — glossy
+    // little air spheres that swell slightly and fade as they near their pop.
+    for (const Bubble &b : _bubbles) {
+        float ft = b.age / b.life;                      // 0..1
+        float r = b.size * (0.7f + 0.6f * ft);          // swells as it rises
+        float alpha = std::min(1.0f, 2.5f * (1.0f - ft));
+        [self push:b.pos half:simd_make_float2(r, r) rot:0 shape:16
+              color:simd_make_float4(0.80f, 0.92f, 1.0f, alpha) p:simd_make_float4(0,0,0,0)];
     }
 
     // predators: larger dark-red hunters, same procedural spine + glowing eyes
@@ -2215,7 +2394,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v15 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v16 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2378,7 +2557,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v15 (Bubble Burrower)", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v16 (Bubble Burrower)", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }

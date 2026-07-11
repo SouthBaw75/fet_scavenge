@@ -174,10 +174,12 @@ crush them, pikes and bolts punch through heavy armor.
 
 ### 09 — BIOME (life simulator)
 Care for a colony of **Bubble Burrowers** (*Bullavermis communis*) — small
-amphibious wetland herbivores rendered as **translucent membrane bodies** with a
-breathing **bubble dome**, two big forward eyes, four padded limbs that walk in a
-four-beat gait, and a tapering flexible rear; they **camouflage** toward the
-ground when they hold still, and fade into a decaying corpse when they die.
+amphibious wetland herbivores rendered as **big translucent speckled membrane
+bodies** that paddle along on **four splayed veined webbed fins**, with a small
+snout bump and two low dark-navy eyes; they **camouflage** toward the ground —
+chromatophores easing the coat toward the moss over several seconds when they
+hold still and washing back out on the move — and fade into a decaying corpse
+when they die.
 Every trait is read from a real, inherited **nucleotide genome** — built to the
 spec in `09-biome/DESIGN.md`. Diploid A/C/G/T
 genes on chromosomes, traits translated from the sequence, dominance read from
@@ -206,7 +208,8 @@ nearest shore to drink, dehydrating if they neglect it. **Scroll to zoom**
 buttons; a top-center readout tracks living **organisms, total deaths, and
 net growth/decline** since the colony began. Critters have
 procedural Verlet-spine bodies, utility-AI needs (hunger / energy / reproduction
-/ **flee**), forage regrowing food, court and breed, and catch a contagion whose
+/ **flee** / **hunker** / **play** / drink / nest), forage regrowing food, court
+and breed, follow elders as a colony, and catch a contagion whose
 spread is governed by disease-resistance genes. Click any critter to inspect its
 trait bars and its genome (both homologs shown as colored base ticks).
 
@@ -225,6 +228,21 @@ you can watch it swing as you add or remove hunters. Expectant mothers **build
 nests**: woven mounds they return to and improve over time. Pups are born at the
 nest with an energy **head start** scaled by its quality, and a nest gives
 **cover** — critters near one are harder for predators to spot.
+
+**Bubble Burrower life history.** True to the species spec, they **breed slowly
+and invest heavily**: a female bears just **one or two** live young per birth
+(twins are the exception, likelier in good condition), bonded **pairs stay
+together** across seasons and prefer each other as mates, and both parents enter
+a long **parental-care** period afterward before the urge to breed rebuilds — so
+the colony grows gradually and every juvenile matters. They're **long-lived**,
+most reaching an **elder** stage. Socially they behave like an extended family:
+they **stay grouped** (cohesion toward nearby kin) and **trail the elders**, who
+amble at the head of the band. When life is easy — fed, watered, healthy, and no
+predator in sight — they break into **playful bouts**, darting around a companion
+and **blowing streams of bubbles** (they also bubble near water and during
+courtship displays). A moderate, not-yet-close threat triggers a **hunker-and-
+hide** response — freeze low, tuck in, and let the camouflage deepen — while a
+close one still sends them sprinting.
 
 Everything is driven from a **sliding control panel** — click the tab on the
 right edge to slide it in or out. It carries all the caretaker tools, worked
