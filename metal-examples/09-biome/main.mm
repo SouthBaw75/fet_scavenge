@@ -443,7 +443,7 @@ enum {
     WA_AddPredator, WA_CullPredators, WA_StartPopSlider, WA_LifespanSlider,
     WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView, WA_BirthRateSlider,
     WA_DayLenSlider, WA_TimeOfDaySlider, WA_MakeRain,
-    WA_ToggleDayNight, WA_ToggleClouds, WA_ToggleRain,
+    WA_ToggleDayNight, WA_ToggleClouds, WA_ToggleRain, WA_SpawnPack,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -1138,14 +1138,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v26 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v27 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: predators now BITE, SHAKE, then CONSUME their catch (a ~1.3s\n"
-           "thrash before the prey is gone) instead of an instant kill. Plus\n"
-           "top-down RAIN impacts, BLUE-GREEN coat, night BIOLUMINESCENCE, the\n"
-           "per-element SKY toggles, and a\n"
-           "SCROLLABLE control panel (scroll with the cursor over it to reach\n"
-           "every control).\n");
+           "New: use PREDATORS > PACK to spawn a coordinated pack of 5 — they take\n"
+           "assigned roles (driver / flankers / ambusher) and encircle. Lone\n"
+           "hunters just chase. Also: organisms no longer pile up (they walk\n"
+           "around each other), and the EVOLUTION graph now has a labelled legend.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1209,6 +1207,21 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
 - (void)introduceRandom {
     [self spawnCritter:randomGenome(_rng, -1) at:[self randomPos] gen:_generation];
+}
+
+// Spawn a whole coordinated pack at once: n hunters clustered at one spot and
+// sharing a single pack identity, so they immediately take up distinct roles
+// (driver / flankers / ambusher) and run the full encircling hunt.
+- (void)spawnPack:(int)n {
+    simd_float2 c = [self randomPos];
+    uint32_t pk = _nextPack++;
+    std::uniform_real_distribution<float> u(0,1);
+    for (int i = 0; i < n; i++) {
+        simd_float2 pos = c + simd_make_float2((u(_rng)-0.5f)*6.0f, (u(_rng)-0.5f)*6.0f);
+        size_t before = _predators.size();
+        [self spawnPredator:pos];
+        if (_predators.size() > before) _predators.back().pack = pk;   // one shared pack
+    }
 }
 
 // Scatter static ground cover across the world (skipping the ponds) to carpet
@@ -1548,10 +1561,19 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         int flockN = 0;
         simd_float2 elderPos = c.pos; float elderBest = kElderRange; bool haveElder = false;
         simd_float2 playmate = c.pos; float playBest = kColonyRange; bool havePlaymate = false;
+        simd_float2 sepForce = simd_make_float2(0,0);       // push away from crowding neighbours
         for (const Critter &o : _critters) {
             if (!o.alive || o.id == c.id) continue;
             float dd = simd_distance(o.pos, c.pos);
             if (dd < kColonyRange) { flockSum += o.pos; flockN++; }
+            // Personal space: they walk AROUND each other, never through. Repulsion
+            // ramps up sharply as bodies overlap.
+            float space = (c.ph.size + o.ph.size) * 0.85f;
+            if (dd < space) {
+                simd_float2 away = dd > 1e-3f ? (c.pos - o.pos)/dd
+                                              : simd_make_float2(cosf((float)o.id), sinf((float)o.id));
+                sepForce += away * (1.0f - dd/space);
+            }
             float oAgeT = o.ph.lifespan > 0 ? o.age / (o.ph.lifespan * _lifespanMul) : 0.0f;
             if (oAgeT > kElderFrac && dd < elderBest) { elderBest = dd; elderPos = o.pos; haveElder = true; }
             if (dd < playBest && dd > 1.0f) { playBest = dd; playmate = o.pos; havePlaymate = true; }
@@ -1771,11 +1793,16 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         bool ambling = (c.action == AWander || c.action == APlay);
         float glideFloor = ambling ? 0.15f : 0.45f;                 // idle roaming pauses deeper than errands
         float gait = (c.action == AFlee) ? 1.0f : (glideFloor + (1.3f - glideFloor) * stroke);
-        simd_float2 wantVel = (simd_length(desire) > 1e-3f)
-            ? simd_normalize(desire) * wantSpeed * ageSlow * actMul * gait : simd_make_float2(0,0);
+        // Steer to walk around neighbours (blend separation into the heading), and
+        // keep a hard-ish positional push so bodies never simply overlap.
+        simd_float2 steer = (simd_length(desire) > 1e-3f) ? simd_normalize(desire) : simd_make_float2(0,0);
+        steer += sepForce * 0.9f;
+        simd_float2 wantVel = (simd_length(steer) > 1e-3f)
+            ? simd_normalize(steer) * wantSpeed * ageSlow * actMul * gait : simd_make_float2(0,0);
         c.vel += (wantVel - c.vel) * std::min(6.0f * dt, 1.0f);    // responsive, so the surge reads
         if (simd_length(c.vel) > 0.05f) c.heading = atan2f(c.vel.y, c.vel.x);
         c.pos += c.vel * dt;
+        c.pos += sepForce * std::min(3.0f * dt, 0.3f);            // resolve overlaps even at rest
         // sickness saps mobility
         if (c.sick > 0) c.pos -= c.vel * dt * c.sick * 0.5f;
         c.pos.x = std::clamp(c.pos.x, 1.0f, kWorldW - 1.0f);
@@ -1936,6 +1963,18 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     //    pack sees as one), so members converge even if they can't see it alone.
     for (int a = 0; a < NP; a++) if (_predators[a].alive)
         _predators[a].targetPrey = packTarget[packSlot(_predators[a].pack)];
+    // 6) Give each hunter a stable index within its pack, so roles can be handed
+    //    out deterministically (a driver, flankers on each side, an ambusher)
+    //    and members actively take up distinct positions instead of all reacting
+    //    to wherever they happen to be.
+    std::vector<int> memberIdx(NP, 0);
+    {
+        std::vector<int> counter(packId.size(), 0);
+        for (int a = 0; a < NP; a++) if (_predators[a].alive) {
+            int k = packSlot(_predators[a].pack);
+            memberIdx[a] = counter[k]++;
+        }
+    }
 
     for (size_t i = 0; i < _predators.size(); i++) {
         Predator &p = _predators[i];
@@ -1977,19 +2016,24 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 p.targetPrey = 0;
             }
         } else if (prey) {
-            // Predict the prey's escape and take a geometric role around it.
+            // Predict the prey's escape and take an ASSIGNED role in the pack.
             simd_float2 pv = prey->vel;
             float ps = simd_length(pv);
             simd_float2 fleeDir = ps > 0.4f ? pv/ps
                                 : simd_make_float2(cosf(prey->heading), sinf(prey->heading));
             simd_float2 r = p.pos - prey->pos;       // quarry -> hunter
             float rd = simd_length(r);
-            simd_float2 rn = rd > 1e-3f ? r/rd : fleeDir;
-            float ahead = rn.x*fleeDir.x + rn.y*fleeDir.y;    // +front of prey .. -behind
-            float side  = rn.x*fleeDir.y - rn.y*fleeDir.x;    // which flank
-            if      (ahead >  0.35f) p.role = PR_Ambush;      // already in front → intercept
-            else if (ahead < -0.35f) p.role = PR_Chaser;      // behind → drive it
-            else                     p.role = (side >= 0.0f) ? PR_FlankL : PR_FlankR;
+            // Deterministic role from the hunter's index in its pack, so members
+            // actively spread — a driver behind, flankers on each side, an
+            // ambusher ahead — instead of all charging from wherever they are.
+            int cnt = packN[packSlot(p.pack)];
+            int idx = (i < (size_t)NP) ? memberIdx[i] : 0;
+            if (cnt <= 1)        p.role = PR_Chaser;          // a lone hunter just chases
+            else if (idx == 0)   p.role = PR_Chaser;          // driver: pushes from behind
+            else if (idx == 1)   p.role = PR_FlankL;          // cut off the left
+            else if (idx == 2)   p.role = PR_FlankR;          // cut off the right
+            else if (idx == 3)   p.role = PR_Ambush;          // wait ahead on the escape line
+            else                 p.role = (idx % 2) ? PR_FlankL : PR_FlankR;  // extra flankers
 
             float catchR = 0.9f + p.size * 0.3f + prey->ph.size * 0.3f;
             if (rd < catchR) {
@@ -2004,17 +2048,21 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 simd_float2 perp = simd_make_float2(-fleeDir.y, fleeDir.x);
                 float encircle = 3.5f + prey->ph.size;
                 simd_float2 aim;
-                if (p.role == PR_Chaser)      aim = future;                          // press from behind
-                else if (p.role == PR_Ambush) aim = prey->pos + fleeDir*(rd*0.6f+3.0f); // cut the escape line
-                else {
+                if (p.role == PR_Chaser) {
+                    aim = future;                                                    // driver: press from behind
+                } else if (p.role == PR_Ambush) {
+                    aim = prey->pos + fleeDir*(rd*0.7f + 4.0f);                       // race to the escape line
+                } else {
+                    // Flankers cut it off: aim AHEAD of the prey and off to a side,
+                    // so they swing around and close the exits rather than trailing.
                     float s = (p.role == PR_FlankL) ? 1.0f : -1.0f;
-                    aim = future + perp * s * encircle;                              // swing wide to a flank
+                    aim = prey->pos + fleeDir*(rd*0.45f + 2.0f) + perp*s*encircle;
                 }
                 simd_float2 to = aim - p.pos;
                 float d2 = simd_length(to);
                 desire = d2 > 1e-3f ? to/d2 : fleeDir;
-                if (p.role == PR_FlankL || p.role == PR_FlankR) wantSpeed = 9.4f;    // hustle to get around
-                else if (p.role == PR_Ambush) wantSpeed = (rd < 6.0f) ? 9.8f : 3.0f; // lie in wait, then pounce
+                if (p.role == PR_FlankL || p.role == PR_FlankR) wantSpeed = 9.8f;    // hustle to get around
+                else if (p.role == PR_Ambush) wantSpeed = (rd < 6.0f) ? 9.8f : 4.0f; // lie in wait, then pounce
             }
         } else {
             // No quarry in reach: regroup with the pack and patrol together.
@@ -2222,6 +2270,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_Splice:    [self spliceGene:_spliceGene expr:_spliceExpr count:4]; break;
             case WA_ToggleGraph: _showGraph = !_showGraph; break;
             case WA_AddPredator: [self spawnPredator:[self randomPos]]; break;
+            case WA_SpawnPack:   [self spawnPack:5]; break;
             case WA_CullPredators: [self cullPredators]; break;
             case WA_MakeRain:  _rainOn = true; _cloudsOn = true;
                                _cloudTarget = 0.9f; _rainTarget = 0.9f; _weatherTimer = 25.0f; break;
@@ -2389,9 +2438,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // --- PREDATORS ---
     text(x0, row(11,5), "PREDATORS", 11, cLabel);
     {
-        float y = row(26,14), w = (cw-4)/2.0f;
-        button(x0, y, w, 26, "ADD HUNTER", WA_AddPredator, 0, false);
-        button(x0+w+4, y, w, 26, "REMOVE ALL", WA_CullPredators, 0, false);
+        float y = row(26,14), w = (cw-8)/3.0f;
+        button(x0,         y, w, 26, "HUNTER", WA_AddPredator, 0, false);   // one lone hunter
+        button(x0+(w+4),   y, w, 26, "PACK",   WA_SpawnPack,   0, false);   // a coordinated pack of 5
+        button(x0+2*(w+4), y, w, 26, "REMOVE", WA_CullPredators, 0, false);
     }
 
     // --- SKY (day/night + weather) ---
@@ -2801,7 +2851,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v26 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v27 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2858,9 +2908,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return;
     }
 
-    rect(gx-8, gy-8, gw+16, gh+32, simd_make_float4(0.05f,0.06f,0.08f,0.85f), 6);
+    const float legendH = 40.0f;                             // room for the labelled key below
+    rect(gx-8, gy-8-legendH, gw+16, gh+32+legendH, simd_make_float4(0.05f,0.06f,0.08f,0.88f), 6);
     for (int k = 0; k <= 2; k++)                              // 0 / 0.5 / 1 grid
         rect(gx, gy + k*0.5f*gh, gw, 1, simd_make_float4(1,1,1,0.08f), 4);
+    // y-axis hints: everything is plotted normalised 0..1.
+    [self hudText:"1" x:gx-11 y:gy+gh-5 h:8 col:simd_make_float4(0.6f,0.66f,0.74f,1) bw:bw bh:bh];
+    [self hudText:"0" x:gx-11 y:gy-2     h:8 col:simd_make_float4(0.6f,0.66f,0.74f,1) bw:bw bh:bh];
     // Title + hide (X) button in the top-right corner of the panel.
     [self hudText:"EVOLUTION" x:gx y:gy+gh+6 h:11 col:simd_make_float4(0.7f,0.82f,1.0f,1)
                bw:bw bh:bh];
@@ -2887,14 +2941,27 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         plot(_histDark, simd_make_float4(0.45f,0.90f,0.50f,1.0f), 2.5f);  // coat darkness
         plot(_histPred, simd_make_float4(0.90f,0.25f,0.20f,1.0f), 2.5f);  // predators
     }
-    // Colour key (bottom): climate·size·darkness·resistance·prey·predators.
-    simd_float4 key[6] = {
-        simd_make_float4(1.00f,1.00f,1.00f,0.9f), simd_make_float4(0.35f,0.75f,0.95f,1),
-        simd_make_float4(0.45f,0.90f,0.50f,1),    simd_make_float4(0.95f,0.70f,0.30f,1),
-        simd_make_float4(0.55f,0.55f,0.62f,0.9f), simd_make_float4(0.90f,0.25f,0.20f,1),
+    // Labelled legend (two rows of three) below the plot, so every line is
+    // named. All series are normalised to 0..1 for a shared vertical scale:
+    //   CLIMATE   cold(0) .. hot(1)          SIZE      colony-average body size
+    //   DARKNESS  average coat darkness      RESIST    average disease resistance
+    //   PREY      living colony (scaled)     PREDATORS hunter count (scaled)
+    struct Lg { const char *name; simd_float4 col; };
+    Lg lg[6] = {
+        {"CLIMATE",   simd_make_float4(1.00f,1.00f,1.00f,0.9f)},
+        {"SIZE",      simd_make_float4(0.35f,0.75f,0.95f,1.0f)},
+        {"DARKNESS",  simd_make_float4(0.45f,0.90f,0.50f,1.0f)},
+        {"RESIST",    simd_make_float4(0.95f,0.70f,0.30f,1.0f)},
+        {"PREY",      simd_make_float4(0.55f,0.55f,0.62f,0.9f)},
+        {"PREDATORS", simd_make_float4(0.90f,0.25f,0.20f,1.0f)},
     };
-    for (int k = 0; k < 6; k++)
-        rect(gx + k*26.0f, gy - 7, 20, 5, key[k], 4);
+    simd_float4 lgTxt = simd_make_float4(0.82f,0.88f,0.95f,1);
+    for (int k = 0; k < 6; k++) {
+        float lx = gx + (k % 3) * 122.0f;
+        float ly = gy - 17.0f - (k / 3) * 15.0f;
+        rect(lx, ly, 12, 9, lg[k].col, 4);
+        [self hudText:lg[k].name x:lx+16 y:ly h:9 col:lgTxt bw:bw bh:bh];
+    }
 }
 
 - (void)buildHUD:(Critter *)sel bw:(float)bw bh:(float)bh {
@@ -2964,7 +3031,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v26 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v27 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
