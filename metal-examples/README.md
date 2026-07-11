@@ -189,6 +189,15 @@ heritable **morphology**: body size, elongation, belly girth, eye size, **iris
 color**, a snout, side-fins, and a two-color banding pattern, so lineages look
 alike and drift apart as mutations and recombination accumulate.
 
+A **day/night cycle** sweeps the world from a warm dawn through bright noon to a
+dusk glow and a blue, vignetted night — and because the Bubble Burrower is
+**crepuscular**, the colony is liveliest at dawn and dusk, dozes through the
+deep night, and its **pupils widen in low light**. Over the top drifts
+**weather**: spells of clear, cloudy, and rainy sky ease in and out, with
+animated **rain streaks** and a grey overcast wash; rain keeps their skin moist
+(they drink less) and calls off play. The **SKY** panel section scrubs the time
+of day, sets the day length, and can **MAKE RAIN** on demand.
+
 A drifting **climate** (gentle seasons over a slow-wandering baseline) turns
 that variation into **directional natural selection**: cold favors large, dark
 bodies that hold heat, warmth favors small, pale ones (Bergmann's + Gloger's

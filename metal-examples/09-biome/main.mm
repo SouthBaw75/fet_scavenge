@@ -196,6 +196,12 @@ struct Phenotype {
     float eyeShine;    // 0..1 iris brightness
 };
 
+// Hermite smoothstep on the CPU side (mirrors the shader's smoothstep).
+static inline float smoothstepf(float a, float b, float x) {
+    float t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
 // Perceived brightness of a coat color (Rec. 601 luma); 1-this is "darkness".
 static inline float coatLuma(simd_float3 c) {
     return 0.299f * c.x + 0.587f * c.y + 0.114f * c.z;
@@ -398,6 +404,7 @@ enum {
     WA_TraitPick, WA_ExprSlider, WA_Splice, WA_ToggleGraph,
     WA_AddPredator, WA_CullPredators, WA_StartPopSlider, WA_LifespanSlider,
     WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView, WA_BirthRateSlider,
+    WA_DayLenSlider, WA_TimeOfDaySlider, WA_MakeRain,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -419,7 +426,11 @@ struct Uni {
     float2 offset;
     float2 resolution;
     float time;
-    float pad;
+    float pad;        // carries the climate value for the ground shader
+    float daylight;   // 0 night .. 1 full day
+    float warmth;     // dawn/dusk warm cast, 0..1
+    float cloud;      // overcast amount, 0..1
+    float rain;       // rainfall intensity, 0..1
 };
 
 float hash21(float2 p) {
@@ -484,6 +495,54 @@ fragment float4 ground_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(
     float2 bd = max(float2(0.0)-w, w-float2(120.0,72.0));
     col *= 1.0 / (1.0 + max(max(bd.x,bd.y),0.0)*0.15);
     return float4(gammaOut(col), 1.0);
+}
+
+// ---- sky / weather overlay ----
+// A fullscreen wash composited OVER the whole world (ground + critters + water)
+// but under the HUD. Outputs PREMULTIPLIED colour for (One, 1-SrcAlpha)
+// blending, so several tint layers accumulate cleanly. Carries the day/night
+// tint, an overcast grey, a dawn/dusk warm cast, a night vignette, and animated
+// rain streaks.
+fragment float4 sky_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(0)]]) {
+    float3 pc = float3(0.0);      // accumulated premultiplied colour
+    float  a  = 0.0;              // accumulated coverage
+    // helper: composite one straight (colour, alpha) layer on top
+    #define OVER(C, A) { float sa=(A); pc = (C)*sa + pc*(1.0-sa); a = sa + a*(1.0-sa); }
+
+    float night = clamp(1.0 - u.daylight, 0.0, 1.0);
+
+    // Deep-night blue wash, strongest at the screen edges (vignette).
+    float2 q = in.uv - 0.5;
+    float vig = smoothstep(0.2, 0.9, length(q));
+    float nightA = night * (0.50 + 0.28 * vig);
+    OVER(float3(0.02, 0.045, 0.11), nightA * 0.9);
+
+    // Overcast: a flat cool grey that mutes the scene.
+    OVER(float3(0.34, 0.37, 0.41), u.cloud * 0.22);
+
+    // Dawn / dusk warm cast, low on the horizon (bottom of the screen), fading
+    // out under heavy overcast.
+    float horizon = smoothstep(0.1, 0.9, in.uv.y);
+    OVER(float3(0.95, 0.55, 0.22), u.warmth * (0.10 + 0.16 * horizon) * (1.0 - 0.6*u.cloud));
+
+    // Rain: slanted streaks falling in screen space, plus a faint darkening.
+    if (u.rain > 0.01) {
+        float2 rp;
+        rp.x = in.uv.x * (u.resolution.x / max(u.resolution.y,1.0));
+        rp.y = in.uv.y;
+        rp.x += rp.y * 0.18;                          // slant
+        float cols = 220.0;
+        float cell = floor(rp.x * cols);
+        float rnd  = fract(sin(cell * 91.17) * 43758.5453);
+        float speed = 1.1 + rnd * 0.8;
+        float drop = fract(rp.y * 26.0 + u.time * speed + rnd * 13.0);
+        float streak = smoothstep(0.86, 1.0, drop) * step(rnd, u.rain * 0.75 + 0.06);
+        OVER(float3(0.02, 0.05, 0.10), u.rain * 0.14);          // grey-out
+        OVER(float3(0.62, 0.72, 0.85), streak * (0.20 + 0.25 * u.rain));
+    }
+
+    #undef OVER
+    return float4(pc, a);
 }
 
 // ---- instanced entities ----
@@ -761,6 +820,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     id<MTLCommandQueue> _queue;
     id<MTLRenderPipelineState> _groundPipeline;
     id<MTLRenderPipelineState> _entityPipeline;
+    id<MTLRenderPipelineState> _skyPipeline;
     id<MTLRenderPipelineState> _hudPipeline;
     id<MTLBuffer> _instBuffers[kMaxInFlight];
     id<MTLBuffer> _hudBuffers[kMaxInFlight];
@@ -804,6 +864,16 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     int _startPop;          // colony size at reset (HUD)
     float _lifespanMul;     // global multiplier on genetic lifespan (HUD)
     float _birthRate;       // reproduction multiplier: urge speed + litter size (HUD)
+
+    // Day/night + weather.
+    float _timeOfDay;       // 0..1 through one day (0 = midnight, 0.5 = noon)
+    float _dayLen;          // seconds per full day (HUD)
+    float _daylight;        // 0 night .. 1 day (derived)
+    float _skyWarm;         // dawn/dusk warm cast 0..1 (derived)
+    float _activity;        // crepuscular activity multiplier (derived)
+    float _cloud, _rain;            // current overcast / rainfall, 0..1
+    float _cloudTarget, _rainTarget;// where the weather is drifting toward
+    float _weatherTimer;            // time until the next weather regime
 
     // Sliding control panel + mouse widget state.
     std::vector<UIWidget> _widgets;
@@ -857,6 +927,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _entityPipeline = [device newRenderPipelineStateWithDescriptor:d error:&err];
     if (!_entityPipeline) { fprintf(stderr,"entity: %s\n", err.localizedDescription.UTF8String); return nil; }
 
+    // Sky / weather overlay: fullscreen wash, same premultiplied blend as entities.
+    d.vertexFunction = fsv;
+    d.fragmentFunction = [lib newFunctionWithName:@"sky_fragment"];
+    _skyPipeline = [device newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!_skyPipeline) { fprintf(stderr,"sky: %s\n", err.localizedDescription.UTF8String); return nil; }
+
     d.vertexFunction = [lib newFunctionWithName:@"hud_vertex"];
     _hudPipeline = [device newRenderPipelineStateWithDescriptor:d error:&err];
     if (!_hudPipeline) { fprintf(stderr,"hud: %s\n", err.localizedDescription.UTF8String); return nil; }
@@ -899,6 +975,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _startPop = 24;
     _lifespanMul = 1.0f;
     _birthRate = 1.6f;
+    _timeOfDay = 0.30f;         // start a little after dawn
+    _dayLen = 100.0f;           // seconds per day
+    _daylight = 1.0f; _skyWarm = 0.0f; _activity = 1.0f;
+    _cloud = 0.15f; _rain = 0.0f;
+    _cloudTarget = 0.15f; _rainTarget = 0.0f; _weatherTimer = 20.0f;
     _zoom = 1.0f;
     _panCenter = simd_make_float2(kWorldW*0.5f, kWorldH*0.5f);
     _worldDrag = false; _worldMoved = false;
@@ -987,13 +1068,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v17 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v18 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Bubble Burrower life history: 1-2 young, bonded pairs, long lives,\n"
-           "colony grouping that trails elders, playful bubble bouts, hunker-and-\n"
-           "hide camouflage. BIRTH RATE now truly spans slow (heavy investment)\n"
-           "to fast growth — nursing time shortens and fertility rises as you\n"
-           "raise it; fathers stay in the mating pool.\n");
+           "New: a DAY/NIGHT cycle (dawn/dusk warmth, night vignette, pupils\n"
+           "widen in the dark, crepuscular activity) and drifting WEATHER (clear/\n"
+           "cloudy/rain with animated rain streaks). Rain keeps skin moist; the\n"
+           "SKY panel scrubs time of day, sets day length, and can MAKE RAIN.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1271,6 +1351,28 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float season = sinf((float)_worldTime * (6.2831853f / kSeasonSecs));
     _climate = std::clamp(0.35f * season + _climateTrend, -1.0f, 1.0f);
 
+    // --- day/night: advance the clock and derive the light level ---
+    _timeOfDay += dt / std::max(_dayLen, 8.0f);
+    _timeOfDay -= floorf(_timeOfDay);                        // wrap 0..1
+    float sun = -cosf(_timeOfDay * 6.2831853f);              // -1 midnight .. +1 noon
+    _daylight = std::clamp(smoothstepf(-0.32f, 0.32f, sun), 0.0f, 1.0f);
+    _skyWarm  = (1.0f - smoothstepf(0.0f, 0.42f, fabsf(sun))) * 0.85f;  // peaks at dawn/dusk
+    // Crepuscular: most active at dawn & dusk, dozy at deep night, easy by day.
+    _activity = 0.35f + 0.65f * _daylight + 0.45f * _skyWarm;
+    _activity = std::clamp(_activity, 0.35f, 1.25f);
+
+    // --- weather: drift between clear, cloudy and rainy regimes ---
+    _weatherTimer -= dt;
+    if (_weatherTimer <= 0.0f) {
+        float r = u(_rng);
+        if (r < 0.45f)      { _cloudTarget = 0.08f + 0.18f*u(_rng); _rainTarget = 0.0f; }   // clear
+        else if (r < 0.78f) { _cloudTarget = 0.45f + 0.35f*u(_rng); _rainTarget = 0.0f; }   // cloudy
+        else                { _cloudTarget = 0.75f + 0.25f*u(_rng); _rainTarget = 0.45f + 0.5f*u(_rng); } // rain
+        _weatherTimer = 18.0f + 30.0f * u(_rng);
+    }
+    _cloud += (_cloudTarget - _cloud) * std::min(0.5f * dt, 1.0f);   // ease over ~2s
+    _rain  += (_rainTarget  - _rain ) * std::min(0.4f * dt, 1.0f);
+
     // Food regrows / seeds slowly toward a carrying capacity.
     for (Food &f : _food) if (f.alive) f.growth = std::min(f.growth + 0.20f * dt, 1.0f);
     _foodTimer -= dt;
@@ -1294,7 +1396,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         c.age += dt;
         c.hunger = std::min(c.hunger + ph.metabolism * 0.05f * dt, 1.5f);
         c.thirst = std::min(c.thirst + (0.014f + ph.metabolism*0.016f
-                                        + std::max(_climate,0.0f)*0.02f) * dt, 1.5f);
+                                        + std::max(_climate,0.0f)*0.02f)
+                                       * (1.0f - 0.6f * _rain) * dt, 1.5f);   // rain keeps skin moist
         if (c.thirst > 1.2f) c.energy -= (c.thirst - 1.2f) * 0.10f * dt;   // dehydration
         float moving = simd_length(c.vel) / std::max(ph.speed, 0.1f);
         c.energy -= (0.01f + ph.metabolism * 0.012f + 0.02f * moving) * dt;
@@ -1369,7 +1472,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
         // --- utility AI: pick the most pressing drive ---
         float sForage = c.hunger;
-        float sRest = (1.0f - c.energy) * 0.9f;
+        // Crepuscular: they grow sleepy through the deep night and doze.
+        float sRest = (1.0f - c.energy) * 0.9f + (1.0f - _daylight) * 0.40f;
         // Breeding is a strong drive once the urge is up — a ready adult should
         // pursue a mate rather than idly forage or play past it.
         float sMate = (c.age > c.maturity && c.energy > 0.40f && !c.pregnant && c.care <= 0.0f)
@@ -1386,7 +1490,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // predator in sight. Juveniles and, per the spec, adults too.
         bool easy = threatLvl < 0.02f && c.hunger < 0.4f && c.thirst < 0.5f
                     && c.energy > 0.65f && c.health > 0.7f && havePlaymate
-                    && c.urge < 0.4f;                        // breeders don't dawdle
+                    && c.urge < 0.4f                         // breeders don't dawdle
+                    && _rain < 0.25f && _daylight > 0.25f;   // fair weather, not deep night
         float sPlay = easy ? (isJuvenile ? 0.55f : 0.32f) : 0.0f;
         c.action = AWander;
         float best = sWander;
@@ -1564,8 +1669,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // --- steer + integrate (the old move slower) ---
         float ageT = std::clamp(c.age / (ph.lifespan * _lifespanMul), 0.0f, 1.0f);
         float ageSlow = 1.0f - 0.45f * std::clamp((ageT - 0.5f) / 0.5f, 0.0f, 1.0f);
+        // Crepuscular pacing: sprightly at dawn/dusk, dozy through the night.
+        // Fleeing ignores it — panic overrides the time of day.
+        float actMul = (c.action == AFlee) ? 1.0f : (0.55f + 0.45f * _activity);
         simd_float2 wantVel = (simd_length(desire) > 1e-3f)
-            ? simd_normalize(desire) * wantSpeed * ageSlow : simd_make_float2(0,0);
+            ? simd_normalize(desire) * wantSpeed * ageSlow * actMul : simd_make_float2(0,0);
         c.vel += (wantVel - c.vel) * std::min(4.0f * dt, 1.0f);
         if (simd_length(c.vel) > 0.05f) c.heading = atan2f(c.vel.y, c.vel.x);
         c.pos += c.vel * dt;
@@ -1884,6 +1992,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     else if (act == WA_StartPopSlider) _startPop = (int)(f * 120.0f);          // 0..120
     else if (act == WA_LifespanSlider) _lifespanMul = 0.4f + f * 2.1f;          // 0.4x..2.5x
     else if (act == WA_BirthRateSlider) _birthRate = 0.5f + f * 4.0f;           // 0.5x..4.5x
+    else if (act == WA_DayLenSlider) _dayLen = 20.0f + f * 220.0f;              // 20s..240s / day
+    else if (act == WA_TimeOfDaySlider) _timeOfDay = std::clamp(f, 0.0f, 1.0f); // scrub the clock
 }
 
 - (BOOL)hudMouseDown:(simd_float2)pt bw:(float)bw bh:(float)bh {
@@ -1905,6 +2015,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_ToggleGraph: _showGraph = !_showGraph; break;
             case WA_AddPredator: [self spawnPredator:[self randomPos]]; break;
             case WA_CullPredators: [self cullPredators]; break;
+            case WA_MakeRain:  _cloudTarget = 0.9f; _rainTarget = 0.9f; _weatherTimer = 25.0f; break;
             case WA_ClearColony: [self clearColony]; break;
             case WA_ZoomIn:    [self zoomBy:1.4f atNdc:simd_make_float2(0,0)]; break;
             case WA_ZoomOut:   [self zoomBy:1.0f/1.4f atNdc:simd_make_float2(0,0)]; break;
@@ -1916,6 +2027,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_StartPopSlider:
             case WA_LifespanSlider:
             case WA_BirthRateSlider:
+            case WA_DayLenSlider:
+            case WA_TimeOfDaySlider:
                 _dragAct = wg.act; _dragX = wg.x; _dragW = wg.w;
                 [self applySlider:wg.act
                              frac:std::clamp((pt.x-wg.x)/std::max(wg.w,1.0f), 0.0f, 1.0f)];
@@ -2069,6 +2182,22 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         button(x0+w+4, y, w, 26, "REMOVE ALL", WA_CullPredators, 0, false);
     }
 
+    // --- SKY (day/night + weather) ---
+    {
+        // Name the phase from the clock and the weather from cloud/rain.
+        const char *phase = (_timeOfDay < 0.22f || _timeOfDay > 0.80f) ? "NIGHT"
+                          : (_timeOfDay < 0.32f) ? "DAWN"
+                          : (_timeOfDay > 0.68f) ? "DUSK" : "DAY";
+        const char *wx = _rain > 0.25f ? "RAIN" : (_cloud > 0.45f ? "CLOUDY" : "CLEAR");
+        float y = row(11,5);
+        text(x0, y, "SKY", 11, cLabel);
+        char sky[24]; snprintf(sky, sizeof sky, "%s  %s", phase, wx);
+        text(x0+52, y, sky, 11, cTxt);
+    }
+    slider(x0, row(16,3), cw, 16, _timeOfDay, WA_TimeOfDaySlider);            // scrub time of day
+    slider(x0, row(16,3), cw, 16, (_dayLen-20.0f)/220.0f, WA_DayLenSlider);   // day length
+    button(x0, row(24,12), cw, 24, "MAKE RAIN", WA_MakeRain, 0, _rain > 0.4f);
+
     // --- GENE LAB ---
     text(x0, row(12,6), "SPLICE GENE", 12, simd_make_float4(0.70f,0.92f,0.66f,1));
     {
@@ -2115,10 +2244,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _uScale = simd_make_float2(s/aspect, s);
     _uOffset = simd_make_float2(-_panCenter.x * (s/aspect), -_panCenter.y * s);
 
-    struct { simd_float2 scale, offset, resolution; float time, pad; } uni = {
+    struct { simd_float2 scale, offset, resolution; float time, pad,
+             daylight, warmth, cloud, rain; } uni = {
         _uScale, _uOffset,
         simd_make_float2((float)view.drawableSize.width, (float)view.drawableSize.height), t,
-        _climate
+        _climate,
+        _daylight, _skyWarm, std::clamp(_cloud,0.0f,1.0f), std::clamp(_rain,0.0f,1.0f)
     };
 
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
@@ -2301,7 +2432,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
         if (!corpse) {
             // Two low dark-navy glossy eyes up front (color = heritable iris tint).
-            float er = (0.24f + ph.eyeSize*0.9f) * S;
+            // Pupils widen in low light — larger at dawn/dusk and through the night.
+            float er = (0.24f + ph.eyeSize*0.9f) * S * (1.0f + 0.32f * (1.0f - _daylight));
             simd_float4 eyec = simd_make_float4(ph.eyeColor, A);
             [self push:c.pos + fwd*0.60f*S + perp*0.40f*S half:simd_make_float2(er,er)
                   rot:0 shape:17 color:eyec p:simd_make_float4(0,0,0,0)];
@@ -2382,6 +2514,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         [enc setVertexBytes:&uni length:sizeof(uni) atIndex:1];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6 instanceCount:ic];
     }
+    // Sky / weather wash over the world (before the HUD, so panels stay crisp).
+    [enc setRenderPipelineState:_skyPipeline];
+    [enc setFragmentBytes:&uni length:sizeof(uni) atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     if (hc) {
         [enc setRenderPipelineState:_hudPipeline];
         [enc setVertexBuffer:hb offset:0 atIndex:0];
@@ -2403,7 +2539,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v17 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v18 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2566,7 +2702,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v17 (Bubble Burrower)", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v18 (Bubble Burrower)", 1280, 960, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
