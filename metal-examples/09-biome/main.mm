@@ -859,10 +859,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     id<MTLRenderPipelineState> _skyPipeline;
     id<MTLRenderPipelineState> _hudPipeline;
     id<MTLBuffer> _instBuffers[kMaxInFlight];
+    id<MTLBuffer> _glowBuffers[kMaxInFlight];
     id<MTLBuffer> _hudBuffers[kMaxInFlight];
     int _frameIndex;
     dispatch_semaphore_t _frameSemaphore;
     std::vector<InstC> _scratch;
+    std::vector<InstC> _glow;      // bioluminescent halos, drawn AFTER the night wash
     std::vector<InstC> _hud;
 
     std::vector<Critter> _critters;
@@ -916,6 +918,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // Sliding control panel + mouse widget state.
     std::vector<UIWidget> _widgets;
     float _panelT, _panelTarget;   // 0 hidden .. 1 shown
+    float _panelScroll;            // vertical scroll offset when content overflows
+    float _panelOverflow;          // how far content runs past the window (px), recomputed each build
     int   _spliceGene;             // locus selected in the gene lab
     float _spliceExpr;             // engineered expression level 0..1
     bool  _showGraph;              // evolution graph visible?
@@ -981,12 +985,15 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     for (int i = 0; i < kMaxInFlight; i++) {
         _instBuffers[i] = [device newBufferWithLength:kMaxInstances*sizeof(InstC)
                                               options:MTLResourceStorageModeShared];
+        _glowBuffers[i] = [device newBufferWithLength:kMaxCritters*sizeof(InstC)
+                                              options:MTLResourceStorageModeShared];
         _hudBuffers[i] = [device newBufferWithLength:4096*sizeof(InstC)
                                              options:MTLResourceStorageModeShared];
     }
     _frameIndex = 0;
     _frameSemaphore = dispatch_semaphore_create(kMaxInFlight);
     _scratch.reserve(kMaxInstances);
+    _glow.reserve(kMaxCritters);
     _hud.reserve(4096);
     // Reserve to the hard caps so births/food never reallocate the vectors
     // mid-simulation (which would invalidate the references we hold).
@@ -1022,6 +1029,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _cloud = 0.15f; _rain = 0.0f;
     _cloudTarget = 0.15f; _rainTarget = 0.0f; _weatherTimer = 20.0f;
     _dayNightOn = true; _cloudsOn = true; _rainOn = true;
+    _panelScroll = 0.0f; _panelOverflow = 0.0f;
     _nextPack = 1;
     _zoom = 1.0f;
     _panCenter = simd_make_float2(kWorldW*0.5f, kWorldH*0.5f);
@@ -1103,6 +1111,14 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         if (![v isKindOfClass:[MTKView class]] || weakSelf->_uScale.x == 0) return e;
         NSPoint pt = [v convertPoint:e.locationInWindow fromView:nil];
         float bw = (float)v.bounds.size.width, bh = (float)v.bounds.size.height;
+        // Over the open control panel: scroll its content instead of zooming.
+        float panelX = bw - 300.0f * weakSelf->_panelT;
+        if (weakSelf->_panelT > 0.5f && pt.x >= panelX) {
+            weakSelf->_panelScroll = std::clamp(
+                weakSelf->_panelScroll - (float)e.scrollingDeltaY,
+                0.0f, weakSelf->_panelOverflow);
+            return nil;
+        }
         simd_float2 ndc = simd_make_float2((float)(pt.x/bw)*2.0f-1.0f,
                                            (float)(pt.y/bh)*2.0f-1.0f);
         float f = 1.0f + (float)e.scrollingDeltaY * 0.01f;   // scroll up = zoom in
@@ -1111,11 +1127,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v21 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v22 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: a naturally BLUE-GREEN base coat (evolves/splices from there),\n"
-           "a BIOLUMINESCENT night glow in each animal's dominant colour, and\n"
-           "per-element SKY toggles (DAY/NGT, CLOUDS, RAIN) in the control panel.\n");
+           "New: BLUE-GREEN base coat, night BIOLUMINESCENCE (now drawn over the\n"
+           "night wash so it actually glows), per-element SKY toggles, and a\n"
+           "SCROLLABLE control panel (scroll with the cursor over it to reach\n"
+           "every control).\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -2234,7 +2251,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         if (live) widgets.push_back({x, y, w, h, act, 0});
     };
 
-    float cy = bh - 22;
+    float cy = bh - 22 + _panelScroll;      // scroll shifts the content up
     auto row = [&](float h, float gap) { cy -= h; float y = cy; cy -= gap; return y; };
 
     text(x0, row(18,12), "CONTROLS", 18, simd_make_float4(0.85f,0.92f,1.0f,1));
@@ -2360,6 +2377,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     text(x0, row(10,3), "EXPRESSION", 10, cLabel);
     slider(x0, row(18,8), cw, 18, _spliceExpr, WA_ExprSlider);
     button(x0, row(28,8), cw, 28, "SPLICE INTO COLONY", WA_Splice, 0, false);
+
+    // How far the content runs past the bottom of the window — the scroll range.
+    // (cy is the current bottom; subtract the live scroll to get the unscrolled
+    // bottom, then see how far below the ~14px margin it sits.)
+    _panelOverflow = std::max(0.0f, 14.0f - (cy - _panelScroll));
+    _panelScroll = std::clamp(_panelScroll, 0.0f, _panelOverflow);
 }
 
 - (void)drawInMTKView:(MTKView *)view {
@@ -2397,6 +2420,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
     _scratch.clear();
+    _glow.clear();
     _hud.clear();
 
     // ground cover (drawn first, under everything): moss, clover, flowers,
@@ -2555,17 +2579,19 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         simd_float4 finCol = simd_make_float4(base*1.05f + simd_make_float3(0.04f,0.06f,0.05f), A);
 
         // Bioluminescence: after dark, a soft halo glows in the animal's dominant
-        // coat colour (drawn first so the body sits inside its own glow).
+        // coat colour. Collected into _glow and drawn AFTER the night wash, so it
+        // adds light over the darkened scene instead of being dimmed with it.
         if (!corpse) {
             float night = std::clamp(1.0f - _daylight, 0.0f, 1.0f);
-            if (night > 0.03f) {
+            if (night > 0.03f && (int)_glow.size() < kMaxCritters) {
                 simd_float3 gc = ph.color;                            // true genetic hue, not camouflaged
                 float mx = std::max(gc.x, std::max(gc.y, gc.z));
                 gc = gc * (1.0f / std::max(mx, 0.05f));               // vivid version of the dominant hue
                 float pulse = 0.82f + 0.18f * sinf(t * 1.7f + seed);  // gentle breathing shimmer
-                float ga = 0.55f * night * pulse * A;
-                [self push:c.pos half:simd_make_float2(S*2.1f, S*2.1f) rot:0 shape:0
-                      color:simd_make_float4(gc, ga) p:simd_make_float4(0,0,0,0)];
+                float ga = 0.85f * night * pulse * A;
+                float gr = S * 2.3f;
+                _glow.push_back({c.pos.x, c.pos.y, gr, gr, 0, 0/*soft blob*/,
+                                 gc.x, gc.y, gc.z, ga, 0,0,0,0});
             }
         }
 
@@ -2655,6 +2681,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     id<MTLBuffer> ib = _instBuffers[_frameIndex];
     NSUInteger ic = _scratch.size();
     if (ic) memcpy([ib contents], _scratch.data(), ic*sizeof(InstC));
+    id<MTLBuffer> gb = _glowBuffers[_frameIndex];
+    NSUInteger gcnt = _glow.size();
+    if (gcnt) memcpy([gb contents], _glow.data(), gcnt*sizeof(InstC));
 
     // ---- HUD ----
     float bw = (float)view.bounds.size.width, bh = (float)view.bounds.size.height;
@@ -2682,6 +2711,14 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     [enc setRenderPipelineState:_skyPipeline];
     [enc setFragmentBytes:&uni length:sizeof(uni) atIndex:0];
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    // Bioluminescent halos: drawn AFTER the night wash so they add light on top
+    // of the darkened scene rather than being dimmed along with it.
+    if (gcnt) {
+        [enc setRenderPipelineState:_entityPipeline];
+        [enc setVertexBuffer:gb offset:0 atIndex:0];
+        [enc setVertexBytes:&uni length:sizeof(uni) atIndex:1];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6 instanceCount:gcnt];
+    }
     if (hc) {
         [enc setRenderPipelineState:_hudPipeline];
         [enc setVertexBuffer:hb offset:0 atIndex:0];
@@ -2703,7 +2740,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v21 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v22 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2866,7 +2903,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v21 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v22 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }

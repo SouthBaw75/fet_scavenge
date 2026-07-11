@@ -289,6 +289,14 @@ so its locomotion is genuinely fin-driven. A few of them drift around a dim
 underwater arena so the look and motion can be reviewed up close. All procedural
 SDF — no art. Space pauses; R sends them somewhere new.
 
+### 11 — RAIN DEMO (top-down rain-effect gallery)
+Six different **top-down rain treatments** shown side by side over the same patch
+of wet ground, so you can compare and pick one: **ripple rings**, **splash dots**,
+diagonal **streaks** (the "wrong" look from above), a drifting **wet sheen**,
+**rings + drops** (impact flash then expanding ring), and a heavy **downpour**.
+Every tile is numbered; press **1-6** to blow one up fullscreen, **0/G** for the
+grid, **Space** to cycle. All procedural in one fragment shader.
+
 ## Where to go from here
 
 - **Textures & samplers** — `MTLTexture`, `MTKTextureLoader`
