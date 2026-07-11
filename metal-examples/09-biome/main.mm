@@ -902,6 +902,16 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         col=mix(col, in.color.rgb*1.7+0.16, vein*0.55*up);           // glowing vein tips
         float A=(0.30+0.32*up)*m*in.color.a;                         // sheer base, fuller tip
         return float4(gammaOut(col)*A, A);
+    } else if (shape == 19) {               // glowing love heart (mating)
+        float2 hp = p * 1.28; hp.y = -hp.y;                          // lobes up on screen
+        float x2 = hp.x*hp.x, yv = hp.y;
+        float base = x2 + yv*yv - 1.0;                               // can be negative inside
+        float h = base*base*base - x2 * yv*yv*yv;                    // classic heart implicit
+        float m = smoothstep(0.05, -0.05, h); if (m < 0.01) discard_fragment();
+        float3 col = mix(in.color.rgb, float3(1.0,0.85,0.90), 0.35 + 0.35*hp.y);  // brighter top
+        col += 0.25;                                                 // luminous
+        float A = m * in.color.a;
+        return float4(gammaOut(col)*A, A);
     }
     // Premultiplied by in.color.a so fading sprites (e.g. decaying corpses)
     // dissolve correctly instead of brightening.
@@ -949,6 +959,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     std::vector<Water> _water;
     std::vector<Ripple> _ripples;
     std::vector<Bubble> _bubbles;
+    std::vector<Bubble> _hearts;    // little glowing hearts that float up during mating
     std::vector<Decor> _decor;
     std::mt19937 _rng;
     int _initialPop;        // colony size at start, for growth %
@@ -1101,6 +1112,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _water.reserve(kMaxWater);
     _ripples.reserve(kMaxRipples);
     _bubbles.reserve(kMaxBubbles);
+    _hearts.reserve(256);
     _decor.reserve(kMaxDecor);
 
     _rng.seed(0xB10E);
@@ -1226,13 +1238,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v36 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v37 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: INDIVIDUALITY — four heritable temperament genes (bold/timid,\n"
-           "social/loner, curious/cautious, active/lazy) make every critter weigh\n"
-           "its drives differently, so the colony stops acting as one. Wander is\n"
-           "now purposeful goal-seeking (no more jitter) with anti-dither commit.\n"
-           "Click a critter to see its TEMPERAMENT; splice BOLD/SOCIAL/CURIOUS/ACTIVE.\n");
+           "New: little glowing HEARTS float up from courting and mating pairs.\n"
+           "Plus heritable TEMPERAMENT (bold/social/curious/active) driving\n"
+           "individual behaviour, purposeful goal-seeking, and the BALANCE\n"
+           "auto-pilot + TARGET POP (set it to ~50 for a small colony).\n");
 
     [self setupAudio];
     _startTime = CACurrentMediaTime();
@@ -1593,6 +1604,19 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _bubbles.push_back(b);
 }
 
+// A little glowing heart drifting up from a spot — courtship / conception.
+- (void)emitHeart:(simd_float2)pos {
+    if ((int)_hearts.size() >= 256) return;
+    std::uniform_real_distribution<float> u(0,1);
+    Bubble h;
+    h.pos = pos + simd_make_float2((u(_rng)-0.5f)*1.1f, (u(_rng)-0.5f)*0.6f);
+    h.vel = simd_make_float2((u(_rng)-0.5f)*0.6f, 1.1f + u(_rng)*0.9f);      // floats up
+    h.age = 0; h.life = 1.5f + u(_rng)*0.9f;
+    h.size = 0.34f + u(_rng)*0.22f;
+    h.seed = u(_rng)*10.0f;
+    _hearts.push_back(h);
+}
+
 // Empty the world of animals and nests (leaves the food and climate history),
 // so you can start from nothing or hand-place critters with ADD.
 - (void)clearColony {
@@ -1631,6 +1655,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _nests.clear();
     _ripples.clear();
     _bubbles.clear();
+    _hearts.clear();
     _generation = 0;
     _births = _deaths = 0;
     _selected = 0;
@@ -1994,6 +2019,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                         // birth-rate settings); fathers stay in the mating pool so
                         // the colony can actually grow.
                         mom->partner = dad->id; dad->partner = mom->id;
+                        // A little burst of glowing hearts on conception.
+                        simd_float2 mid = (mom->pos + dad->pos) * 0.5f;
+                        for (int hb = 0; hb < 6; hb++) [self emitHeart:mid];
                     }
                 } else desire = to / std::max(dd, 1e-3f);
             } else { wantSpeed *= 0.6f; desire = simd_make_float2(cosf(c.heading), sinf(c.heading)); }
@@ -2156,7 +2184,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             if (simd_distance(c.pos, wp.pos) < wp.radius + 1.2f) { [self emitBubble:c strength:0.5f dt:dt]; break; }
         if (c.action == AMate && c.targetMate != 0) {
             Critter *mt = [self critterById:c.targetMate];
-            if (mt && simd_distance(mt->pos, c.pos) < 3.0f) [self emitBubble:c strength:0.8f dt:dt];
+            if (mt && simd_distance(mt->pos, c.pos) < 3.0f) {
+                [self emitBubble:c strength:0.8f dt:dt];
+                if (u(_rng) < 1.2f * dt)                                            // wooing hearts
+                    [self emitHeart:c.pos + simd_make_float2(cosf(c.heading),sinf(c.heading))*0.5f*ph.size];
+            }
         }
 
         // --- Verlet spine follows the head (elongated bodies stretch it) ---
@@ -2231,6 +2263,16 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     _bubbles.erase(std::remove_if(_bubbles.begin(), _bubbles.end(),
                    [](const Bubble &b){ return b.age >= b.life; }), _bubbles.end());
+
+    // --- hearts float up and gently sway, then fade ---
+    for (Bubble &h : _hearts) {
+        h.age += dt;
+        h.vel.x += sinf(h.age * 3.5f + h.seed) * 0.5f * dt;         // sway
+        h.vel.y += 0.15f * dt;                                      // buoyant rise
+        h.pos += h.vel * dt;
+    }
+    _hearts.erase(std::remove_if(_hearts.begin(), _hearts.end(),
+                  [](const Bubble &h){ return h.age >= h.life; }), _hearts.end());
 
     // --- predators: coordinated pack hunting ---
     float groundLuma = 0.24f + 0.06f * _climate;   // grass tone by climate
@@ -3159,6 +3201,18 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
               color:simd_make_float4(0.80f, 0.92f, 1.0f, alpha) p:simd_make_float4(0,0,0,0)];
     }
 
+    // Glowing love hearts drifting up from courting / mating pairs.
+    for (const Bubble &h : _hearts) {
+        float ft = h.age / h.life;                      // 0..1
+        float sz = h.size * (0.75f + 0.35f * ft);
+        float alpha = std::min(1.0f, 2.2f * (1.0f - ft));
+        // soft pink glow halo, then the heart itself
+        [self push:h.pos half:simd_make_float2(sz*2.0f, sz*2.0f) rot:0 shape:0
+              color:simd_make_float4(1.0f, 0.40f, 0.58f, alpha*0.35f) p:simd_make_float4(0,0,0,0)];
+        [self push:h.pos half:simd_make_float2(sz, sz) rot:0 shape:19
+              color:simd_make_float4(1.0f, 0.42f, 0.60f, alpha) p:simd_make_float4(0,0,0,0)];
+    }
+
     // predators: larger dark-red hunters, same procedural spine + glowing eyes
     for (const Predator &p : _predators) {
         if (!p.alive) continue;
@@ -3260,7 +3314,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v36 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v37 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -3454,7 +3508,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v36 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v37 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
