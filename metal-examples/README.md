@@ -233,19 +233,20 @@ experimental gene sweep through the population or get selected out. (The old
 keyboard shortcuts still work as accelerators.)
 
 ### 10 — CRITTER STYLES (movement gallery)
-A design-review sandbox for the biome creatures: nine procedurally-animated
+A design-review sandbox for the biome creatures: ten procedurally-animated
 organism body plans, each wandering in its own labeled cell so you can compare
 how they **move** — **Serpent** (Verlet-spine slither), **Fish** (carangiform
 swim with a sweeping tail), **Walker** (six legs in a tripod gait), **Crawler**
 (peristaltic surges), **Jelly** (pulse-jet bell with trailing tentacles),
 **Hopper** (ballistic squash-and-stretch hops), **Fat Worm** (chunky segmented
 undulation with a pale saddle), **Amoeba** (a translucent oozing membrane that
-reaches a pseudopod toward its heading), and **Cell** — a solid, detailed
-microbe with a crisp **membrane**, streaming cytoplasm, a **nucleus** (and
-nucleolus), **mitochondria** and **vacuoles**, forward **eyespots**, and a
-beating **flagellum** tail. Most creatures are soft SDF blobs; the Cell uses
-hard-edged shaders to look solid and fleshy. Space pauses; R rerolls their
-wander targets. Pick a favorite and it becomes the new body style for `09-biome`.
+reaches a pseudopod toward its heading), **Cell** — a fluid, translucent microbe
+whose **membrane morphs** amoeba-like as it swims, stretching along its heading,
+with a single central **nucleus** and a beating **flagellum** — and **Mouse**, a
+small **furry mammal** (strand-edged fur shader) with a rounded body and head,
+round ears, beady eyes, a pink nose, and a long thin tail that scurries in
+quick surges. Space pauses; R rerolls their wander targets. Pick a favorite and
+it becomes the new body style for `09-biome`.
 
 ## Where to go from here
 

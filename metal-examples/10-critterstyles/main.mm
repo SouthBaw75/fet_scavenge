@@ -16,17 +16,18 @@
 #include <random>
 #include <vector>
 
-static const float kWorldW = 84.0f, kWorldH = 54.0f;
-static const int   kCols = 3, kRows = 3;
-static const float kCellW = kWorldW / kCols;   // 28
+static const float kWorldW = 96.0f, kWorldH = 54.0f;
+static const int   kCols = 4, kRows = 3;
+static const float kCellW = kWorldW / kCols;   // 24
 static const float kCellH = kWorldH / kRows;   // 18
-static const int   kMaxInstances = 8192;
+static const int   kMaxInstances = 12288;
 static const int   kInFlight = 3;
-static const int   kNumStyles = 9;
+static const int   kNumStyles = 10;
 
-enum { ST_SERPENT, ST_FISH, ST_WALKER, ST_CRAWLER, ST_JELLY, ST_HOPPER, ST_FATWORM, ST_AMOEBA, ST_CELL };
-static const char *kStyleName[9] = { "SERPENT","FISH","WALKER","CRAWLER","JELLY",
-                                     "HOPPER","FAT WORM","AMOEBA","CELL" };
+enum { ST_SERPENT, ST_FISH, ST_WALKER, ST_CRAWLER, ST_JELLY,
+       ST_HOPPER, ST_FATWORM, ST_AMOEBA, ST_CELL, ST_MOUSE };
+static const char *kStyleName[10] = { "SERPENT","FISH","WALKER","CRAWLER","JELLY",
+                                      "HOPPER","FAT WORM","AMOEBA","CELL","MOUSE" };
 
 struct InstC { float cx,cy,hx,hy,rot,shape, r,g,b,a, p0,p1,p2,p3; };
 
@@ -55,7 +56,7 @@ vertex FSOut fs_vertex(uint vid [[vertex_id]]){ float2 p=float2((vid<<1)&2, vid&
 fragment float4 ground_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(0)]]){
   float2 ndc=float2(in.uv.x*2.0-1.0, 1.0-in.uv.y*2.0);
   float2 w=(ndc-u.offset)/u.scale;
-  float cx=floor(w.x/28.0), cy=floor(w.y/18.0);
+  float cx=floor(w.x/24.0), cy=floor(w.y/18.0);
   float checker=fmod(cx+cy,2.0);
   float3 col=mix(float3(0.09,0.13,0.08), float3(0.12,0.17,0.10), checker);
   col*=0.82+0.34*fbm(w*0.5);
@@ -103,33 +104,47 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
     int cx=clamp(int((p.x*0.5+0.5)*5.0),0,4); int cy=clamp(int((1.0-(p.y*0.5+0.5))*7.0),0,6);
     uint bit=(uint(kFont[code][cy])>>uint(4-cx))&1u; if(bit==0u) discard_fragment();
     return float4(gammaOut(in.color.rgb), in.color.a); }
-  else if (shape==3){                                   // detailed CELL (x=seed, y=time)
+  else if (shape==3){                                   // fluid translucent CELL (x=seed,y=time)
     float seed=in.params.x, t=in.params.y;
     float r=length(p), ang=atan2(p.y,p.x), aa=fwidth(r);
-    float edge=0.90 + 0.05*sin(ang*3.0+seed) + 0.03*sin(ang*5.0-seed*1.3);
+    // Membrane morphs over time — a soft amoeboid wobble, crisp edge.
+    float edge=0.84 + 0.07*sin(ang*3.0 + t*0.8 + seed)
+                    + 0.05*sin(ang*5.0 - t*0.6 + seed*1.3)
+                    + 0.03*sin(ang*2.0 + t*1.2);
     float mask=smoothstep(edge+aa, edge-aa, r); if(mask<0.01) discard_fragment();
-    float3 col=in.color.rgb * (0.85 + 0.3*fbm(p*3.5+float2(t*0.1,seed)));   // streaming cytoplasm
-    col *= 1.08 - 0.28*smoothstep(0.35,edge,r);                            // subtle depth
-    col = mix(col, in.color.rgb*1.7+0.14, smoothstep(edge-0.12,edge-0.02,r)*0.8); // membrane rim
-    float2 nucC=float2(0.16*sin(seed), -0.12*cos(seed*1.3));
-    float nd=length(p-nucC);
-    col = mix(col, in.color.rgb*0.40+float3(0.05,0.03,0.08), smoothstep(0.30,0.27,nd)*0.9); // nucleus
-    col = mix(col, float3(0.04), smoothstep(0.09,0.06,length(p-nucC-float2(0.05,0.04))));    // nucleolus
-    for (int k=0;k<5;k++){ float fk=float(k);                              // mitochondria (ovals)
-      float2 oc=float2(sin(seed*3.1+fk*2.3),cos(seed*1.7+fk*1.9))*0.55
-               + 0.04*float2(sin(t*0.5+fk),cos(t*0.4+fk));
-      float od=length((p-oc)*float2(1.0,2.3));
-      col=mix(col, in.color.rgb*1.35+float3(0.12,0.16,0.06), smoothstep(0.13,0.09,od)*0.75); }
-    for (int k=0;k<2;k++){ float fk=float(k);                              // vacuoles (bubbles)
-      float2 vc=float2(cos(seed*2.2+fk*3.0),sin(seed*1.1+fk*2.0))*0.48;
-      float vd=length(p-vc);
-      col=mix(col, float3(0.92), (smoothstep(0.17,0.14,vd)-smoothstep(0.14,0.11,vd))*0.35); }
-    return float4(gammaOut(col)*mask, mask); }
+    // Translucent cytoplasm with a faint interior stream.
+    float3 col=in.color.rgb * (0.9 + 0.18*fbm(p*3.0+float2(t*0.15,seed)));
+    float A = 0.60;                                       // see-through, but crisp-edged
+    // Brighter, more-solid membrane rim (lipid bilayer).
+    float rim = smoothstep(edge-0.10, edge-0.015, r);
+    col = mix(col, in.color.rgb*1.7+0.12, rim*0.85);
+    A = mix(A, 0.9, rim);
+    // A single central nucleus that gently jiggles, with a nucleolus.
+    float2 nucC = 0.05*float2(sin(t*0.5+seed), cos(t*0.4));
+    float nd = length(p - nucC);
+    col = mix(col, in.color.rgb*0.5 + float3(0.06,0.03,0.10), smoothstep(0.32,0.27,nd)*0.9);
+    A = mix(A, 0.92, smoothstep(0.32,0.27,nd)*0.85);
+    float nolus = smoothstep(0.09,0.06, length(p - nucC - float2(0.04,0.03)));
+    col = mix(col, float3(0.05), nolus*0.7); A = mix(A, 0.96, nolus*0.7);
+    A *= mask;
+    return float4(gammaOut(col)*A, A); }
   else if (shape==4){                                   // crisp solid disc (rim-shaded)
     float r=length(p), aa=fwidth(r);
     float m=smoothstep(0.95+aa,0.95-aa,r); if(m<0.01) discard_fragment();
     float3 col=in.color.rgb*(1.05 - 0.3*smoothstep(0.45,0.95,r));
     return float4(gammaOut(col)*m*in.color.a, m*in.color.a); }
+  else if (shape==5){                                   // furry body (x=seed)
+    float seed=in.params.x;
+    float r=length(p), ang=atan2(p.y,p.x);
+    float sid = floor((ang+3.14159)/6.2831853 * 96.0);   // 96 fur strands around
+    float rnd = fract(sin(sid*12.9898 + seed*7.0)*43758.5453);
+    float rnd2= fract(sin(sid*4.1414 + seed*3.0)*24634.6345);
+    float edge = 0.62 + 0.20*rnd;                        // strands of varied length
+    float aa = fwidth(r) + 0.006;
+    float mask = smoothstep(edge+aa, edge-aa, r); if(mask<0.01) discard_fragment();
+    float3 col = in.color.rgb * (0.72 + 0.42*rnd2);      // strand-to-strand tone
+    col *= 0.7 + 0.45*smoothstep(0.25, edge, r);         // brighter at the fur tips
+    return float4(gammaOut(col)*mask, mask); }
   return float4(gammaOut(in.color.rgb)*a*in.color.a, a*in.color.a);
 }
 )METAL";
@@ -179,15 +194,15 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
     _scratch.reserve(kMaxInstances);
     _rng.seed(0xC0FFEE);
 
-    simd_float3 cols[9] = {
+    simd_float3 cols[10] = {
         simd_make_float3(0.32f,0.72f,0.34f), simd_make_float3(0.32f,0.56f,0.88f),
         simd_make_float3(0.85f,0.56f,0.24f), simd_make_float3(0.72f,0.76f,0.26f),
         simd_make_float3(0.74f,0.50f,0.88f), simd_make_float3(0.28f,0.78f,0.66f),
         simd_make_float3(0.86f,0.52f,0.55f), simd_make_float3(0.55f,0.78f,0.42f),
-        simd_make_float3(0.55f,0.82f,0.72f),
+        simd_make_float3(0.55f,0.82f,0.72f), simd_make_float3(0.55f,0.42f,0.30f),
     };
-    int nsp[9] = { 8, 7, 0, 6, 0, 0, 6, 0, 7 };
-    float sizes[9] = { 1.05f,1.05f,1.05f,1.05f,1.05f,1.05f,1.25f,1.30f,1.15f };
+    int nsp[10] = { 8, 7, 0, 6, 0, 0, 6, 0, 7, 6 };
+    float sizes[10] = { 1.05f,1.05f,1.05f,1.05f,1.05f,1.05f,1.25f,1.30f,1.15f,1.15f };
     std::uniform_real_distribution<float> u(0,1);
     for (int i=0;i<kNumStyles;i++){
         Creature c = {};
@@ -203,7 +218,7 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
         c.size = sizes[i];
         c.speed = (i==ST_FISH?6.5f : i==ST_SERPENT?5.0f : i==ST_HOPPER?7.0f :
                    i==ST_JELLY?4.5f : i==ST_CRAWLER?3.2f : i==ST_FATWORM?2.8f :
-                   i==ST_AMOEBA?2.0f : i==ST_CELL?4.2f : 4.0f);
+                   i==ST_AMOEBA?2.0f : i==ST_CELL?4.2f : i==ST_MOUSE?5.5f : 4.0f);
         c.color = cols[i];
         c.target = c.pos;
         c.retarget = 0;
@@ -219,7 +234,7 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
         return e;
     }];
 
-    printf("10 — CRITTER STYLES — nine movement styles side by side.\n"
+    printf("10 — CRITTER STYLES — ten movement styles side by side.\n"
            "Space pause · R reroll wander targets. Pick a favorite to build out.\n");
     _startTime = CACurrentMediaTime(); _lastFrame = _startTime; _fps = 60; _paused = NO;
     return self;
@@ -233,10 +248,10 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
 - (void)blob:(simd_float2)c r:(float)r color:(simd_float4)col {
     [self push:c half:simd_make_float2(r,r) rot:0 shape:0 color:col p:0];
 }
-- (void)push2:(simd_float2)c half:(float)r rot:(float)rot shape:(float)s
+- (void)push2:(simd_float2)c half:(simd_float2)h rot:(float)rot shape:(float)s
         color:(simd_float4)col p0:(float)p0 p1:(float)p1 {
     if ((int)_scratch.size() >= kMaxInstances) return;
-    _scratch.push_back({c.x,c.y,r,r,rot,s, col.x,col.y,col.z,col.w, p0,p1,0,0});
+    _scratch.push_back({c.x,c.y,h.x,h.y,rot,s, col.x,col.y,col.z,col.w, p0,p1,0,0});
 }
 
 // world-space label, centered on x=cx
@@ -276,10 +291,11 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
         simd_float2 want = dir * c.speed * (0.25f + 1.7f*thrust);
         c.vel += (want - c.vel) * std::min(2.0f*dt, 1.0f);
     } else {
-        float gait = 1.0f;
+        float gait = 1.0f, accel = 3.0f;
         if (c.style == ST_CRAWLER) gait = 0.5f + 0.7f*std::max(0.0f, sinf(c.phase*4.0f)); // surges
+        if (c.style == ST_MOUSE) { gait = 0.55f + 0.6f*std::max(0.0f, sinf(c.phase*3.0f)); accel = 6.0f; } // scurry
         simd_float2 want = dir * c.speed * gait;
-        c.vel += (want - c.vel) * std::min(3.0f*dt, 1.0f);
+        c.vel += (want - c.vel) * std::min(accel*dt, 1.0f);
     }
     c.pos += c.vel * dt;
     if (simd_length(c.vel) > 0.05f) c.heading = atan2f(c.vel.y, c.vel.x);
@@ -288,7 +304,8 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
 
     float rate = (c.style==ST_FISH?7.5f : c.style==ST_SERPENT?6.0f :
                   c.style==ST_CRAWLER?5.0f : c.style==ST_WALKER?6.5f : c.style==ST_JELLY?1.0f :
-                  c.style==ST_FATWORM?3.6f : c.style==ST_AMOEBA?1.5f : c.style==ST_CELL?9.0f : 6.0f);
+                  c.style==ST_FATWORM?3.6f : c.style==ST_AMOEBA?1.5f : c.style==ST_CELL?9.0f :
+                  c.style==ST_MOUSE?7.0f : 6.0f);
     c.phase += dt * rate;
 
     if (c.nspine > 0) {
@@ -305,7 +322,8 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
             float amp = (c.style==ST_FISH ? 0.14f*(i/(float)c.nspine)
                         : c.style==ST_SERPENT ? 0.11f
                         : c.style==ST_FATWORM ? 0.06f
-                        : c.style==ST_CELL ? 0.24f*(i/(float)c.nspine) : 0.0f) * c.size;
+                        : c.style==ST_CELL ? 0.24f*(i/(float)c.nspine)
+                        : c.style==ST_MOUSE ? 0.05f : 0.0f) * c.size;
             c.spine[i] += perp * sinf(c.phase - i*0.8f) * amp * (0.4f + mv);
         }
     }
@@ -426,24 +444,53 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
         [self blob:c.pos + fwd*0.15f*S r:S*0.26f color:simd_make_float4(c.color*1.4f, 0.6f)]; // nucleus
     }
     else if (c.style == ST_CELL) {
-        // Solid, detailed cell: flagellum tail, membrane-bound body with
-        // internal organelles, and forward eyespots.
+        // Fluid translucent cell: it stretches along its heading as it swims,
+        // trails a flagellum, and has a single central nucleus + eyespots.
         float seed = c.style*2.3f + 1.1f;
+        float mv = simd_length(c.vel) / std::max(c.speed, 0.1f);
         for (int i = c.nspine-1; i >= 1; i--) {                   // flagellum (behind)
             float un = i/(float)(c.nspine-1);
-            float tr = S*0.20f*(1.0f - 0.7f*un);
+            float tr = S*0.18f*(1.0f - 0.7f*un);
             [self push:c.spine[i] half:simd_make_float2(tr,tr) rot:0 shape:4
-                  color:simd_make_float4(c.color*0.7f, 1.0f) p:0];
+                  color:simd_make_float4(c.color*0.7f, 0.9f) p:0];
         }
-        float br = S*1.7f;                                        // membrane-bound body
-        [self push2:c.pos half:br rot:c.heading shape:3
+        float br = S*1.7f;
+        simd_float2 hb = simd_make_float2(br*(1.0f+0.28f*mv), br*(1.0f-0.16f*mv)); // stretch
+        [self push2:c.pos half:hb rot:c.heading shape:3
               color:simd_make_float4(c.color,1.0f) p0:seed p1:_time];
-        // two eyespots toward the front
-        float er = S*0.30f;
-        [self push:c.pos + fwd*br*0.42f + perp*br*0.30f half:simd_make_float2(er,er)
+        float er = S*0.24f;                                       // two eyespots up front
+        [self push:c.pos + fwd*hb.x*0.44f + perp*hb.y*0.34f half:simd_make_float2(er,er)
               rot:0 shape:1 color:simd_make_float4(0.95f,0.97f,1.0f,1.0f) p:0];
-        [self push:c.pos + fwd*br*0.42f - perp*br*0.30f half:simd_make_float2(er,er)
+        [self push:c.pos + fwd*hb.x*0.44f - perp*hb.y*0.34f half:simd_make_float2(er,er)
               rot:0 shape:1 color:simd_make_float4(0.95f,0.97f,1.0f,1.0f) p:0];
+    }
+    else if (c.style == ST_MOUSE) {
+        // Small furry mammal: fuzzy body + head, round ears, eyes, pink nose,
+        // and a long thin tail. Fur is a strand-edged shader shape.
+        float seed = c.style*3.3f + 2.0f;
+        float bob = 1.0f + 0.04f*sinf(c.phase*2.0f);
+        for (int i = c.nspine-1; i >= 1; i--) {                   // long thin tail
+            float un = i/(float)(c.nspine-1);
+            float tr = S*0.13f*(1.0f - 0.55f*un);
+            [self push:c.spine[i] half:simd_make_float2(tr,tr) rot:0 shape:4
+                  color:simd_make_float4(simd_make_float3(0.5f,0.36f,0.30f), 1.0f) p:0];
+        }
+        // furry body (oval), then a smaller furry head up front
+        [self push2:c.pos - fwd*0.15f*S half:simd_make_float2(S*0.95f, S*0.78f*bob)
+              rot:c.heading shape:5 color:simd_make_float4(c.color,1.0f) p0:seed p1:0];
+        simd_float2 head = c.pos + fwd*0.72f*S;
+        [self push2:head half:simd_make_float2(S*0.52f, S*0.50f) rot:c.heading shape:5
+              color:simd_make_float4(c.color*1.08f,1.0f) p0:seed+4.0f p1:0];
+        // round ears
+        for (int sd=-1; sd<=1; sd+=2)
+            [self push2:head + perp*sd*0.42f*S + fwd*0.05f*S half:simd_make_float2(S*0.26f,S*0.26f)
+                  rot:c.heading shape:5 color:simd_make_float4(c.color*0.92f,1.0f) p0:seed+(float)sd p1:0];
+        // beady eyes + pink nose
+        for (int sd=-1; sd<=1; sd+=2)
+            [self push:head + fwd*0.30f*S + perp*sd*0.24f*S half:simd_make_float2(S*0.11f,S*0.11f)
+                  rot:0 shape:4 color:simd_make_float4(0.05f,0.04f,0.05f,1.0f) p:0];
+        [self push:head + fwd*0.52f*S half:simd_make_float2(S*0.10f,S*0.10f) rot:0 shape:4
+              color:simd_make_float4(0.95f,0.55f,0.62f,1.0f) p:0];
     }
 }
 
@@ -499,7 +546,7 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
     [cmd commit];
     _frameIndex = (_frameIndex + 1) % kInFlight;
 
-    view.window.title = [NSString stringWithFormat:@"10 — CRITTER STYLES ▸ 9 movement styles%s ▸ %.0f fps",
+    view.window.title = [NSString stringWithFormat:@"10 — CRITTER STYLES ▸ 10 movement styles%s ▸ %.0f fps",
                          _paused?" ▸ PAUSED":"", _fps];
 }
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}
