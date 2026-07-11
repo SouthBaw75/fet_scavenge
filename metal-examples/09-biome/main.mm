@@ -445,6 +445,7 @@ enum {
     WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView, WA_BirthRateSlider,
     WA_DayLenSlider, WA_TimeOfDaySlider, WA_MakeRain,
     WA_ToggleDayNight, WA_ToggleClouds, WA_ToggleRain, WA_SpawnPack, WA_ToggleSound,
+    WA_ToggleBubbleSfx,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -938,6 +939,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     int _crawlIdx; float _crawlTimer;
     NSArray<AVAudioPlayer *> *_bubbleSfx;   // bubble-blowing pool
     int _bubbleIdx; float _bubbleTimer;
+    bool _bubbleSfxOn;                       // HUD toggle just for the bubble sound
 
     // Sliding control panel + mouse widget state.
     std::vector<UIWidget> _widgets;
@@ -1151,7 +1153,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v29 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v30 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
            "New: AMBIENT AUDIO — day / night / rain layers crossfade with the sky,\n"
            "a crawl texture rises with colony movement, bubbles blow, and prey cry\n"
@@ -1274,6 +1276,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _bubbleSfx  = [self loadPool:@[@"bubble"] count:3];
     _cryIdx = _crawlIdx = _bubbleIdx = 0;
     _crawlTimer = 0.4f; _bubbleTimer = 1.0f;
+    _bubbleSfxOn = true;
 }
 
 // One-shot: a prey's cry when it's seized. Cycles the pool so overlaps play,
@@ -1298,7 +1301,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float mute = _muted ? 0.0f : 1.0f;
     float dayT   = _daylight * (1.0f - 0.85f*rainMix) * master * mute;
     float nightT = (1.0f - _daylight) * (1.0f - 0.85f*rainMix) * master * mute;
-    float rainT  = rainMix * master * mute;
+    float rainT  = std::clamp(rainMix * master * 1.5f, 0.0f, 1.0f) * mute;   // rain sits louder
     float k = std::min(2.5f * dt, 1.0f);                 // ~0.4s crossfade
     _volDay   += (dayT   - _volDay)   * k;
     _volNight += (nightT - _volNight) * k;
@@ -1318,7 +1321,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             if (c.alive && simd_length(c.vel) > 1.2f) moving++;
         if (moving > 0 && _crawls.count) {
             AVAudioPlayer *p = _crawls[_crawlIdx % _crawls.count]; _crawlIdx++;
-            p.volume = 0.10f + 0.16f * u(_rng);
+            p.volume = 0.04f + 0.06f * u(_rng);      // soft, well under the ambience
             p.enableRate = YES; p.rate = 0.88f + 0.28f * u(_rng);
             p.currentTime = 0.0; [p play];
         }
@@ -1329,7 +1332,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // (not the odd stray one that's almost always drifting somewhere).
     _bubbleTimer -= dt;
     if (_bubbleTimer <= 0.0f) {
-        if ((int)_bubbles.size() >= 10 && _bubbleSfx.count) {
+        if (_bubbleSfxOn && (int)_bubbles.size() >= 10 && _bubbleSfx.count) {
             AVAudioPlayer *p = _bubbleSfx[_bubbleIdx % _bubbleSfx.count]; _bubbleIdx++;
             p.volume = 0.05f + 0.06f * u(_rng);
             p.enableRate = YES; p.rate = 0.9f + 0.25f * u(_rng);
@@ -2403,6 +2406,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_AddPredator: [self spawnPredator:[self randomPos]]; break;
             case WA_SpawnPack:   [self spawnPack:5]; break;
             case WA_ToggleSound: _muted = !_muted; break;
+            case WA_ToggleBubbleSfx: _bubbleSfxOn = !_bubbleSfxOn; break;
             case WA_CullPredators: [self cullPredators]; break;
             case WA_MakeRain:  _rainOn = true; _cloudsOn = true;
                                _cloudTarget = 0.9f; _rainTarget = 0.9f; _weatherTimer = 25.0f; break;
@@ -2598,10 +2602,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         button(x0+2*(w+4),  y, w, 22, "RAIN",    WA_ToggleRain,     0, _rainOn);
     }
     {
-        float y = row(24,12), w = (cw-4)/2.0f;
+        float y = row(24,6), w = (cw-4)/2.0f;
         button(x0,       y, w, 24, "MAKE RAIN", WA_MakeRain, 0, _rain > 0.4f);
         button(x0+w+4,   y, w, 24, _muted ? "SOUND OFF" : "SOUND ON", WA_ToggleSound, 0, !_muted);
     }
+    button(x0, row(22,12), cw, 22, _bubbleSfxOn ? "BUBBLE SFX ON" : "BUBBLE SFX OFF",
+           WA_ToggleBubbleSfx, 0, _bubbleSfxOn);
 
     // --- GENE LAB ---
     text(x0, row(12,6), "SPLICE GENE", 12, simd_make_float4(0.70f,0.92f,0.66f,1));
@@ -2988,7 +2994,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v29 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v30 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -3168,7 +3174,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v29 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v30 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
