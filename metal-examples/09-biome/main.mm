@@ -943,7 +943,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _skyPipeline = [device newRenderPipelineStateWithDescriptor:d error:&err];
     if (!_skyPipeline) { fprintf(stderr,"sky: %s\n", err.localizedDescription.UTF8String); return nil; }
 
+    // HUD reuses the entity fragment shader (EOut in) with the NDC hud_vertex —
+    // restore it after the sky pass swapped in sky_fragment (FSOut in).
     d.vertexFunction = [lib newFunctionWithName:@"hud_vertex"];
+    d.fragmentFunction = [lib newFunctionWithName:@"entity_fragment"];
     _hudPipeline = [device newRenderPipelineStateWithDescriptor:d error:&err];
     if (!_hudPipeline) { fprintf(stderr,"hud: %s\n", err.localizedDescription.UTF8String); return nil; }
 
@@ -1079,7 +1082,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v19 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v20 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
            "New: PACK-HUNTING predators. Nearby hunters coalesce into a pack that\n"
            "focus-fires one isolated/weak quarry and takes geometric roles —\n"
@@ -2641,7 +2644,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v19 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v20 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2804,7 +2807,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v19 (Bubble Burrower)", 1280, 960, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v20 (Bubble Burrower)", 1280, 960, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
