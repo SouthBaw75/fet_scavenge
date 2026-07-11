@@ -987,12 +987,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v16 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v17 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Bubble Burrower life history is now live: slow breeding (1-2 young,\n"
-           "long parental care, bonded pairs, long lives), colony grouping that\n"
-           "trails elders, playful bubble-blowing bouts, and hunker-and-hide\n"
-           "camouflage that eases in over several seconds.\n");
+           "Bubble Burrower life history: 1-2 young, bonded pairs, long lives,\n"
+           "colony grouping that trails elders, playful bubble bouts, hunker-and-\n"
+           "hide camouflage. BIRTH RATE now truly spans slow (heavy investment)\n"
+           "to fast growth — nursing time shortens and fertility rises as you\n"
+           "raise it; fathers stay in the mating pool.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1307,9 +1308,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // the young before the urge to breed rebuilds — the spec's "reproduce
         // slowly and invest heavily in each offspring."
         if (c.care > 0.0f) c.care = std::max(0.0f, c.care - dt);
-        if (c.age > c.maturity && c.energy > 0.45f && !c.pregnant && c.care <= 0.0f)
+        if (c.age > c.maturity && c.energy > 0.40f && !c.pregnant && c.care <= 0.0f)
             c.urge = std::min(c.urge + ph.fertility * (0.5f + 0.7f * adapt)
-                                       * 0.050f * _birthRate * dt, 1.0f);
+                                       * 0.075f * _birthRate * dt, 1.0f);
 
         // --- sickness ---
         if (c.sick > 0) {
@@ -1369,7 +1370,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // --- utility AI: pick the most pressing drive ---
         float sForage = c.hunger;
         float sRest = (1.0f - c.energy) * 0.9f;
-        float sMate = (c.age > c.maturity && c.energy > 0.45f && !c.pregnant && c.care <= 0.0f) ? c.urge : 0.0f;
+        // Breeding is a strong drive once the urge is up — a ready adult should
+        // pursue a mate rather than idly forage or play past it.
+        float sMate = (c.age > c.maturity && c.energy > 0.40f && !c.pregnant && c.care <= 0.0f)
+                      ? c.urge * 1.5f : 0.0f;
         float sWander = 0.15f;
         float sFlee = threatLvl * 2.0f;              // survival trumps everything
         float sNest = c.pregnant ? 0.8f : 0.0f;      // expectant mothers nest
@@ -1381,7 +1385,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // Play: only when life is easy — fed, watered, healthy, rested, and no
         // predator in sight. Juveniles and, per the spec, adults too.
         bool easy = threatLvl < 0.02f && c.hunger < 0.4f && c.thirst < 0.5f
-                    && c.energy > 0.65f && c.health > 0.7f && havePlaymate;
+                    && c.energy > 0.65f && c.health > 0.7f && havePlaymate
+                    && c.urge < 0.4f;                        // breeders don't dawdle
         float sPlay = easy ? (isJuvenile ? 0.55f : 0.32f) : 0.0f;
         c.action = AWander;
         float best = sWander;
@@ -1474,17 +1479,18 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     // Conception: the female carries the offspring.
                     Critter *mom = c.male ? mate : &c;
                     Critter *dad = c.male ? &c : mate;
-                    if (!mom->pregnant && mom->urge > 0.5f && dad->urge > 0.4f) {
+                    if (!mom->pregnant && mom->urge > 0.4f && dad->urge > 0.3f) {
                         mom->unborn = breed(mom->genome, dad->genome, _rng);
                         mom->mateGenome = dad->genome;   // for litter-mate meiosis
                         mom->pregnant = true;
                         mom->gestation = 5.0f;
                         mom->urge = 0; dad->urge = 0;
-                        mom->energy -= 0.12f; dad->energy -= 0.06f;
-                        // Bond the pair for future seasons and give both parents a
-                        // long parental-care period before they breed again.
+                        mom->energy -= 0.08f; dad->energy -= 0.04f;
+                        // Bond the pair for future seasons. Only the mother takes a
+                        // nursing cooldown (set at birth, and shorter at higher
+                        // birth-rate settings); fathers stay in the mating pool so
+                        // the colony can actually grow.
                         mom->partner = dad->id; dad->partner = mom->id;
-                        dad->care = kCareSecs;
                     }
                 } else desire = to / std::max(dd, 1e-3f);
             } else { wantSpeed *= 0.6f; desire = simd_make_float2(cosf(c.heading), sinf(c.heading)); }
@@ -1626,7 +1632,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 }
                 _generation = std::max(_generation, gen);
                 c.pregnant = false;
-                c.care = kCareSecs;        // the mother now devotes herself to the young
+                // Nursing cooldown before the mother breeds again — long when the
+                // caretaker keeps the birth rate low (the spec's heavy investment),
+                // short when they crank it up so the colony grows quickly.
+                c.care = kCareSecs / std::max(_birthRate, 0.5f);
                 c.energy = std::min(c.energy + 0.10f, 1.0f);
             }
         }
@@ -1874,7 +1883,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     else if (act == WA_FoodSlider) _foodTarget = (int)(40.0f + f * 460.0f);
     else if (act == WA_StartPopSlider) _startPop = (int)(f * 120.0f);          // 0..120
     else if (act == WA_LifespanSlider) _lifespanMul = 0.4f + f * 2.1f;          // 0.4x..2.5x
-    else if (act == WA_BirthRateSlider) _birthRate = 0.5f + f * 3.0f;           // 0.5x..3.5x
+    else if (act == WA_BirthRateSlider) _birthRate = 0.5f + f * 4.0f;           // 0.5x..4.5x
 }
 
 - (BOOL)hudMouseDown:(simd_float2)pt bw:(float)bw bh:(float)bh {
@@ -2050,7 +2059,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         text(x0, y, "BIRTH RATE PCT", 11, cLabel);
         [self hudNumber:(int)(_birthRate*100.0f) x:x0+cw-52 y:y dw:5 dh:9 col:cTxt bw:bw bh:bh];
     }
-    slider(x0, row(18,12), cw, 18, (_birthRate-0.5f)/3.0f, WA_BirthRateSlider);
+    slider(x0, row(18,12), cw, 18, (_birthRate-0.5f)/4.0f, WA_BirthRateSlider);
 
     // --- PREDATORS ---
     text(x0, row(11,5), "PREDATORS", 11, cLabel);
@@ -2394,7 +2403,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v16 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v17 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2557,7 +2566,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v16 (Bubble Burrower)", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v17 (Bubble Burrower)", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
