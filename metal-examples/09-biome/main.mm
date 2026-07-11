@@ -1151,7 +1151,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v28 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v29 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
            "New: AMBIENT AUDIO — day / night / rain layers crossfade with the sky,\n"
            "a crawl texture rises with colony movement, bubbles blow, and prey cry\n"
@@ -1325,16 +1325,17 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         float busy = std::clamp(moving / 45.0f, 0.0f, 1.0f);
         _crawlTimer = 0.55f - 0.38f * busy + 0.25f * u(_rng);   // busier colony → more shuffling
     }
-    // Bubble blowing: soft, occasional, only while bubbles are actually rising.
+    // Bubble blowing: rare and soft, and only during an actual burst of bubbles
+    // (not the odd stray one that's almost always drifting somewhere).
     _bubbleTimer -= dt;
     if (_bubbleTimer <= 0.0f) {
-        if (!_bubbles.empty() && _bubbleSfx.count) {
+        if ((int)_bubbles.size() >= 10 && _bubbleSfx.count) {
             AVAudioPlayer *p = _bubbleSfx[_bubbleIdx % _bubbleSfx.count]; _bubbleIdx++;
-            p.volume = 0.14f + 0.16f * u(_rng);
+            p.volume = 0.05f + 0.06f * u(_rng);
             p.enableRate = YES; p.rate = 0.9f + 0.25f * u(_rng);
             p.currentTime = 0.0; [p play];
         }
-        _bubbleTimer = 0.9f + 1.6f * u(_rng);
+        _bubbleTimer = 5.0f + 5.0f * u(_rng);       // every ~5-10s at most
     }
 }
 
@@ -2987,7 +2988,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v28 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v29 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -3167,7 +3168,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v28 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v29 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
