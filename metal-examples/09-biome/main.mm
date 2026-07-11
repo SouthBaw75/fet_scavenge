@@ -1162,12 +1162,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v31 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v32 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: AUTO-ADJUST (LIFE section) holds ~5%/min growth; a true four-beat\n"
-           "walking gait with a slight step-bounce; predators leave the corner\n"
-           "after a kill; rain audio now locked in sync with the on-screen rain;\n"
-           "organisms no longer overlap; the cry cuts off when prey is consumed.\n");
+           "New: limbs now STRIDE fore/aft in an alternating four-beat gait that\n"
+           "paces with speed (idle vs scurry); rain audio silenced when the rain\n"
+           "isn't actually visible on screen. Plus AUTO-ADJUST for ~5%/min growth.\n");
 
     [self setupAudio];
     _startTime = CACurrentMediaTime();
@@ -1346,10 +1345,14 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // to avoid a click.
     float rainMix = std::clamp(_rain, 0.0f, 1.0f);
     _muteGain += ((_muted ? 0.0f : 1.0f) - _muteGain) * std::min(6.0f * dt, 1.0f);  // ~0.16s
-    float duck = 1.0f - 0.65f * rainMix;                 // forest ducks so rain dominates
+    // Rain audio must track how VISIBLE the rain is, not just _rain. A trace of
+    // rain is nearly invisible, so it should be silent too — a curve + a hard
+    // gate keep the sound off until it's actually raining on screen.
+    float rainVis = (rainMix < 0.08f) ? 0.0f : powf((rainMix - 0.08f)/0.92f, 1.4f);
+    float duck = 1.0f - 0.65f * rainVis;                 // forest ducks so rain dominates
     _volDay   = _daylight * duck * master * _muteGain;
     _volNight = (1.0f - _daylight) * duck * master * _muteGain;
-    _volRain  = std::clamp(rainMix * master * 1.6f, 0.0f, 1.0f) * _muteGain;   // rain sits louder
+    _volRain  = std::clamp(rainVis * master * 1.9f, 0.0f, 1.0f) * _muteGain;   // rain sits louder
     if (_sndDay)   _sndDay.volume   = _volDay;
     if (_sndNight) _sndNight.volume = _volNight;
     if (_sndRain)  _sndRain.volume  = _volRain;
@@ -2001,9 +2004,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         c.pos.x = std::clamp(c.pos.x, 1.0f, kWorldW - 1.0f);
         c.pos.y = std::clamp(c.pos.y, 1.0f, kWorldH - 1.0f);
         [self waterRippleAt:c.pos vel:c.vel dt:dt];
-        // Stroke clock: a steady, fairly slow paddle (so each surge is visible),
-        // ticking a touch faster the quicker they're going.
-        c.phase += (2.2f + 0.35f * simd_length(c.vel)) * dt;
+        // Step clock: slow when idling, clearly quicker the faster they move, so
+        // the footwork paces with them (a gentle amble vs. a scurrying flee).
+        c.phase += (1.4f + 0.75f * simd_length(c.vel)) * dt;
 
         // --- camouflage: chromatophores ease toward the ground when the animal
         // holds still, and wash back out once it moves (the spec's 5–15s shift) ---
@@ -2909,18 +2912,25 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
         // Hunkering / hiding pulls the body in low and tight against the ground.
         float tuck = (!corpse && c.action == AHunker) ? 0.88f : 1.0f;
-        // Gait: the fin swing and a slight step-bounce both scale with how fast it
-        // is actually moving, so footwork quickens on the run and stills at rest.
+        // Gait: footwork and a slight step-bounce scale with how fast it's actually
+        // moving, so it quickens on the run and stills at rest.
         float mv = corpse ? 0.0f : std::clamp(simd_length(c.vel)/std::max(ph.speed,0.1f), 0.0f, 1.4f);
-        float bounce = 1.0f + 0.06f * mv * fabsf(sinf(c.phase));      // body swells a touch on each step
+        float bounce = 1.0f + 0.07f * mv * fabsf(sinf(c.phase));      // body swells a touch on each step
         float S = ph.size * 0.85f * tuck * bounce;                    // body radius (membrane)
         simd_float2 fwd = simd_make_float2(cosf(c.heading), sinf(c.heading));
         simd_float2 perp = simd_make_float2(-fwd.y, fwd.x);
         float seed = (float)(c.id % 97) * 0.7f;
-        // Alternating four-beat gait: diagonal pairs stroke out of phase.
-        float amp = 0.30f + 0.32f * mv;                              // wider swing at speed
-        float gA = amp * sinf(c.phase);                             // pair A: rear-left + front-right
-        float gB = -gA;                                             // pair B: rear-right + front-left
+        // Alternating four-beat gait. The KEY cue is that each limb strides fore
+        // and aft along the body (planting and pushing), diagonal pairs opposite;
+        // a smaller angle swing rides on top. Both near-zero at rest, growing with
+        // speed, so a still critter's feet don't march in place.
+        float step   = sinf(c.phase);                               // raw gait signal
+        float amp    = (0.08f + 0.50f * mv) * step;                 // fin angle swing
+        float stride = (0.10f + 0.55f * mv) * S * step;             // fore/aft limb travel
+        simd_float2 strideA = fwd * stride;                        // pair A (rear-L + front-R) forward
+        simd_float2 strideB = -strideA;                            // pair B (rear-R + front-L) opposite
+        float gA = amp;                                            // pair A angle
+        float gB = -amp;                                           // pair B angle
         simd_float4 finCol = simd_make_float4(base*1.05f + simd_make_float3(0.04f,0.06f,0.05f), A);
 
         // Bioluminescence: after dark, a soft halo glows in the animal's dominant
@@ -2941,16 +2951,16 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         }
 
         // Four splayed translucent veined webbed fins (drawn first; the body overlaps
-        // their roots). Diagonal pairs alternate for a true four-beat walking gait.
+        // their roots). Diagonal pairs stride out of phase — a true four-beat walk.
         // rear pair — the main paddles
-        [self fin:c.pos - fwd*0.35f*S + perp*0.60f*S ang:c.heading + 2.15f + gA        // rear-left (A)
+        [self fin:c.pos - fwd*0.35f*S + perp*0.60f*S + strideA ang:c.heading + 2.15f + gA        // rear-left (A)
                len:1.25f*S*sink width:0.42f*S color:finCol seed:seed];
-        [self fin:c.pos - fwd*0.35f*S - perp*0.60f*S ang:c.heading - 2.15f + gB        // rear-right (B)
+        [self fin:c.pos - fwd*0.35f*S - perp*0.60f*S + strideB ang:c.heading - 2.15f + gB        // rear-right (B)
                len:1.25f*S*sink width:0.42f*S color:finCol seed:seed+3.0f];
         // front pair — smaller, swing a little less
-        [self fin:c.pos + fwd*0.30f*S + perp*0.55f*S ang:c.heading + 1.05f + gB*0.8f   // front-left (B)
+        [self fin:c.pos + fwd*0.30f*S + perp*0.55f*S + strideB ang:c.heading + 1.05f + gB*0.8f   // front-left (B)
                len:0.95f*S*sink width:0.34f*S color:finCol seed:seed+6.0f];
-        [self fin:c.pos + fwd*0.30f*S - perp*0.55f*S ang:c.heading - 1.05f + gA*0.8f   // front-right (A)
+        [self fin:c.pos + fwd*0.30f*S - perp*0.55f*S + strideA ang:c.heading - 1.05f + gA*0.8f   // front-right (A)
                len:0.95f*S*sink width:0.34f*S color:finCol seed:seed+9.0f];
 
         // Big translucent speckled domed membrane body (slightly tapered toward the face).
@@ -3086,7 +3096,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v31 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v32 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -3266,7 +3276,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v31 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v32 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
