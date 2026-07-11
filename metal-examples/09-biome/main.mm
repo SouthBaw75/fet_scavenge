@@ -59,6 +59,7 @@ static const float kThermalCost  = 0.055f;  // energy/sec drain at full mismatch
 // Bubble Burrower life history: a slow-breeding, long-lived, deeply social
 // species. Pairs bond, invest heavily in one or two young, follow experienced
 // elders, and play when times are good.
+static const float kPackRange    = 16.0f;   // hunters within this range hunt as one pack
 static const float kElderFrac    = 0.68f;   // age fraction at which a critter is an "elder"
 static const float kCareSecs     = 16.0f;   // post-birth parental-care cooldown before urge rebuilds
 static const float kCamoRate     = 0.11f;   // camouflage ease speed (~1/9s to full → the spec's 5-15s)
@@ -334,6 +335,12 @@ struct Food {
 // critters, and its numbers rise and fall with the prey supply, producing
 // predator/prey population cycles. Prey coats that match the ground are harder
 // for it to spot, so predation selects for camouflage.
+// Predators hunt in coordinated packs. Nearby hunters coalesce into a pack that
+// focus-fires a single shared quarry (favouring isolated / weak / young prey),
+// and each member takes a geometric role — chasers drive from behind, flankers
+// cut off the sides, ambushers slip ahead to intercept — so the pack encircles
+// its target instead of all charging the same spot.
+enum { PR_Chaser = 0, PR_FlankL = 1, PR_FlankR = 2, PR_Ambush = 3 };
 struct Predator {
     simd_float2 pos, vel;
     float heading;
@@ -345,6 +352,8 @@ struct Predator {
     float cooldown;    // brief pause after a kill
     float phase;
     bool alive;
+    uint32_t pack;     // pack identity (nearby hunters merge into one)
+    int role;          // PR_Chaser / PR_FlankL / PR_FlankR / PR_Ambush this step
 };
 
 // A nest: a built breeding site. A female returns to hers to give birth (pups
@@ -874,6 +883,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float _cloud, _rain;            // current overcast / rainfall, 0..1
     float _cloudTarget, _rainTarget;// where the weather is drifting toward
     float _weatherTimer;            // time until the next weather regime
+    uint32_t _nextPack;             // next unique pack id to hand out
 
     // Sliding control panel + mouse widget state.
     std::vector<UIWidget> _widgets;
@@ -980,6 +990,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _daylight = 1.0f; _skyWarm = 0.0f; _activity = 1.0f;
     _cloud = 0.15f; _rain = 0.0f;
     _cloudTarget = 0.15f; _rainTarget = 0.0f; _weatherTimer = 20.0f;
+    _nextPack = 1;
     _zoom = 1.0f;
     _panCenter = simd_make_float2(kWorldW*0.5f, kWorldH*0.5f);
     _worldDrag = false; _worldMoved = false;
@@ -1068,12 +1079,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v18 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v19 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: a DAY/NIGHT cycle (dawn/dusk warmth, night vignette, pupils\n"
-           "widen in the dark, crepuscular activity) and drifting WEATHER (clear/\n"
-           "cloudy/rain with animated rain streaks). Rain keeps skin moist; the\n"
-           "SKY panel scrubs time of day, sets day length, and can MAKE RAIN.\n");
+           "New: PACK-HUNTING predators. Nearby hunters coalesce into a pack that\n"
+           "focus-fires one isolated/weak quarry and takes geometric roles —\n"
+           "red chasers drive, amber flankers cut off the sides, violet ambushers\n"
+           "slip ahead to intercept — so the pack encircles instead of charging.\n"
+           "Tip: a tight colony that trails its elders is far safer than a straggler.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -1195,6 +1207,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     p.cooldown = 0;
     p.phase = u(_rng) * 6.28f;
     p.alive = true;
+    p.pack = _nextPack++;        // its own pack until it meets others
+    p.role = PR_Chaser;
     _predators.push_back(p);
 }
 
@@ -1772,8 +1786,70 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _bubbles.erase(std::remove_if(_bubbles.begin(), _bubbles.end(),
                    [](const Bubble &b){ return b.age >= b.life; }), _bubbles.end());
 
-    // --- predators: hunt prey; numbers rise and fall with the prey supply ---
+    // --- predators: coordinated pack hunting ---
     float groundLuma = 0.24f + 0.06f * _climate;   // grass tone by climate
+    int NP = (int)_predators.size();
+
+    // 1) Coalesce hunters that are close into a shared pack (a few relaxation
+    //    passes merge chains so a loose group converges on one pack id).
+    for (int pass = 0; pass < 3; pass++)
+        for (int a = 0; a < NP; a++) {
+            if (!_predators[a].alive) continue;
+            for (int b = a+1; b < NP; b++) {
+                if (!_predators[b].alive) continue;
+                if (simd_distance(_predators[a].pos, _predators[b].pos) < kPackRange) {
+                    uint32_t m = std::min(_predators[a].pack, _predators[b].pack);
+                    _predators[a].pack = m; _predators[b].pack = m;
+                }
+            }
+        }
+    // 2) Colony centroid — prey far from it are exposed stragglers.
+    simd_float2 colonyC = simd_make_float2(0,0); int colonyN = 0;
+    for (const Critter &o : _critters) if (o.alive) { colonyC += o.pos; colonyN++; }
+    if (colonyN > 0) colonyC /= (float)colonyN;
+    // 3) Per-pack centroid and size.
+    std::vector<uint32_t> packId; std::vector<simd_float2> packC; std::vector<int> packN;
+    auto packSlot = [&](uint32_t id)->int {
+        for (int k = 0; k < (int)packId.size(); k++) if (packId[k]==id) return k;
+        packId.push_back(id); packC.push_back(simd_make_float2(0,0)); packN.push_back(0);
+        return (int)packId.size()-1;
+    };
+    for (int a = 0; a < NP; a++) if (_predators[a].alive) {
+        int k = packSlot(_predators[a].pack); packC[k] += _predators[a].pos; packN[k]++;
+    }
+    for (int k = 0; k < (int)packC.size(); k++) packC[k] /= (float)std::max(packN[k],1);
+    // 4) Each pack focus-fires ONE quarry: near the pack and vulnerable (young,
+    //    slow, sick, exhausted, frail, or isolated from the herd). Camouflaged
+    //    coats stay hard to detect; a bigger pack coordinates over a wider net.
+    std::vector<uint32_t> packTarget(packId.size(), 0);
+    std::vector<float> packScore(packId.size(), 1e9f);
+    for (Critter &o : _critters) {
+        if (!o.alive) continue;
+        float contrast = fabsf(coatLuma(o.ph.color) - groundLuma);
+        float visRange = 22.0f * (0.35f + 1.3f * std::clamp(contrast,0.0f,1.0f)
+                                  + 0.5f * coatVividness(o.ph.color));
+        if (o.sheltered) visRange *= 0.55f;
+        float ageT = o.ph.lifespan > 0 ? o.age/(o.ph.lifespan*_lifespanMul) : 0.0f;
+        float isolation = colonyN > 0 ? simd_distance(o.pos, colonyC) : 0.0f;
+        float weak = (o.age <= o.maturity ? 0.5f : 0.0f)                       // juveniles
+                   + (1.0f - o.health) * 0.4f + o.sick * 0.3f                  // sick / hurt
+                   + std::clamp(0.5f - o.energy, 0.0f, 0.5f)                   // exhausted
+                   + std::clamp((10.0f - o.ph.speed)/10.0f, 0.0f, 0.4f)        // slow
+                   + (ageT > kElderFrac ? 0.3f : 0.0f);                        // frail elders
+        float vuln = 1.0f + weak + std::clamp(isolation*0.05f, 0.0f, 1.2f);
+        for (int k = 0; k < (int)packId.size(); k++) {
+            float d = simd_distance(o.pos, packC[k]);
+            float packSight = visRange + 4.0f * sqrtf((float)packN[k]);
+            if (d > packSight) continue;
+            float cost = d / vuln;                    // near + vulnerable → chosen
+            if (cost < packScore[k]) { packScore[k] = cost; packTarget[k] = o.id; }
+        }
+    }
+    // 5) Broadcast the pack's quarry to every member (shared sightings = the
+    //    pack sees as one), so members converge even if they can't see it alone.
+    for (int a = 0; a < NP; a++) if (_predators[a].alive)
+        _predators[a].targetPrey = packTarget[packSlot(_predators[a].pack)];
+
     for (size_t i = 0; i < _predators.size(); i++) {
         Predator &p = _predators[i];
         if (!p.alive) continue;
@@ -1782,33 +1858,27 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         p.energy -= 0.022f * dt;                    // metabolism
         if (p.age > p.lifespan || p.energy <= 0.0f) { p.alive = false; continue; }
 
-        float sight = 22.0f;
-        // Re-acquire a target if the current one is gone.
         Critter *prey = [self critterById:p.targetPrey];
-        if (!prey) {
-            float bestD = 1e9f;
-            for (Critter &o : _critters) {
-                if (!o.alive) continue;
-                float dd = simd_distance(o.pos, p.pos);
-                // Camouflaged coats (matching the ground) are spotted only up
-                // close; conspicuous / vivid ones — the ones mates prefer — are
-                // seen from far off. Nests offer cover.
-                float contrast = fabsf(coatLuma(o.ph.color) - groundLuma);
-                float visRange = sight * (0.35f + 1.3f * std::clamp(contrast,0.0f,1.0f)
-                                          + 0.5f * coatVividness(o.ph.color));
-                if (o.sheltered) visRange *= 0.55f;
-                if (dd < visRange && dd < bestD) { bestD = dd; p.targetPrey = o.id; }
-            }
-            prey = [self critterById:p.targetPrey];
-        }
 
         simd_float2 desire = simd_make_float2(0,0);
         float wantSpeed = 8.6f;                      // fast prey can outrun it
         if (prey) {
-            simd_float2 to = prey->pos - p.pos;
-            float d = simd_length(to);
+            // Predict the prey's escape and take a geometric role around it.
+            simd_float2 pv = prey->vel;
+            float ps = simd_length(pv);
+            simd_float2 fleeDir = ps > 0.4f ? pv/ps
+                                : simd_make_float2(cosf(prey->heading), sinf(prey->heading));
+            simd_float2 r = p.pos - prey->pos;       // quarry -> hunter
+            float rd = simd_length(r);
+            simd_float2 rn = rd > 1e-3f ? r/rd : fleeDir;
+            float ahead = rn.x*fleeDir.x + rn.y*fleeDir.y;    // +front of prey .. -behind
+            float side  = rn.x*fleeDir.y - rn.y*fleeDir.x;    // which flank
+            if      (ahead >  0.35f) p.role = PR_Ambush;      // already in front → intercept
+            else if (ahead < -0.35f) p.role = PR_Chaser;      // behind → drive it
+            else                     p.role = (side >= 0.0f) ? PR_FlankL : PR_FlankR;
+
             float catchR = 0.9f + p.size * 0.3f + prey->ph.size * 0.3f;
-            if (d < catchR) {
+            if (rd < catchR) {
                 if (p.cooldown <= 0.0f) {             // kill
                     prey->alive = false; _deaths++;
                     if (prey->id == _selected) _selected = 0;
@@ -1816,16 +1886,42 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     p.cooldown = 1.6f;
                     p.targetPrey = 0;
                 }
-            } else desire = to / std::max(d, 1e-3f);
+            } else {
+                float lead = std::clamp(rd / 12.0f, 0.0f, 2.0f);
+                simd_float2 future = prey->pos + pv * lead;
+                simd_float2 perp = simd_make_float2(-fleeDir.y, fleeDir.x);
+                float encircle = 3.5f + prey->ph.size;
+                simd_float2 aim;
+                if (p.role == PR_Chaser)      aim = future;                          // press from behind
+                else if (p.role == PR_Ambush) aim = prey->pos + fleeDir*(rd*0.6f+3.0f); // cut the escape line
+                else {
+                    float s = (p.role == PR_FlankL) ? 1.0f : -1.0f;
+                    aim = future + perp * s * encircle;                              // swing wide to a flank
+                }
+                simd_float2 to = aim - p.pos;
+                float d2 = simd_length(to);
+                desire = d2 > 1e-3f ? to/d2 : fleeDir;
+                if (p.role == PR_FlankL || p.role == PR_FlankR) wantSpeed = 9.4f;    // hustle to get around
+                else if (p.role == PR_Ambush) wantSpeed = (rd < 6.0f) ? 9.8f : 3.0f; // lie in wait, then pounce
+            }
         } else {
+            // No quarry in reach: regroup with the pack and patrol together.
+            int k = packSlot(p.pack);
+            simd_float2 toC = packC[k] - p.pos;
+            float cd = simd_length(toC);
             p.heading += (u(_rng) - 0.5f) * 1.4f * dt;
-            desire = simd_make_float2(cosf(p.heading), sinf(p.heading));
-            wantSpeed *= 0.45f;                       // patrol slowly
+            simd_float2 rove = simd_make_float2(cosf(p.heading), sinf(p.heading));
+            simd_float2 group = (packN[k] > 1 && cd > kPackRange*0.6f) ? toC/cd : simd_make_float2(0,0);
+            desire = simd_normalize(rove*0.6f + group*0.8f + simd_make_float2(1e-4f,0));
+            wantSpeed *= 0.5f;                        // patrol slowly
+            p.role = PR_Chaser;
         }
 
-        // Well-fed adults bud off a new predator (asexual, for simplicity).
+        // Well-fed adults bud off a new hunter (asexual) — it joins the pack.
         if (p.energy > 1.05f && p.age > 14.0f && (int)_predators.size() < kMaxPredators) {
+            uint32_t mypack = p.pack;         // capture before the push (vector is reserved, no realloc)
             [self spawnPredator:(p.pos + simd_make_float2(u(_rng)-0.5f, u(_rng)-0.5f))];
+            _predators.back().pack = mypack;
             p.energy -= 0.6f;
         }
 
@@ -2469,9 +2565,15 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             [self push:p.spine[sidx] half:simd_make_float2(rr,rr) rot:0 shape:0
                   color:simd_make_float4(col,1.0f) p:simd_make_float4(0,0,0,0)];
         }
+        // Dorsal spikes tinted by the hunter's current pack role, so the
+        // strategy is readable: red chasers drive, amber flankers cut off the
+        // sides, violet ambushers lie ahead to intercept.
+        simd_float3 rc = (p.role == PR_Chaser) ? simd_make_float3(0.90f,0.24f,0.16f)
+                       : (p.role == PR_Ambush) ? simd_make_float3(0.62f,0.30f,0.78f)
+                                               : simd_make_float3(0.96f,0.62f,0.16f);
         for (int k = 1; k < kSpineNodes-1; k++)   // dorsal spikes
             [self push:p.spine[k] half:simd_make_float2(p.size*0.15f,p.size*0.15f) rot:0 shape:7
-                  color:simd_make_float4(0.80f,0.22f,0.16f,1) p:simd_make_float4(0,0,0,0)];
+                  color:simd_make_float4(rc,1) p:simd_make_float4(0,0,0,0)];
         float er = 0.14f * p.size;
         [self push:p.pos + fwd*0.22f*p.size + perp*0.22f*p.size
               half:simd_make_float2(er,er) rot:0 shape:0
@@ -2539,7 +2641,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v18 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v19 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2702,7 +2804,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v18 (Bubble Burrower)", 1280, 960, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v19 (Bubble Burrower)", 1280, 960, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }

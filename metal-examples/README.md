@@ -222,11 +222,21 @@ and breed, follow elders as a colony, and catch a contagion whose
 spread is governed by disease-resistance genes. Click any critter to inspect its
 trait bars and its genome (both homologs shown as colored base ticks).
 
-**Predators** hunt the colony, turning it into an ecosystem: prey/predator
-numbers rise and fall in out-of-phase **population cycles** (visible on the
-graph), sharp-eyed critters spot hunters and sprint away, and — because a coat
-that **matches the ground is spotted only up close** — predation selects for
-**camouflage**. Predators breed when well-fed and starve when prey are scarce.
+**Predators** hunt the colony in **coordinated packs**, turning it into an
+ecosystem: prey/predator numbers rise and fall in out-of-phase **population
+cycles** (visible on the graph). Nearby hunters coalesce into a pack that
+**focus-fires a single quarry** — picking the most vulnerable target (young,
+slow, sick, exhausted, frail, or a **straggler** isolated from the herd) — and
+each member takes a **geometric role**: red **chasers** drive from behind, amber
+**flankers** swing wide to cut off the sides, and violet **ambushers** slip
+ahead to intercept the escape line, so the pack **encircles** its target instead
+of all charging the same spot (their dorsal spikes are tinted by role, so you can
+read the strategy). The pack shares sightings, so members converge even when they
+can't personally see the quarry. Sharp-eyed critters still spot hunters and
+sprint away, and — because a coat that **matches the ground is spotted only up
+close** — predation selects for **camouflage**; and because packs cut out
+stragglers, it also rewards **staying in the group and trailing the elders**.
+Predators breed when well-fed and starve when prey are scarce.
 
 **Sexual selection & nests.** Females don't just mate with whoever's nearest —
 they **choose the showiest male** in sight (vivid colour + prominent fins +
