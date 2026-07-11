@@ -16,17 +16,17 @@
 #include <random>
 #include <vector>
 
-static const float kWorldW = 80.0f, kWorldH = 40.0f;
-static const int   kCols = 4, kRows = 2;
-static const float kCellW = kWorldW / kCols;   // 20
-static const float kCellH = kWorldH / kRows;   // 20
+static const float kWorldW = 84.0f, kWorldH = 54.0f;
+static const int   kCols = 3, kRows = 3;
+static const float kCellW = kWorldW / kCols;   // 28
+static const float kCellH = kWorldH / kRows;   // 18
 static const int   kMaxInstances = 8192;
 static const int   kInFlight = 3;
-static const int   kNumStyles = 8;
+static const int   kNumStyles = 9;
 
-enum { ST_SERPENT, ST_FISH, ST_WALKER, ST_CRAWLER, ST_JELLY, ST_HOPPER, ST_FATWORM, ST_AMOEBA };
-static const char *kStyleName[8] = { "SERPENT","FISH","WALKER","CRAWLER",
-                                     "JELLY","HOPPER","FAT WORM","AMOEBA" };
+enum { ST_SERPENT, ST_FISH, ST_WALKER, ST_CRAWLER, ST_JELLY, ST_HOPPER, ST_FATWORM, ST_AMOEBA, ST_CELL };
+static const char *kStyleName[9] = { "SERPENT","FISH","WALKER","CRAWLER","JELLY",
+                                     "HOPPER","FAT WORM","AMOEBA","CELL" };
 
 struct InstC { float cx,cy,hx,hy,rot,shape, r,g,b,a, p0,p1,p2,p3; };
 
@@ -55,7 +55,7 @@ vertex FSOut fs_vertex(uint vid [[vertex_id]]){ float2 p=float2((vid<<1)&2, vid&
 fragment float4 ground_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(0)]]){
   float2 ndc=float2(in.uv.x*2.0-1.0, 1.0-in.uv.y*2.0);
   float2 w=(ndc-u.offset)/u.scale;
-  float cx=floor(w.x/20.0), cy=floor(w.y/20.0);
+  float cx=floor(w.x/28.0), cy=floor(w.y/18.0);
   float checker=fmod(cx+cy,2.0);
   float3 col=mix(float3(0.09,0.13,0.08), float3(0.12,0.17,0.10), checker);
   col*=0.82+0.34*fbm(w*0.5);
@@ -93,12 +93,43 @@ vertex EOut entity_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 fragment float4 entity_fragment(EOut in [[stage_in]]){
   float2 p=in.lp; int shape=int(in.shape+0.5); float a=0.0;
   if (shape==0){ a=smoothstep(1.0,0.1,length(p)); }
-  else if (shape==1){ float r=length(p); float3 c=(r<0.42)?float3(0.04):float3(0.96);
-    float av=smoothstep(1.0,0.72,r); return float4(gammaOut(c)*av, av); }
+  else if (shape==1){                                   // crisp eye with a glint
+    float r=length(p); float aa=fwidth(r);
+    float m=smoothstep(0.92+aa,0.92-aa,r); if(m<0.01) discard_fragment();
+    float3 c=(r<0.46)?float3(0.05):float3(0.97);
+    c=max(c, float3(smoothstep(0.26,0.0,length(p-float2(-0.22,0.26)))));  // highlight
+    return float4(gammaOut(c)*m, m); }
   else if (shape==2){ int code=clamp(int(in.params.x+0.5),0,25);
     int cx=clamp(int((p.x*0.5+0.5)*5.0),0,4); int cy=clamp(int((1.0-(p.y*0.5+0.5))*7.0),0,6);
     uint bit=(uint(kFont[code][cy])>>uint(4-cx))&1u; if(bit==0u) discard_fragment();
     return float4(gammaOut(in.color.rgb), in.color.a); }
+  else if (shape==3){                                   // detailed CELL (x=seed, y=time)
+    float seed=in.params.x, t=in.params.y;
+    float r=length(p), ang=atan2(p.y,p.x), aa=fwidth(r);
+    float edge=0.90 + 0.05*sin(ang*3.0+seed) + 0.03*sin(ang*5.0-seed*1.3);
+    float mask=smoothstep(edge+aa, edge-aa, r); if(mask<0.01) discard_fragment();
+    float3 col=in.color.rgb * (0.85 + 0.3*fbm(p*3.5+float2(t*0.1,seed)));   // streaming cytoplasm
+    col *= 1.08 - 0.28*smoothstep(0.35,edge,r);                            // subtle depth
+    col = mix(col, in.color.rgb*1.7+0.14, smoothstep(edge-0.12,edge-0.02,r)*0.8); // membrane rim
+    float2 nucC=float2(0.16*sin(seed), -0.12*cos(seed*1.3));
+    float nd=length(p-nucC);
+    col = mix(col, in.color.rgb*0.40+float3(0.05,0.03,0.08), smoothstep(0.30,0.27,nd)*0.9); // nucleus
+    col = mix(col, float3(0.04), smoothstep(0.09,0.06,length(p-nucC-float2(0.05,0.04))));    // nucleolus
+    for (int k=0;k<5;k++){ float fk=float(k);                              // mitochondria (ovals)
+      float2 oc=float2(sin(seed*3.1+fk*2.3),cos(seed*1.7+fk*1.9))*0.55
+               + 0.04*float2(sin(t*0.5+fk),cos(t*0.4+fk));
+      float od=length((p-oc)*float2(1.0,2.3));
+      col=mix(col, in.color.rgb*1.35+float3(0.12,0.16,0.06), smoothstep(0.13,0.09,od)*0.75); }
+    for (int k=0;k<2;k++){ float fk=float(k);                              // vacuoles (bubbles)
+      float2 vc=float2(cos(seed*2.2+fk*3.0),sin(seed*1.1+fk*2.0))*0.48;
+      float vd=length(p-vc);
+      col=mix(col, float3(0.92), (smoothstep(0.17,0.14,vd)-smoothstep(0.14,0.11,vd))*0.35); }
+    return float4(gammaOut(col)*mask, mask); }
+  else if (shape==4){                                   // crisp solid disc (rim-shaded)
+    float r=length(p), aa=fwidth(r);
+    float m=smoothstep(0.95+aa,0.95-aa,r); if(m<0.01) discard_fragment();
+    float3 col=in.color.rgb*(1.05 - 0.3*smoothstep(0.45,0.95,r));
+    return float4(gammaOut(col)*m*in.color.a, m*in.color.a); }
   return float4(gammaOut(in.color.rgb)*a*in.color.a, a*in.color.a);
 }
 )METAL";
@@ -116,7 +147,7 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
     std::mt19937 _rng;
     simd_float2 _uScale, _uOffset;
     double _startTime, _lastFrame;
-    float _fps; bool _paused;
+    float _fps; bool _paused; float _time;
 }
 
 - (instancetype)initWithView:(MTKView *)view {
@@ -148,14 +179,15 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
     _scratch.reserve(kMaxInstances);
     _rng.seed(0xC0FFEE);
 
-    simd_float3 cols[8] = {
+    simd_float3 cols[9] = {
         simd_make_float3(0.32f,0.72f,0.34f), simd_make_float3(0.32f,0.56f,0.88f),
         simd_make_float3(0.85f,0.56f,0.24f), simd_make_float3(0.72f,0.76f,0.26f),
         simd_make_float3(0.74f,0.50f,0.88f), simd_make_float3(0.28f,0.78f,0.66f),
         simd_make_float3(0.86f,0.52f,0.55f), simd_make_float3(0.55f,0.78f,0.42f),
+        simd_make_float3(0.55f,0.82f,0.72f),
     };
-    int nsp[8] = { 8, 7, 0, 6, 0, 0, 6, 0 };
-    float sizes[8] = { 1.05f,1.05f,1.05f,1.05f,1.05f,1.05f,1.25f,1.30f };
+    int nsp[9] = { 8, 7, 0, 6, 0, 0, 6, 0, 7 };
+    float sizes[9] = { 1.05f,1.05f,1.05f,1.05f,1.05f,1.05f,1.25f,1.30f,1.15f };
     std::uniform_real_distribution<float> u(0,1);
     for (int i=0;i<kNumStyles;i++){
         Creature c = {};
@@ -171,7 +203,7 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
         c.size = sizes[i];
         c.speed = (i==ST_FISH?6.5f : i==ST_SERPENT?5.0f : i==ST_HOPPER?7.0f :
                    i==ST_JELLY?4.5f : i==ST_CRAWLER?3.2f : i==ST_FATWORM?2.8f :
-                   i==ST_AMOEBA?2.0f : 4.0f);
+                   i==ST_AMOEBA?2.0f : i==ST_CELL?4.2f : 4.0f);
         c.color = cols[i];
         c.target = c.pos;
         c.retarget = 0;
@@ -187,7 +219,7 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
         return e;
     }];
 
-    printf("10 — CRITTER STYLES — eight movement styles side by side.\n"
+    printf("10 — CRITTER STYLES — nine movement styles side by side.\n"
            "Space pause · R reroll wander targets. Pick a favorite to build out.\n");
     _startTime = CACurrentMediaTime(); _lastFrame = _startTime; _fps = 60; _paused = NO;
     return self;
@@ -200,6 +232,11 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
 }
 - (void)blob:(simd_float2)c r:(float)r color:(simd_float4)col {
     [self push:c half:simd_make_float2(r,r) rot:0 shape:0 color:col p:0];
+}
+- (void)push2:(simd_float2)c half:(float)r rot:(float)rot shape:(float)s
+        color:(simd_float4)col p0:(float)p0 p1:(float)p1 {
+    if ((int)_scratch.size() >= kMaxInstances) return;
+    _scratch.push_back({c.x,c.y,r,r,rot,s, col.x,col.y,col.z,col.w, p0,p1,0,0});
 }
 
 // world-space label, centered on x=cx
@@ -251,7 +288,7 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
 
     float rate = (c.style==ST_FISH?7.5f : c.style==ST_SERPENT?6.0f :
                   c.style==ST_CRAWLER?5.0f : c.style==ST_WALKER?6.5f : c.style==ST_JELLY?1.0f :
-                  c.style==ST_FATWORM?3.6f : c.style==ST_AMOEBA?1.5f : 6.0f);
+                  c.style==ST_FATWORM?3.6f : c.style==ST_AMOEBA?1.5f : c.style==ST_CELL?9.0f : 6.0f);
     c.phase += dt * rate;
 
     if (c.nspine > 0) {
@@ -261,13 +298,14 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
         for (int i=1;i<c.nspine;i++){
             simd_float2 dd = c.spine[i] - c.spine[i-1];
             float dlen = simd_length(dd);
-            float link = (c.style==ST_FATWORM ? 0.62f : 0.52f) * c.size;
+            float link = (c.style==ST_FATWORM ? 0.62f : c.style==ST_CELL ? 0.40f : 0.52f) * c.size;
             if (c.style == ST_CRAWLER) link *= (0.62f + 0.55f*sinf(c.phase*4.0f - i*0.9f)); // peristalsis
             if (c.style == ST_FATWORM) link *= (0.82f + 0.22f*sinf(c.phase*3.0f - i*0.8f)); // stretch/bunch
             if (dlen > 1e-4f) c.spine[i] = c.spine[i-1] + dd/dlen*link;
             float amp = (c.style==ST_FISH ? 0.14f*(i/(float)c.nspine)
                         : c.style==ST_SERPENT ? 0.11f
-                        : c.style==ST_FATWORM ? 0.06f : 0.0f) * c.size;
+                        : c.style==ST_FATWORM ? 0.06f
+                        : c.style==ST_CELL ? 0.24f*(i/(float)c.nspine) : 0.0f) * c.size;
             c.spine[i] += perp * sinf(c.phase - i*0.8f) * amp * (0.4f + mv);
         }
     }
@@ -387,6 +425,26 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
         [self blob:c.pos r:S*0.55f color:simd_make_float4(c.color*0.8f, 0.55f)];       // cytoplasm
         [self blob:c.pos + fwd*0.15f*S r:S*0.26f color:simd_make_float4(c.color*1.4f, 0.6f)]; // nucleus
     }
+    else if (c.style == ST_CELL) {
+        // Solid, detailed cell: flagellum tail, membrane-bound body with
+        // internal organelles, and forward eyespots.
+        float seed = c.style*2.3f + 1.1f;
+        for (int i = c.nspine-1; i >= 1; i--) {                   // flagellum (behind)
+            float un = i/(float)(c.nspine-1);
+            float tr = S*0.20f*(1.0f - 0.7f*un);
+            [self push:c.spine[i] half:simd_make_float2(tr,tr) rot:0 shape:4
+                  color:simd_make_float4(c.color*0.7f, 1.0f) p:0];
+        }
+        float br = S*1.7f;                                        // membrane-bound body
+        [self push2:c.pos half:br rot:c.heading shape:3
+              color:simd_make_float4(c.color,1.0f) p0:seed p1:_time];
+        // two eyespots toward the front
+        float er = S*0.30f;
+        [self push:c.pos + fwd*br*0.42f + perp*br*0.30f half:simd_make_float2(er,er)
+              rot:0 shape:1 color:simd_make_float4(0.95f,0.97f,1.0f,1.0f) p:0];
+        [self push:c.pos + fwd*br*0.42f - perp*br*0.30f half:simd_make_float2(er,er)
+              rot:0 shape:1 color:simd_make_float4(0.95f,0.97f,1.0f,1.0f) p:0];
+    }
 }
 
 - (void)drawInMTKView:(MTKView *)view {
@@ -396,6 +454,7 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
 
     double now = CACurrentMediaTime();
     float dt = (float)(now - _lastFrame); _lastFrame = now;
+    _time = (float)(now - _startTime);
     if (dt > 0) _fps += (1.0f/dt - _fps)*0.05f;
     if (!_paused) { float sd = std::min(dt, 0.05f); for (auto&c:_crits) [self updateCreature:c dt:sd]; }
 
@@ -440,7 +499,7 @@ fragment float4 entity_fragment(EOut in [[stage_in]]){
     [cmd commit];
     _frameIndex = (_frameIndex + 1) % kInFlight;
 
-    view.window.title = [NSString stringWithFormat:@"10 — CRITTER STYLES ▸ 8 movement styles%s ▸ %.0f fps",
+    view.window.title = [NSString stringWithFormat:@"10 — CRITTER STYLES ▸ 9 movement styles%s ▸ %.0f fps",
                          _paused?" ▸ PAUSED":"", _fps];
 }
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}
