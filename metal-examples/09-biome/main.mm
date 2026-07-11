@@ -448,7 +448,7 @@ enum {
     WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView, WA_BirthRateSlider,
     WA_DayLenSlider, WA_TimeOfDaySlider, WA_MakeRain,
     WA_ToggleDayNight, WA_ToggleClouds, WA_ToggleRain, WA_SpawnPack, WA_ToggleSound,
-    WA_ToggleBubbleSfx, WA_ToggleAuto, WA_TargetPopSlider,
+    WA_ToggleBubbleSfx, WA_ToggleAuto, WA_TargetPopSlider, WA_ToggleEnv,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -475,6 +475,7 @@ struct Uni {
     float warmth;     // dawn/dusk warm cast, 0..1
     float cloud;      // overcast amount, 0..1
     float rain;       // rainfall intensity, 0..1
+    float aquarium;   // 0 forest .. 1 aquarium (tank floor + water wash)
 };
 
 float hash21(float2 p) {
@@ -535,6 +536,17 @@ fragment float4 ground_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(
     float snow = smoothstep(0.45, 0.9, -clim) * smoothstep(0.35, 0.65, elev);
     col = mix(col, float3(0.82,0.86,0.92), clamp(snow, 0.0, 0.85));
 
+    // Aquarium: replace the forest floor with a sandy / fine-gravel tank bottom.
+    if (u.aquarium > 0.5) {
+        float grain = fbm(w * 2.6 + 9.0);                       // sand mottle
+        float3 sand = mix(float3(0.60,0.54,0.40), float3(0.72,0.66,0.52), grain);
+        float2 gc = floor(w * 3.2);                             // scattered gravel/pebbles
+        float pk = fract(sin(dot(gc, float2(12.99,78.23)))*43758.5);
+        sand = mix(sand, float3(0.45,0.42,0.40), smoothstep(0.90,0.98,pk)*0.6);
+        sand *= 0.9 + 0.2*fbm(w*1.4);                           // gentle undulation shading
+        col = sand;
+    }
+
     // Darken beyond the world bounds.
     float2 bd = max(float2(0.0)-w, w-float2(120.0,72.0));
     col *= 1.0 / (1.0 + max(max(bd.x,bd.y),0.0)*0.15);
@@ -554,6 +566,24 @@ fragment float4 sky_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(0)]
     #define OVER(C, A) { float sa=(A); pc = (C)*sa + pc*(1.0-sa); a = sa + a*(1.0-sa); }
 
     float night = clamp(1.0 - u.daylight, 0.0, 1.0);
+
+    // Aquarium: a blue-green water column washed over everything, lighter toward
+    // the top (surface light) and deeper toward the bottom, with a slow caustic
+    // shimmer. Drawn first so the day/night tint still layers on top.
+    if (u.aquarium > 0.5) {
+        float depth = in.uv.y;                                 // 0 top (surface) .. 1 bottom
+        float3 shallow = float3(0.16, 0.42, 0.48);
+        float3 deep    = float3(0.04, 0.16, 0.26);
+        float3 water = mix(shallow, deep, depth);
+        // gentle moving caustic ripples
+        float2 wp = in.uv * float2(u.resolution.x/max(u.resolution.y,1.0), 1.0);
+        float caust = fbm(wp*7.0 + float2(u.time*0.12, u.time*0.07))
+                    + 0.5*fbm(wp*13.0 - float2(u.time*0.09, 0.0));
+        water += smoothstep(1.1, 1.7, caust) * 0.10;           // faint bright ripples
+        OVER(water, 0.42 + 0.14*depth);                        // denser deeper
+        // a brighter band of surface light along the very top
+        OVER(float3(0.7,0.9,0.95), smoothstep(0.16, 0.0, depth) * 0.18);
+    }
 
     // Deep-night blue wash, strongest at the screen edges (vignette).
     float2 q = in.uv - 0.5;
@@ -936,6 +966,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float _cloudTarget, _rainTarget;// where the weather is drifting toward
     float _weatherTimer;            // time until the next weather regime
     bool _dayNightOn, _cloudsOn, _rainOn;   // HUD toggles for each sky element
+    bool _aquarium;                 // AQUARIUM ⇄ FOREST: aquatic movement + tank reskin
     uint32_t _nextPack;             // next unique pack id to hand out
 
     // Ambient audio: three looping layers (day / night / rain) whose volumes
@@ -1067,6 +1098,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _cloud = 0.15f; _rain = 0.0f;
     _cloudTarget = 0.15f; _rainTarget = 0.0f; _weatherTimer = 20.0f;
     _dayNightOn = true; _cloudsOn = true; _rainOn = true;
+    _aquarium = false;
     _panelScroll = 0.0f; _panelOverflow = 0.0f;
     _nextPack = 1;
     _zoom = 1.0f;
@@ -1165,12 +1197,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v33 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v34 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: a hard LIVING CAP (keeps the machine responsive) and a BALANCE\n"
-           "auto-pilot (LIFE section) that regulates food, births, predators and\n"
-           "climate together to hold the colony near a TARGET POP you set — a\n"
-           "self-limiting, still-evolving ecosystem instead of a runaway.\n");
+           "New (first pass): AQUARIUM mode — toggle HABITAT (VIEW section). The\n"
+           "colony turns aquatic: languid gliding + buoyant hover over a sand tank\n"
+           "floor with a blue-green water wash. Plus the BALANCE auto-pilot and\n"
+           "hard living cap from before.\n");
 
     [self setupAudio];
     _startTime = CACurrentMediaTime();
@@ -1369,8 +1401,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // gate keep the sound off until it's actually raining on screen.
     float rainVis = (rainMix < 0.08f) ? 0.0f : powf((rainMix - 0.08f)/0.92f, 1.4f);
     float duck = 1.0f - 0.65f * rainVis;                 // forest ducks so rain dominates
-    _volDay   = _daylight * duck * master * _muteGain;
-    _volNight = (1.0f - _daylight) * duck * master * _muteGain;
+    float forest = _aquarium ? 0.28f : 1.0f;             // no forest in a tank (full SFX later)
+    _volDay   = _daylight * duck * master * _muteGain * forest;
+    _volNight = (1.0f - _daylight) * duck * master * _muteGain * forest;
     _volRain  = std::clamp(rainVis * master * 1.9f, 0.0f, 1.0f) * _muteGain;   // rain sits louder
     if (_sndDay)   _sndDay.volume   = _volDay;
     if (_sndNight) _sndNight.volume = _volNight;
@@ -2010,11 +2043,24 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         float sepLen = simd_length(sepForce);
         simd_float2 steer = (simd_length(desire) > 1e-3f) ? simd_normalize(desire) : simd_make_float2(0,0);
         if (sepLen > 1e-4f) steer += (sepForce / sepLen) * 1.3f;
+        // Aquarium: languid and buoyant — slower top speed and much more coast, so
+        // they glide and hover instead of scurrying.
+        float envSpeed = _aquarium ? 0.60f : 1.0f;
+        float velK     = _aquarium ? 2.6f  : 6.0f;    // lower = more glide/coast
         simd_float2 wantVel = (simd_length(steer) > 1e-3f)
-            ? simd_normalize(steer) * wantSpeed * ageSlow * actMul * gait : simd_make_float2(0,0);
-        c.vel += (wantVel - c.vel) * std::min(6.0f * dt, 1.0f);    // responsive, so the surge reads
+            ? simd_normalize(steer) * wantSpeed * ageSlow * actMul * gait * envSpeed : simd_make_float2(0,0);
+        c.vel += (wantVel - c.vel) * std::min(velK * dt, 1.0f);
         if (simd_length(c.vel) > 0.05f) c.heading = atan2f(c.vel.y, c.vel.x);
         c.pos += c.vel * dt;
+        if (_aquarium) {
+            // buoyant hover (a slow personal drift so they never truly freeze) plus
+            // a gentle, slowly-swirling tank current the whole colony rides.
+            float ib = (float)(c.id % 251);
+            c.pos += simd_make_float2(sinf((float)_worldTime*0.5f + ib),
+                                      cosf((float)_worldTime*0.4f + ib*1.7f)) * 0.10f * dt;
+            c.pos += simd_make_float2(sinf((float)_worldTime*0.13f),
+                                      sinf((float)_worldTime*0.10f + 1.3f)) * 0.18f * dt;
+        }
         // Firm overlap resolution: shove out by half the total overlap this frame
         // (both critters do it → the full overlap clears), capped so it never
         // teleports. Guarantees bodies don't sit on top of one another.
@@ -2518,6 +2564,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 _autoAdjust = !_autoAdjust;
                 if (_autoAdjust) _autoTimer = 0.0f;      // act immediately (target set by its slider)
                 break;
+            case WA_ToggleEnv: _aquarium = !_aquarium; break;
             case WA_CullPredators: [self cullPredators]; break;
             case WA_MakeRain:  _rainOn = true; _cloudsOn = true;
                                _cloudTarget = 0.9f; _rainTarget = 0.9f; _weatherTimer = 25.0f; break;
@@ -2633,11 +2680,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // --- VIEW (zoom) ---
     text(x0, row(11,5), "VIEW", 11, cLabel);
     {
-        float y = row(24,14), w = (cw-8)/3.0f;
+        float y = row(24,6), w = (cw-8)/3.0f;
         button(x0, y, w, 24, "ZOOM-", WA_ZoomOut, 0, false);
         button(x0+(w+4), y, w, 24, "ZOOM+", WA_ZoomIn, 0, false);
         button(x0+2*(w+4), y, w, 24, "FIT", WA_ResetView, 0, false);
     }
+    button(x0, row(24,14), cw, 24, _aquarium ? "HABITAT: AQUARIUM" : "HABITAT: FOREST",
+           WA_ToggleEnv, 0, _aquarium);
 
     // --- CLIMATE ---
     text(x0, row(11,5), "CLIMATE", 11, cLabel);
@@ -2785,11 +2834,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _uOffset = simd_make_float2(-_panCenter.x * (s/aspect), -_panCenter.y * s);
 
     struct { simd_float2 scale, offset, resolution; float time, pad,
-             daylight, warmth, cloud, rain; } uni = {
+             daylight, warmth, cloud, rain, aquarium; } uni = {
         _uScale, _uOffset,
         simd_make_float2((float)view.drawableSize.width, (float)view.drawableSize.height), t,
         _climate,
-        _daylight, _skyWarm, std::clamp(_cloud,0.0f,1.0f), std::clamp(_rain,0.0f,1.0f)
+        _daylight, _skyWarm, std::clamp(_cloud,0.0f,1.0f), std::clamp(_rain,0.0f,1.0f),
+        _aquarium ? 1.0f : 0.0f
     };
 
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
@@ -2798,8 +2848,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _hud.clear();
 
     // ground cover (drawn first, under everything): moss, clover, flowers,
-    // pebbles, twigs — the carpet of forest-floor detail
+    // pebbles, twigs — the carpet of forest-floor detail (hidden in the tank)
     for (const Decor &d : _decor) {
+        if (_aquarium) break;
         int shp = (d.kind==0) ? 13 : (d.kind==1) ? 2 : (d.kind==2) ? 14
                 : (d.kind==3) ? 0 : 4;
         simd_float2 hlf = (d.kind==4) ? simd_make_float2(d.size, d.size*0.16f)   // twig: thin
@@ -3131,7 +3182,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v33 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v34 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -3311,7 +3362,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v33 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v34 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
