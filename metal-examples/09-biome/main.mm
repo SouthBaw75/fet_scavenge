@@ -1138,7 +1138,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v25 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v26 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
            "New: predators now BITE, SHAKE, then CONSUME their catch (a ~1.3s\n"
            "thrash before the prey is gone) instead of an instant kill. Plus\n"
@@ -1763,9 +1763,17 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // Crepuscular pacing: sprightly at dawn/dusk, dozy through the night.
         // Fleeing ignores it — panic overrides the time of day.
         float actMul = (c.action == AFlee) ? 1.0f : (0.55f + 0.45f * _activity);
+        // Fin-stroke gait: they scull forward in pulses and glide between, so
+        // their pace rises and falls with each paddle instead of holding a
+        // constant speed — the deep glides read as the spec's curious pauses.
+        // Fleeing is a smooth, steady sprint (no pulsing).
+        float stroke = powf(std::max(0.0f, sinf(c.phase)), 1.4f);   // 0 glide .. 1 power stroke
+        bool ambling = (c.action == AWander || c.action == APlay);
+        float glideFloor = ambling ? 0.15f : 0.45f;                 // idle roaming pauses deeper than errands
+        float gait = (c.action == AFlee) ? 1.0f : (glideFloor + (1.3f - glideFloor) * stroke);
         simd_float2 wantVel = (simd_length(desire) > 1e-3f)
-            ? simd_normalize(desire) * wantSpeed * ageSlow * actMul : simd_make_float2(0,0);
-        c.vel += (wantVel - c.vel) * std::min(4.0f * dt, 1.0f);
+            ? simd_normalize(desire) * wantSpeed * ageSlow * actMul * gait : simd_make_float2(0,0);
+        c.vel += (wantVel - c.vel) * std::min(6.0f * dt, 1.0f);    // responsive, so the surge reads
         if (simd_length(c.vel) > 0.05f) c.heading = atan2f(c.vel.y, c.vel.x);
         c.pos += c.vel * dt;
         // sickness saps mobility
@@ -1773,7 +1781,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         c.pos.x = std::clamp(c.pos.x, 1.0f, kWorldW - 1.0f);
         c.pos.y = std::clamp(c.pos.y, 1.0f, kWorldH - 1.0f);
         [self waterRippleAt:c.pos vel:c.vel dt:dt];
-        c.phase += (0.5f + simd_length(c.vel) * 0.5f) * dt * 6.0f;
+        // Stroke clock: a steady, fairly slow paddle (so each surge is visible),
+        // ticking a touch faster the quicker they're going.
+        c.phase += (2.2f + 0.35f * simd_length(c.vel)) * dt;
 
         // --- camouflage: chromatophores ease toward the ground when the animal
         // holds still, and wash back out once it moves (the spec's 5–15s shift) ---
@@ -2791,7 +2801,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v25 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v26 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2954,7 +2964,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v25 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v26 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
