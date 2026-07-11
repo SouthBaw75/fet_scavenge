@@ -35,7 +35,9 @@
 
 static const float kWorldW = 120.0f;
 static const float kWorldH = 72.0f;
-static const int kMaxCritters = 800;   // living + still-decaying corpses
+static const int kMaxCritters = 800;   // living + still-decaying corpses (vector cap)
+static const int kLiveCap     = 420;   // hard cap on LIVING critters — births stop here
+                                       // (keeps the O(n^2) scans / the machine responsive)
 static const float kDecaySecs = 22.0f; // how long a corpse takes to fade away
 static const int kMaxFood = 600;
 static const int kMaxPredators = 90;
@@ -446,7 +448,7 @@ enum {
     WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView, WA_BirthRateSlider,
     WA_DayLenSlider, WA_TimeOfDaySlider, WA_MakeRain,
     WA_ToggleDayNight, WA_ToggleClouds, WA_ToggleRain, WA_SpawnPack, WA_ToggleSound,
-    WA_ToggleBubbleSfx, WA_ToggleAuto,
+    WA_ToggleBubbleSfx, WA_ToggleAuto, WA_TargetPopSlider,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -920,8 +922,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // Auto-adjust: a feedback controller that steers birth rate + food to hold
     // the colony on a steady ~5%-per-minute growth trajectory.
     bool  _autoAdjust;
-    float _autoTargetPop;   // the moving population target it tracks
+    float _autoTargetPop;   // target average the balance controller holds
     float _autoTimer;       // seconds until the next control update
+    int   _livingCount;     // living critters this step (cached; drives the birth cap)
 
     // Day/night + weather.
     float _timeOfDay;       // 0..1 through one day (0 = midnight, 0.5 = noon)
@@ -1057,7 +1060,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _startPop = 24;
     _lifespanMul = 1.0f;
     _birthRate = 1.6f;
-    _autoAdjust = false; _autoTargetPop = 0.0f; _autoTimer = 0.0f;
+    _autoAdjust = false; _autoTargetPop = 170.0f; _autoTimer = 0.0f; _livingCount = 0;
     _timeOfDay = 0.30f;         // start a little after dawn
     _dayLen = 100.0f;           // seconds per day
     _daylight = 1.0f; _skyWarm = 0.0f; _activity = 1.0f;
@@ -1162,11 +1165,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v32 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v33 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: limbs now STRIDE fore/aft in an alternating four-beat gait that\n"
-           "paces with speed (idle vs scurry); rain audio silenced when the rain\n"
-           "isn't actually visible on screen. Plus AUTO-ADJUST for ~5%/min growth.\n");
+           "New: a hard LIVING CAP (keeps the machine responsive) and a BALANCE\n"
+           "auto-pilot (LIFE section) that regulates food, births, predators and\n"
+           "climate together to hold the colony near a TARGET POP you set — a\n"
+           "self-limiting, still-evolving ecosystem instead of a runaway.\n");
 
     [self setupAudio];
     _startTime = CACurrentMediaTime();
@@ -1237,24 +1241,39 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     int n = 0; for (const Critter &c : _critters) if (c.alive) n++; return n;
 }
 
-// Colony auto-pilot: hold the population on a steady ~5%-per-minute growth
-// curve by continuously steering the birth rate (and supporting food) from the
-// gap between the actual and target population. A gentle proportional loop.
+// Colony auto-pilot (BALANCE): hold the population near a target AVERAGE by
+// steering the whole ecosystem, not just births — food carrying capacity, birth
+// rate, predators, and a touch of climate stress — so an overshoot is thinned by
+// scarcity and predation and a shortfall recovers, giving a thriving, evolving
+// colony that self-regulates instead of exploding.
 - (void)autoAdjustStep:(float)dt {
     if (!_autoAdjust) return;
-    _autoTargetPop *= (1.0f + 0.05f * dt / 60.0f);                 // 5% / minute trajectory
-    _autoTargetPop = std::min(_autoTargetPop, (float)kMaxCritters * 0.85f);
     _autoTimer -= dt;
     if (_autoTimer > 0.0f) return;
-    _autoTimer = 2.0f;                                            // re-tune every 2s
-    int pop = [self livingCount];
-    if (pop < 2) {                                               // crashed → reseed
-        _autoTargetPop = 8.0f;
-        if (pop == 0) { [self introduceRandom]; [self introduceRandom]; }
-    }
-    float err = (_autoTargetPop - pop) / std::max(_autoTargetPop, 1.0f);   // >0 behind, <0 ahead
-    _birthRate  = std::clamp(_birthRate + err * 6.0f, 0.5f, 4.5f);         // main lever
-    _foodTarget = std::clamp((int)(220.0f + err * 400.0f), 120, 520);     // feed the growth
+    _autoTimer = 2.5f;                                           // re-tune every 2.5s
+    float target = std::clamp(_autoTargetPop, 20.0f, (float)kLiveCap - 20.0f);
+    int pop = _livingCount;
+    if (pop == 0) { [self introduceRandom]; [self introduceRandom]; return; }  // reseed a crash
+    float e = (float)pop - target;                              // >0 over, <0 under
+    float rel = e / std::max(target, 1.0f);                    // fractional error
+
+    // 1) Food carrying capacity — the primary regulator. Lean when crowded
+    //    (starvation thins them), rich when sparse.
+    _foodTarget = std::clamp((int)(target * 1.4f - e * 1.6f), 60, 520);
+    // 2) Birth rate — fewer young when crowded, more when sparse.
+    _birthRate  = std::clamp(1.8f - rel * 2.6f, 0.5f, 4.5f);
+    // 3) Predators — bring a hunting pack in to crop an overshoot; ease them off
+    //    when the colony is thin. (Predators also self-limit by starving.)
+    int preds = (int)_predators.size();
+    int wantPreds = std::clamp((int)((pop - target*0.9f) / 22.0f), 0, 10);
+    if (preds < wantPreds && pop > target)      [self spawnPack:std::min(4, wantPreds - preds)];
+    else if (preds > 0 && pop < target * 0.8f)  [self cullPredators];
+    // 4) Climate stress — when badly overpopulated, drift toward the nearer
+    //    extreme (harsher → more thermal attrition + selection); relax back to
+    //    temperate when at or below target.
+    if (rel > 0.5f)      _climateTrend += (_climateTrend >= 0.0f ? 0.05f : -0.05f);
+    else if (rel < 0.0f) _climateTrend *= 0.95f;
+    _climateTrend = std::clamp(_climateTrend, -0.85f, 0.85f);
 }
 
 // Locate an asset by name, trying a few paths relative to where the binary is
@@ -1614,6 +1633,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 - (void)simStep:(float)dt {
     std::uniform_real_distribution<float> u(0,1);
 
+    // Living headcount, cached once a step. Used for the hard birth cap (which
+    // keeps the O(n^2) neighbour scans — and the machine — from bogging down) and
+    // by the balance controller.
+    _livingCount = [self livingCount];
+
     // --- climate: gentle seasons over a slowly wandering baseline ---
     _worldTime += dt;
     _climateTrend += (u(_rng) - 0.5f) * 0.03f * dt;      // slow random walk
@@ -1884,7 +1908,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     // Conception: the female carries the offspring.
                     Critter *mom = c.male ? mate : &c;
                     Critter *dad = c.male ? &c : mate;
-                    if (!mom->pregnant && mom->urge > 0.4f && dad->urge > 0.3f) {
+                    if (!mom->pregnant && mom->urge > 0.4f && dad->urge > 0.3f
+                        && _livingCount < kLiveCap) {          // no new pregnancies at the cap
                         mom->unborn = breed(mom->genome, dad->genome, _rng);
                         mom->mateGenome = dad->genome;   // for litter-mate meiosis
                         mom->pregnant = true;
@@ -2052,15 +2077,16 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 float twinChance = std::clamp(0.10f + 0.30f * (_birthRate - 1.0f)
                                               + 0.25f * (c.ph.fertility - 0.8f) * c.energy, 0.02f, 0.85f);
                 int litter = (u(_rng) < twinChance) ? 2 : 1;
-                for (int L = 0; L < litter; L++) {
+                for (int L = 0; L < litter && _livingCount < kLiveCap; L++) {   // hard cap
                     Genome kid = (L == 0) ? c.unborn
                                           : breed(c.genome, c.mateGenome, _rng);  // distinct sibling
                     size_t before = _critters.size();
                     [self spawnCritter:kid
                                     at:(bpos + simd_make_float2(u(_rng)-0.5f, u(_rng)-0.5f)) gen:gen];
-                    if (_critters.size() > before)
+                    if (_critters.size() > before) {
                         _critters.back().energy = std::min(_critters.back().energy + bonus, 1.0f);
-                    _births++;
+                        _births++; _livingCount++;
+                    }
                 }
                 _generation = std::max(_generation, gen);
                 c.pregnant = false;
@@ -2464,6 +2490,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     else if (act == WA_BirthRateSlider) _birthRate = 0.5f + f * 4.0f;           // 0.5x..4.5x
     else if (act == WA_DayLenSlider) _dayLen = 20.0f + f * 220.0f;              // 20s..240s / day
     else if (act == WA_TimeOfDaySlider) _timeOfDay = std::clamp(f, 0.0f, 1.0f); // scrub the clock
+    else if (act == WA_TargetPopSlider) _autoTargetPop = 40.0f + f * 360.0f;    // 40..400 balance target
 }
 
 - (BOOL)hudMouseDown:(simd_float2)pt bw:(float)bw bh:(float)bh {
@@ -2489,7 +2516,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_ToggleBubbleSfx: _bubbleSfxOn = !_bubbleSfxOn; break;
             case WA_ToggleAuto:
                 _autoAdjust = !_autoAdjust;
-                if (_autoAdjust) { _autoTargetPop = std::max([self livingCount], 8); _autoTimer = 0.0f; }
+                if (_autoAdjust) _autoTimer = 0.0f;      // act immediately (target set by its slider)
                 break;
             case WA_CullPredators: [self cullPredators]; break;
             case WA_MakeRain:  _rainOn = true; _cloudsOn = true;
@@ -2510,6 +2537,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_BirthRateSlider:
             case WA_DayLenSlider:
             case WA_TimeOfDaySlider:
+            case WA_TargetPopSlider:
                 _dragAct = wg.act; _dragX = wg.x; _dragW = wg.w;
                 [self applySlider:wg.act
                              frac:std::clamp((pt.x-wg.x)/std::max(wg.w,1.0f), 0.0f, 1.0f)];
@@ -2653,10 +2681,17 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         text(x0, y, "BIRTH RATE PCT", 11, cLabel);
         [self hudNumber:(int)(_birthRate*100.0f) x:x0+cw-52 y:y dw:5 dh:9 col:cTxt bw:bw bh:bh];
     }
-    slider(x0, row(18,6), cw, 18, (_birthRate-0.5f)/4.0f, WA_BirthRateSlider);
-    // Auto-pilot: continuously steers birth rate + food to hold ~5%/min growth.
-    button(x0, row(24,12), cw, 24, _autoAdjust ? "AUTO-ADJUST: ON (5%/MIN)" : "AUTO-ADJUST: OFF",
+    slider(x0, row(18,10), cw, 18, (_birthRate-0.5f)/4.0f, WA_BirthRateSlider);
+    // Balance auto-pilot: regulates food, births, predators and climate together
+    // to hold the colony near the target average (and never past the hard cap).
+    button(x0, row(24,5), cw, 24, _autoAdjust ? "BALANCE: ON (auto-regulate)" : "BALANCE: OFF",
            WA_ToggleAuto, 0, _autoAdjust);
+    {
+        float y = row(11,3);
+        text(x0, y, "TARGET POP", 11, cLabel);
+        [self hudNumber:(int)_autoTargetPop x:x0+cw-46 y:y dw:5 dh:9 col:cTxt bw:bw bh:bh];
+    }
+    slider(x0, row(18,12), cw, 18, (_autoTargetPop-40.0f)/360.0f, WA_TargetPopSlider);
 
     // --- PREDATORS ---
     text(x0, row(11,5), "PREDATORS", 11, cLabel);
@@ -3096,7 +3131,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v32 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v33 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -3276,7 +3311,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v32 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v33 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
