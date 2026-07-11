@@ -74,18 +74,20 @@ static const float kSampleSecs   = 1.0f;    // one history sample per sim second
 
 // Genome layout: kNumGenes autosomal loci spread across kChromosomes. Related
 // genes share a chromosome so they tend to inherit together (linkage).
-static const int kNumGenes = 20;
+static const int kNumGenes = 24;
 static const int kChromosomes = 4;
-static const int kGenesPerChrom = kNumGenes / kChromosomes;   // 5
+static const int kGenesPerChrom = kNumGenes / kChromosomes;   // 6
 static const float kMutationRate = 0.04f;   // chance per gene per gamete
 
-// Gene indices -> traits. Genes on a chromosome inherit together (linkage);
-// with 5 genes per chromosome the eye-color loci travel with the features set.
+// Gene indices -> traits. Genes on a chromosome inherit together (linkage).
+// The last four are heritable BEHAVIOURAL loci — they give each lineage its own
+// temperament (bold/timid, social/loner, curious/cautious, active/lazy).
 enum { GSize0 = 0, GSize1 = 1, GSpeed = 2, GMetab = 3,
        GColR  = 4, GColG  = 5, GColB  = 6, GResist = 7,
        GAspect = 8, GGirth = 9, GEye = 10, GSnout = 11,
        GSpikes = 12, GPattern = 13, GPatHue = 14, GFert = 15,
-       GEyeR = 16, GEyeG = 17, GEyeB = 18, GEyeShine = 19 };
+       GEyeR = 16, GEyeG = 17, GEyeB = 18, GEyeShine = 19,
+       GBold = 20, GSocial = 21, GCurious = 22, GActivity = 23 };
 
 // --------------------------------------------------------------- Genetics ---
 // A gene is 16 bases packed 2 bits each in a uint32 (A=0,C=1,G=2,T=3).
@@ -153,6 +155,17 @@ static Genome randomGenome(std::mt19937 &rng, int forcedSex /* -1 any */) {
         g.hom[h][GColR] = tintGene(jit(0.20f), rng);
         g.hom[h][GColG] = tintGene(jit(0.52f), rng);
         g.hom[h][GColB] = tintGene(jit(0.82f), rng);
+    }
+    // Temperament: give each founder a definite personality spanning the full
+    // range (both homologs near the same target so it actually shows), so the
+    // starting colony is a mix of bold/timid, social/loner, curious/cautious,
+    // busy/lazy individuals — which then evolves.
+    float tb = u(rng), ts = u(rng), tc = u(rng), ta = u(rng);
+    for (int h = 0; h < 2; h++) {
+        g.hom[h][GBold]     = tintGene(jit(tb), rng);
+        g.hom[h][GSocial]   = tintGene(jit(ts), rng);
+        g.hom[h][GCurious]  = tintGene(jit(tc), rng);
+        g.hom[h][GActivity] = tintGene(jit(ta), rng);
     }
     int sex = (forcedSex >= 0) ? forcedSex : (u(rng) < 0.5f ? 0 : 1);
     g.sexAllele[0] = 0;                    // one X always
@@ -225,6 +238,11 @@ struct Phenotype {
     simd_float3 color2; // secondary (banding) color
     simd_float3 eyeColor; // heritable iris color
     float eyeShine;    // 0..1 iris brightness
+    // --- heritable temperament (drives individual behaviour) ---
+    float boldness;    // 0 timid (flees early, stays home) .. 1 bold (holds, roams)
+    float sociability; // 0 loner .. 1 clings to the colony / elders
+    float curiosity;   // 0 cautious .. 1 explores far, plays, investigates
+    float activity;    // 0 languid (rests often) .. 1 restless / busy
 };
 
 // Hermite smoothstep on the CPU side (mirrors the shader's smoothstep).
@@ -301,6 +319,12 @@ static Phenotype phenotypeOf(const Genome &g) {
                                   0.10f + 0.85f * sat(eg0),
                                   0.10f + 0.85f * sat(eb0));
     p.eyeShine = L(GEyeShine);
+    // Temperament — read straight from the behavioural loci, so it's heritable and
+    // varies from critter to critter (and drifts across lineages over generations).
+    p.boldness    = L(GBold);
+    p.sociability = L(GSocial);
+    p.curiosity   = L(GCurious);
+    p.activity    = L(GActivity);
     return p;
 }
 
@@ -338,6 +362,9 @@ struct Critter {
     float decay;       // 0 while alive; 0->1 as a corpse rots, then removed
     float grab;        // >0 while seized in a predator's jaws (can't flee)
     float rest;        // 0 awake .. 1 asleep (still, eyes closed, gently breathing)
+    simd_float2 goal;  // a personal destination it roams toward (purposeful wander)
+    float retarget;    // seconds until it picks a fresh goal
+    int   commit;      // frames of commitment left to the current action (anti-dither)
     // --- Bubble Burrower life history ---
     uint32_t partner;  // bonded mate (0 = unbonded); pairs stay together for life
     float care;        // parental-care cooldown after a birth; urge stays low while >0
@@ -459,6 +486,7 @@ static const TraitBtn kTraits[] = {
     {"SIZE", GSize0}, {"SPEED", GSpeed}, {"METAB", GMetab}, {"RESIST", GResist},
     {"EYES", GEye},   {"RED", GColR},    {"GREEN", GColG},  {"BLUE", GColB},
     {"FINS", GSpikes},{"BODY", GAspect},
+    {"BOLD", GBold},  {"SOCIAL", GSocial}, {"CURIOUS", GCurious}, {"ACTIVE", GActivity},
 };
 static const int kNumTraitBtns = sizeof(kTraits) / sizeof(kTraits[0]);
 
@@ -1198,12 +1226,13 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v35 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v36 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: critters now truly SLEEP — when they settle to rest (dozing at\n"
-           "night or worn out) they come to a full stop, close their eyes, and\n"
-           "breathe gently, snapping awake if a predator nears. Plus AQUARIUM mode\n"
-           "(toggle HABITAT in VIEW) and the BALANCE auto-pilot.\n");
+           "New: INDIVIDUALITY — four heritable temperament genes (bold/timid,\n"
+           "social/loner, curious/cautious, active/lazy) make every critter weigh\n"
+           "its drives differently, so the colony stops acting as one. Wander is\n"
+           "now purposeful goal-seeking (no more jitter) with anti-dither commit.\n"
+           "Click a critter to see its TEMPERAMENT; splice BOLD/SOCIAL/CURIOUS/ACTIVE.\n");
 
     [self setupAudio];
     _startTime = CACurrentMediaTime();
@@ -1254,6 +1283,9 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     c.bubbleAcc = u(_rng);
     c.grab = 0.0f;
     c.rest = 0.0f;
+    c.goal = pos;
+    c.retarget = u(_rng) * 3.0f;
+    c.commit = 0;
     _critters.push_back(c);
 }
 
@@ -1829,39 +1861,45 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         bool isElder = ageTnow > kElderFrac;
         bool isJuvenile = c.age <= c.maturity;
 
-        // --- utility AI: pick the most pressing drive ---
+        // --- utility AI: score the drives, weighted by this critter's own
+        // heritable temperament, then pick the most pressing. Because the weights
+        // come from its genes, two critters in the same situation can choose
+        // differently — so the colony stops behaving as one. ---
+        float bold = ph.boldness, social = ph.sociability, curi = ph.curiosity, act = ph.activity;
         float sForage = c.hunger;
-        // Crepuscular: they grow sleepy through the deep night and doze.
-        float sRest = (1.0f - c.energy) * 0.9f + (1.0f - _daylight) * 0.40f;
-        // Breeding is a strong drive once the urge is up — a ready adult should
-        // pursue a mate rather than idly forage or play past it.
+        // Rest / doze — lazy (low-activity) ones rest more; everyone dozes at night.
+        float sRest = ((1.0f - c.energy) * 0.9f + (1.0f - _daylight) * 0.40f) * (1.3f - 0.6f*act);
+        // Breeding is a strong drive once the urge is up.
         float sMate = (c.age > c.maturity && c.energy > 0.40f && !c.pregnant && c.care <= 0.0f)
                       ? c.urge * 1.5f : 0.0f;
-        float sWander = 0.15f;
-        float sFlee = threatLvl * 2.0f;              // survival trumps everything
+        // Idle roaming — curious critters explore more; the incurious loiter.
+        float sWander = 0.08f + 0.32f * curi;
+        // Flee — timid critters bolt early and hard; bold ones tolerate a threat.
+        float sFlee = threatLvl * (1.3f + 1.5f * (1.0f - bold));
         float sNest = c.pregnant ? 0.8f : 0.0f;      // expectant mothers nest
-        float sDrink = _water.empty() ? 0.0f : std::max(0.0f, c.thirst - 0.45f) * 2.2f;
-        // Hunker-and-hide: a moderate, not-yet-close threat triggers the freeze +
-        // camouflage response rather than a panicked sprint (juveniles hide sooner).
-        float sHunker = (threatLvl > 0.15f && threatLvl < 0.6f)
-                        ? threatLvl * (isJuvenile ? 2.4f : 1.7f) : 0.0f;
-        // Play: only when life is easy — fed, watered, healthy, rested, and no
-        // predator in sight. Juveniles and, per the spec, adults too.
+        // Thirst, sharpened in the heat (they seek water sooner when it's hot).
+        float thirstUrg = std::max(0.0f, c.thirst - 0.45f + std::max(_climate,0.0f)*0.2f);
+        float sDrink = _water.empty() ? 0.0f : thirstUrg * 2.2f;
+        // Hunker-and-hide — the BOLD response to a moderate threat (hold & camo),
+        // where the timid would rather run (juveniles hide sooner).
+        float sHunker = (threatLvl > 0.12f && threatLvl < 0.65f)
+                        ? threatLvl * (0.8f + 1.6f*bold + (isJuvenile ? 0.5f : 0.0f)) : 0.0f;
+        // Play — for the curious/playful, when life is easy.
         bool easy = threatLvl < 0.02f && c.hunger < 0.4f && c.thirst < 0.5f
                     && c.energy > 0.65f && c.health > 0.7f && havePlaymate
                     && c.urge < 0.4f                         // breeders don't dawdle
                     && _rain < 0.25f && _daylight > 0.25f;   // fair weather, not deep night
-        float sPlay = easy ? (isJuvenile ? 0.55f : 0.32f) : 0.0f;
-        c.action = AWander;
-        float best = sWander;
-        if (sForage > best) { best = sForage; c.action = AForage; }
-        if (sDrink > best)  { best = sDrink;  c.action = ADrink; }
-        if (sRest > best)   { best = sRest;   c.action = ARest; }
-        if (sPlay > best)   { best = sPlay;   c.action = APlay; }
-        if (sMate > best)   { best = sMate;   c.action = AMate; }
-        if (sNest > best)   { best = sNest;   c.action = ANest; }
-        if (sHunker > best) { best = sHunker; c.action = AHunker; }
-        if (sFlee > best)   { best = sFlee;   c.action = AFlee; }
+        float sPlay = easy ? (0.22f + 0.5f*curi) * (isJuvenile ? 1.3f : 1.0f) : 0.0f;
+        // Anti-dither: keep a small bias toward what it's already doing, so it
+        // commits to a course instead of flip-flopping every frame.
+        int prev = c.action;
+        const float stick = 0.13f;
+        c.action = AWander; float best = sWander + (prev == AWander ? stick : 0.0f);
+        auto consider = [&](float s, int a){ float v = s + (prev==a?stick:0.0f);
+                                             if (v > best) { best = v; c.action = a; } };
+        consider(sForage, AForage); consider(sDrink, ADrink); consider(sRest, ARest);
+        consider(sPlay, APlay);     consider(sMate, AMate);   consider(sNest, ANest);
+        consider(sHunker, AHunker); consider(sFlee, AFlee);
 
         // --- act ---
         simd_float2 desire = simd_make_float2(0,0);
@@ -2007,23 +2045,37 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             }
             wantSpeed = ph.speed * (0.7f + 0.5f * fabsf(sinf(c.phase * 2.0f)));
             [self emitBubble:c strength:0.6f dt:dt];
-        } else {  // wander — but as a colony: stay near family, trail the elders
-            c.heading += (u(_rng) - 0.5f) * 1.5f * dt;
-            simd_float2 rove = simd_make_float2(cosf(c.heading), sinf(c.heading));
-            // Cohesion toward the local family cluster.
+        } else {  // wander — head toward a chosen destination, not random jitter
+            // Pick a fresh goal when the old one is reached or its time is up. The
+            // spot reflects temperament: curious/bold ones strike out far and to
+            // the edges; homebodies (sociable) pick spots near the colony.
+            c.retarget -= dt;
+            if (c.retarget <= 0.0f || simd_distance(c.pos, c.goal) < 3.0f) {
+                float roam = 6.0f + 46.0f * ph.curiosity * (0.4f + 0.6f*ph.boldness);
+                float ang = u(_rng) * 6.2831853f;
+                simd_float2 anchor = (ph.sociability > 0.55f && flockN > 0) ? flockCentroid : c.pos;
+                c.goal = anchor + simd_make_float2(cosf(ang), sinf(ang)) * (roam * (0.3f + 0.7f*u(_rng)));
+                c.goal.x = std::clamp(c.goal.x, 2.0f, kWorldW - 2.0f);
+                c.goal.y = std::clamp(c.goal.y, 2.0f, kWorldH - 2.0f);
+                c.retarget = 3.0f + 6.0f * u(_rng);
+            }
+            simd_float2 toGoal = c.goal - c.pos;
+            float gd = simd_length(toGoal);
+            simd_float2 head = gd > 0.5f ? toGoal / gd : simd_make_float2(cosf(c.heading), sinf(c.heading));
+            // Cohesion + elder-following, weighted by how sociable this one is
+            // (loners barely clump; sociable ones stick close and trail elders).
             simd_float2 toFlock = flockCentroid - c.pos;
             float fd = simd_length(toFlock);
             simd_float2 cohere = (flockN > 0 && fd > 3.0f) ? toFlock / fd : simd_make_float2(0,0);
-            // Elders lead; the rest follow the nearest elder they can see.
             simd_float2 lead = simd_make_float2(0,0);
             if (!isElder && haveElder) {
                 simd_float2 toElder = elderPos - c.pos;
                 float ed = simd_length(toElder);
                 if (ed > 2.5f) lead = toElder / ed;
             }
-            desire = simd_normalize(rove * 0.5f + cohere * 0.6f + lead * 0.8f
-                                    + simd_make_float2(1e-4f, 0));
-            wantSpeed *= isElder ? 0.42f : 0.5f;     // elders amble; nobody hurries
+            desire = simd_normalize(head * 0.8f + cohere * (0.25f + 0.9f*ph.sociability)
+                                    + lead * (0.25f + 0.7f*ph.sociability) + simd_make_float2(1e-4f, 0));
+            wantSpeed *= (isElder ? 0.42f : 0.5f) * (0.75f + 0.5f*ph.activity);  // busy ones step livelier
         }
 
         // --- steer + integrate (the old move slower) ---
@@ -3208,7 +3260,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v35 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v36 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -3353,6 +3405,20 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         rect(bx, y, 150, 11, simd_make_float4(0.15f,0.16f,0.18f,1), 4);
         rect(bx, y, 150*std::clamp(bars[i].v,0.0f,1.0f), 11, bars[i].c, 4);
     }
+    // Heritable temperament — this critter's personality, drives its choices.
+    {
+        simd_float4 cTemp = simd_make_float4(0.76f,0.56f,0.96f,1);
+        float tvals[4] = {q.boldness, q.sociability, q.curiosity, q.activity};
+        const char *tlab[4] = {"BOLD","SOCIAL","CURIOUS","ACTIVE"};
+        float ty = by0 + 8*17.0f + 6;
+        [self hudText:"TEMPERAMENT" x:px y:ty h:9 col:simd_make_float4(0.72f,0.70f,0.82f,1) bw:bw bh:bh];
+        for (int i = 0; i < 4; i++) {
+            float bx = px + i*88.0f, y = ty + 15;
+            [self hudText:tlab[i] x:bx y:y h:8 col:simd_make_float4(0.72f,0.66f,0.84f,1) bw:bw bh:bh];
+            rect(bx, y+11, 78, 8, simd_make_float4(0.15f,0.16f,0.18f,1), 4);
+            rect(bx, y+11, 78*std::clamp(tvals[i],0.0f,1.0f), 8, cTemp, 4);
+        }
+    }
     // Coat swatches (primary + secondary), an eye showing iris color, sex bar.
     rect(px+300, py+34, 44, 30, simd_make_float4(q.color, 1.0f), 4);
     rect(px+300, py+66, 44, 30, simd_make_float4(q.color2, 1.0f), 4);
@@ -3388,7 +3454,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v35 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v36 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
