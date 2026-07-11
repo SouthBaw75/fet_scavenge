@@ -384,6 +384,7 @@ struct Predator {
     uint32_t pack;     // pack identity (nearby hunters merge into one)
     int role;          // PR_Chaser / PR_FlankL / PR_FlankR / PR_Ambush this step
     float feedT;       // >0 while biting/shaking a caught prey before consuming it
+    int cryVoice;      // cry-pool voice sounding for the prey it's eating (-1 none)
 };
 
 // A nest: a built breeding site. A female returns to hers to give birth (pups
@@ -445,7 +446,7 @@ enum {
     WA_ClearColony, WA_ZoomIn, WA_ZoomOut, WA_ResetView, WA_BirthRateSlider,
     WA_DayLenSlider, WA_TimeOfDaySlider, WA_MakeRain,
     WA_ToggleDayNight, WA_ToggleClouds, WA_ToggleRain, WA_SpawnPack, WA_ToggleSound,
-    WA_ToggleBubbleSfx,
+    WA_ToggleBubbleSfx, WA_ToggleAuto,
 };
 struct UIWidget { float x, y, w, h; int act; float val; };
 
@@ -916,6 +917,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     float _lifespanMul;     // global multiplier on genetic lifespan (HUD)
     float _birthRate;       // reproduction multiplier: urge speed + litter size (HUD)
 
+    // Auto-adjust: a feedback controller that steers birth rate + food to hold
+    // the colony on a steady ~5%-per-minute growth trajectory.
+    bool  _autoAdjust;
+    float _autoTargetPop;   // the moving population target it tracks
+    float _autoTimer;       // seconds until the next control update
+
     // Day/night + weather.
     float _timeOfDay;       // 0..1 through one day (0 = midnight, 0.5 = noon)
     float _dayLen;          // seconds per full day (HUD)
@@ -932,6 +939,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     // crossfade with the time of day and the weather, plus event one-shots.
     AVAudioPlayer *_sndDay, *_sndNight, *_sndRain;
     float _volDay, _volNight, _volRain;     // current eased volumes
+    float _muteGain;                        // eased 0/1 so mute/unmute doesn't click
     bool _muted;                            // HUD sound toggle
     NSArray<AVAudioPlayer *> *_cries;       // prey distress-cry pool (on seize)
     int _cryIdx;
@@ -1049,6 +1057,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _startPop = 24;
     _lifespanMul = 1.0f;
     _birthRate = 1.6f;
+    _autoAdjust = false; _autoTargetPop = 0.0f; _autoTimer = 0.0f;
     _timeOfDay = 0.30f;         // start a little after dawn
     _dayLen = 100.0f;           // seconds per day
     _daylight = 1.0f; _skyWarm = 0.0f; _activity = 1.0f;
@@ -1153,11 +1162,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v30 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v31 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: AMBIENT AUDIO — day / night / rain layers crossfade with the sky,\n"
-           "a crawl texture rises with colony movement, bubbles blow, and prey cry\n"
-           "when a predator seizes them. Toggle it with SKY > SOUND.\n");
+           "New: AUTO-ADJUST (LIFE section) holds ~5%/min growth; a true four-beat\n"
+           "walking gait with a slight step-bounce; predators leave the corner\n"
+           "after a kill; rain audio now locked in sync with the on-screen rain;\n"
+           "organisms no longer overlap; the cry cuts off when prey is consumed.\n");
 
     [self setupAudio];
     _startTime = CACurrentMediaTime();
@@ -1224,6 +1234,30 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     [self spawnCritter:randomGenome(_rng, -1) at:[self randomPos] gen:_generation];
 }
 
+- (int)livingCount {
+    int n = 0; for (const Critter &c : _critters) if (c.alive) n++; return n;
+}
+
+// Colony auto-pilot: hold the population on a steady ~5%-per-minute growth
+// curve by continuously steering the birth rate (and supporting food) from the
+// gap between the actual and target population. A gentle proportional loop.
+- (void)autoAdjustStep:(float)dt {
+    if (!_autoAdjust) return;
+    _autoTargetPop *= (1.0f + 0.05f * dt / 60.0f);                 // 5% / minute trajectory
+    _autoTargetPop = std::min(_autoTargetPop, (float)kMaxCritters * 0.85f);
+    _autoTimer -= dt;
+    if (_autoTimer > 0.0f) return;
+    _autoTimer = 2.0f;                                            // re-tune every 2s
+    int pop = [self livingCount];
+    if (pop < 2) {                                               // crashed → reseed
+        _autoTargetPop = 8.0f;
+        if (pop == 0) { [self introduceRandom]; [self introduceRandom]; }
+    }
+    float err = (_autoTargetPop - pop) / std::max(_autoTargetPop, 1.0f);   // >0 behind, <0 ahead
+    _birthRate  = std::clamp(_birthRate + err * 6.0f, 0.5f, 4.5f);         // main lever
+    _foodTarget = std::clamp((int)(220.0f + err * 400.0f), 120, 520);     // feed the growth
+}
+
 // Locate an asset by name, trying a few paths relative to where the binary is
 // typically run from. Returns nil if the file is missing.
 - (NSString *)assetPath:(NSString *)name {
@@ -1266,6 +1300,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
 - (void)setupAudio {
     _muted = false;
+    _muteGain = 1.0f;
     _volDay = _volNight = _volRain = 0.0f;
     _sndDay   = [self loadLoop:@"day"];
     _sndNight = [self loadLoop:@"night"];
@@ -1279,33 +1314,42 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _bubbleSfxOn = true;
 }
 
-// One-shot: a prey's cry when it's seized. Cycles the pool so overlaps play,
-// with a little random volume/pitch variation so repeats don't sound identical.
-- (void)playCry {
-    if (_muted || _cries.count == 0) return;
-    AVAudioPlayer *p = _cries[_cryIdx % _cries.count];
+// One-shot: a prey's cry when it's seized. Cycles the pool so overlaps play, and
+// returns the voice index so the caller can cut it off the instant the prey is
+// consumed. Little random volume/pitch variation so repeats aren't identical.
+- (int)playCry {
+    if (_muted || _cries.count == 0) return -1;
+    int voice = _cryIdx % (int)_cries.count;
     _cryIdx++;
+    AVAudioPlayer *p = _cries[voice];
     std::uniform_real_distribution<float> u(0,1);
     p.volume = 0.7f + 0.25f * u(_rng);
     p.enableRate = YES;
     p.rate = 0.92f + 0.16f * u(_rng);
     p.currentTime = 0.0;
     [p play];
+    return voice;
+}
+
+// Cut a cry off (the prey is gone, so the sound should stop immediately).
+- (void)stopCry:(int)voice {
+    if (voice >= 0 && voice < (int)_cries.count) { [_cries[voice] stop]; _cries[voice].currentTime = 0.0; }
 }
 
 // Crossfade the three ambience layers from the current game state each frame:
 // day vs night by the light level, ducking under rain, which fades up on top.
 - (void)updateAudio:(float)dt {
     const float master = 0.75f;
+    // Lock the ambience volumes DIRECTLY to the same _rain / _daylight the sky
+    // shader uses (both already ease smoothly), so the rain track fades in and
+    // out exactly in step with the on-screen rain. Only the mute is smoothed,
+    // to avoid a click.
     float rainMix = std::clamp(_rain, 0.0f, 1.0f);
-    float mute = _muted ? 0.0f : 1.0f;
-    float dayT   = _daylight * (1.0f - 0.85f*rainMix) * master * mute;
-    float nightT = (1.0f - _daylight) * (1.0f - 0.85f*rainMix) * master * mute;
-    float rainT  = std::clamp(rainMix * master * 1.5f, 0.0f, 1.0f) * mute;   // rain sits louder
-    float k = std::min(2.5f * dt, 1.0f);                 // ~0.4s crossfade
-    _volDay   += (dayT   - _volDay)   * k;
-    _volNight += (nightT - _volNight) * k;
-    _volRain  += (rainT  - _volRain)  * k;
+    _muteGain += ((_muted ? 0.0f : 1.0f) - _muteGain) * std::min(6.0f * dt, 1.0f);  // ~0.16s
+    float duck = 1.0f - 0.65f * rainMix;                 // forest ducks so rain dominates
+    _volDay   = _daylight * duck * master * _muteGain;
+    _volNight = (1.0f - _daylight) * duck * master * _muteGain;
+    _volRain  = std::clamp(rainMix * master * 1.6f, 0.0f, 1.0f) * _muteGain;   // rain sits louder
     if (_sndDay)   _sndDay.volume   = _volDay;
     if (_sndNight) _sndNight.volume = _volNight;
     if (_sndRain)  _sndRain.volume  = _volRain;
@@ -1417,6 +1461,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     p.pack = _nextPack++;        // its own pack until it meets others
     p.role = PR_Chaser;
     p.feedT = 0.0f;
+    p.cryVoice = -1;
     _predators.push_back(p);
 }
 
@@ -1601,6 +1646,8 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     _cloud += (_cloudTarget - _cloud) * std::min(0.5f * dt, 1.0f);   // ease over ~2s
     _rain  += (_rainTarget  - _rain ) * std::min(0.4f * dt, 1.0f);
 
+    [self autoAdjustStep:dt];       // colony auto-pilot (holds ~5%/min growth)
+
     // Food regrows / seeds slowly toward a carrying capacity.
     for (Food &f : _food) if (f.alive) f.growth = std::min(f.growth + 0.20f * dt, 1.0f);
     _foodTimer -= dt;
@@ -1699,13 +1746,17 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             if (!o.alive || o.id == c.id) continue;
             float dd = simd_distance(o.pos, c.pos);
             if (dd < kColonyRange) { flockSum += o.pos; flockN++; }
-            // Personal space: they walk AROUND each other, never through. Repulsion
-            // ramps up sharply as bodies overlap.
-            float space = (c.ph.size + o.ph.size) * 0.85f;
-            if (dd < space) {
+            // Personal space: they walk AROUND each other, never through. Sum the
+            // actual overlap (in world units) with each too-close neighbour so it
+            // can be pushed out hard below. `space` a touch over the drawn body
+            // radius (~0.9*size each) so there's a hair of gap, not overlap. A
+            // courting pair is exempt so they can actually reach each other.
+            bool courting = (c.targetMate == o.id) || (o.targetMate == c.id);
+            float space = (c.ph.size + o.ph.size) * 0.98f;
+            if (!courting && dd < space) {
                 simd_float2 away = dd > 1e-3f ? (c.pos - o.pos)/dd
                                               : simd_make_float2(cosf((float)o.id), sinf((float)o.id));
-                sepForce += away * (1.0f - dd/space);
+                sepForce += away * (space - dd);        // world-unit overlap
             }
             float oAgeT = o.ph.lifespan > 0 ? o.age / (o.ph.lifespan * _lifespanMul) : 0.0f;
             if (oAgeT > kElderFrac && dd < elderBest) { elderBest = dd; elderPos = o.pos; haveElder = true; }
@@ -1926,16 +1977,25 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         bool ambling = (c.action == AWander || c.action == APlay);
         float glideFloor = ambling ? 0.15f : 0.45f;                 // idle roaming pauses deeper than errands
         float gait = (c.action == AFlee) ? 1.0f : (glideFloor + (1.3f - glideFloor) * stroke);
-        // Steer to walk around neighbours (blend separation into the heading), and
-        // keep a hard-ish positional push so bodies never simply overlap.
+        // Steer to walk around neighbours (blend the separation direction into the
+        // heading so they anticipate and go around).
+        float sepLen = simd_length(sepForce);
         simd_float2 steer = (simd_length(desire) > 1e-3f) ? simd_normalize(desire) : simd_make_float2(0,0);
-        steer += sepForce * 0.9f;
+        if (sepLen > 1e-4f) steer += (sepForce / sepLen) * 1.3f;
         simd_float2 wantVel = (simd_length(steer) > 1e-3f)
             ? simd_normalize(steer) * wantSpeed * ageSlow * actMul * gait : simd_make_float2(0,0);
         c.vel += (wantVel - c.vel) * std::min(6.0f * dt, 1.0f);    // responsive, so the surge reads
         if (simd_length(c.vel) > 0.05f) c.heading = atan2f(c.vel.y, c.vel.x);
         c.pos += c.vel * dt;
-        c.pos += sepForce * std::min(3.0f * dt, 0.3f);            // resolve overlaps even at rest
+        // Firm overlap resolution: shove out by half the total overlap this frame
+        // (both critters do it → the full overlap clears), capped so it never
+        // teleports. Guarantees bodies don't sit on top of one another.
+        if (sepLen > 1e-4f) {
+            simd_float2 push = sepForce * 0.5f;
+            float pl = simd_length(push);
+            if (pl > 0.7f) push *= 0.7f / pl;
+            c.pos += push;
+        }
         // sickness saps mobility
         if (c.sick > 0) c.pos -= c.vel * dt * c.sick * 0.5f;
         c.pos.x = std::clamp(c.pos.x, 1.0f, kWorldW - 1.0f);
@@ -2115,7 +2175,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         p.age += dt;
         p.cooldown = std::max(p.cooldown - dt, 0.0f);
         p.energy -= 0.022f * dt;                    // metabolism
-        if (p.age > p.lifespan || p.energy <= 0.0f) { p.alive = false; continue; }
+        if (p.age > p.lifespan || p.energy <= 0.0f) {
+            [self stopCry:p.cryVoice];               // don't leave a cry ringing if it dies mid-meal
+            p.alive = false; continue;
+        }
 
         Critter *prey = [self critterById:p.targetPrey];
 
@@ -2147,6 +2210,14 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 p.energy = std::min(p.energy + 0.5f, 1.4f);
                 p.cooldown = 1.6f;
                 p.targetPrey = 0;
+                [self stopCry:p.cryVoice]; p.cryVoice = -1;   // silence the cry — prey is gone
+                // Turn back toward open ground so it doesn't sit facing the wall.
+                simd_float2 toCenter = simd_make_float2(kWorldW*0.5f, kWorldH*0.5f) - p.pos;
+                float cdist = simd_length(toCenter);
+                if (cdist > 1e-3f) {
+                    p.heading = atan2f(toCenter.y, toCenter.x);
+                    p.vel = toCenter / cdist * 3.0f;        // a shove off the corner
+                }
             }
         } else if (prey) {
             // Predict the prey's escape and take an ASSIGNED role in the pack.
@@ -2174,7 +2245,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                     p.feedT = kFeedSecs;
                     prey->grab = 0.2f;
                     wantSpeed = 0.0f;
-                    [self playCry];                   // the prey's distress cry
+                    p.cryVoice = [self playCry];      // the prey's distress cry (cut off on consume)
                 }
             } else {
                 float lead = std::clamp(rd / 12.0f, 0.0f, 2.0f);
@@ -2199,15 +2270,21 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
                 else if (p.role == PR_Ambush) wantSpeed = (rd < 6.0f) ? 9.8f : 4.0f; // lie in wait, then pounce
             }
         } else {
-            // No quarry in reach: regroup with the pack and patrol together.
+            // No quarry in reach: regroup with the pack and patrol together — but
+            // steer firmly out of the world edges so a pack that cornered its last
+            // meal doesn't get pinned there.
             int k = packSlot(p.pack);
             simd_float2 toC = packC[k] - p.pos;
             float cd = simd_length(toC);
             p.heading += (u(_rng) - 0.5f) * 1.4f * dt;
             simd_float2 rove = simd_make_float2(cosf(p.heading), sinf(p.heading));
             simd_float2 group = (packN[k] > 1 && cd > kPackRange*0.6f) ? toC/cd : simd_make_float2(0,0);
-            desire = simd_normalize(rove*0.6f + group*0.8f + simd_make_float2(1e-4f,0));
-            wantSpeed *= 0.5f;                        // patrol slowly
+            float m = 9.0f;                            // edge margin
+            simd_float2 wall = simd_make_float2(
+                std::max(0.0f,(m-p.pos.x)/m) - std::max(0.0f,(p.pos.x-(kWorldW-m))/m),
+                std::max(0.0f,(m-p.pos.y)/m) - std::max(0.0f,(p.pos.y-(kWorldH-m))/m));
+            desire = simd_normalize(rove*0.6f + group*0.7f + wall*2.2f + simd_make_float2(1e-4f,0));
+            wantSpeed *= 0.55f;                        // patrol slowly
             p.role = PR_Chaser;
         }
 
@@ -2407,6 +2484,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             case WA_SpawnPack:   [self spawnPack:5]; break;
             case WA_ToggleSound: _muted = !_muted; break;
             case WA_ToggleBubbleSfx: _bubbleSfxOn = !_bubbleSfxOn; break;
+            case WA_ToggleAuto:
+                _autoAdjust = !_autoAdjust;
+                if (_autoAdjust) { _autoTargetPop = std::max([self livingCount], 8); _autoTimer = 0.0f; }
+                break;
             case WA_CullPredators: [self cullPredators]; break;
             case WA_MakeRain:  _rainOn = true; _cloudsOn = true;
                                _cloudTarget = 0.9f; _rainTarget = 0.9f; _weatherTimer = 25.0f; break;
@@ -2569,7 +2650,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         text(x0, y, "BIRTH RATE PCT", 11, cLabel);
         [self hudNumber:(int)(_birthRate*100.0f) x:x0+cw-52 y:y dw:5 dh:9 col:cTxt bw:bw bh:bh];
     }
-    slider(x0, row(18,12), cw, 18, (_birthRate-0.5f)/4.0f, WA_BirthRateSlider);
+    slider(x0, row(18,6), cw, 18, (_birthRate-0.5f)/4.0f, WA_BirthRateSlider);
+    // Auto-pilot: continuously steers birth rate + food to hold ~5%/min growth.
+    button(x0, row(24,12), cw, 24, _autoAdjust ? "AUTO-ADJUST: ON (5%/MIN)" : "AUTO-ADJUST: OFF",
+           WA_ToggleAuto, 0, _autoAdjust);
 
     // --- PREDATORS ---
     text(x0, row(11,5), "PREDATORS", 11, cLabel);
@@ -2825,11 +2909,18 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 
         // Hunkering / hiding pulls the body in low and tight against the ground.
         float tuck = (!corpse && c.action == AHunker) ? 0.88f : 1.0f;
-        float S = ph.size * 0.85f * tuck;                             // body radius (membrane)
+        // Gait: the fin swing and a slight step-bounce both scale with how fast it
+        // is actually moving, so footwork quickens on the run and stills at rest.
+        float mv = corpse ? 0.0f : std::clamp(simd_length(c.vel)/std::max(ph.speed,0.1f), 0.0f, 1.4f);
+        float bounce = 1.0f + 0.06f * mv * fabsf(sinf(c.phase));      // body swells a touch on each step
+        float S = ph.size * 0.85f * tuck * bounce;                    // body radius (membrane)
         simd_float2 fwd = simd_make_float2(cosf(c.heading), sinf(c.heading));
         simd_float2 perp = simd_make_float2(-fwd.y, fwd.x);
         float seed = (float)(c.id % 97) * 0.7f;
-        float sweep = 0.45f * sinf(c.phase);                          // fin power stroke
+        // Alternating four-beat gait: diagonal pairs stroke out of phase.
+        float amp = 0.30f + 0.32f * mv;                              // wider swing at speed
+        float gA = amp * sinf(c.phase);                             // pair A: rear-left + front-right
+        float gB = -gA;                                             // pair B: rear-right + front-left
         simd_float4 finCol = simd_make_float4(base*1.05f + simd_make_float3(0.04f,0.06f,0.05f), A);
 
         // Bioluminescence: after dark, a soft halo glows in the animal's dominant
@@ -2849,16 +2940,17 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
             }
         }
 
-        // Four splayed translucent veined webbed fins (drawn first; the body overlaps their roots).
+        // Four splayed translucent veined webbed fins (drawn first; the body overlaps
+        // their roots). Diagonal pairs alternate for a true four-beat walking gait.
         // rear pair — the main paddles
-        [self fin:c.pos - fwd*0.35f*S + perp*0.60f*S ang:c.heading + 2.15f + sweep
+        [self fin:c.pos - fwd*0.35f*S + perp*0.60f*S ang:c.heading + 2.15f + gA        // rear-left (A)
                len:1.25f*S*sink width:0.42f*S color:finCol seed:seed];
-        [self fin:c.pos - fwd*0.35f*S - perp*0.60f*S ang:c.heading - 2.15f - sweep
+        [self fin:c.pos - fwd*0.35f*S - perp*0.60f*S ang:c.heading - 2.15f + gB        // rear-right (B)
                len:1.25f*S*sink width:0.42f*S color:finCol seed:seed+3.0f];
-        // front pair — smaller
-        [self fin:c.pos + fwd*0.30f*S + perp*0.55f*S ang:c.heading + 1.05f + sweep*0.7f
+        // front pair — smaller, swing a little less
+        [self fin:c.pos + fwd*0.30f*S + perp*0.55f*S ang:c.heading + 1.05f + gB*0.8f   // front-left (B)
                len:0.95f*S*sink width:0.34f*S color:finCol seed:seed+6.0f];
-        [self fin:c.pos + fwd*0.30f*S - perp*0.55f*S ang:c.heading - 1.05f - sweep*0.7f
+        [self fin:c.pos + fwd*0.30f*S - perp*0.55f*S ang:c.heading - 1.05f + gA*0.8f   // front-right (A)
                len:0.95f*S*sink width:0.34f*S color:finCol seed:seed+9.0f];
 
         // Big translucent speckled domed membrane body (slightly tapered toward the face).
@@ -2994,7 +3086,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v30 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v31 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -3174,7 +3266,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v30 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v31 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
