@@ -197,8 +197,10 @@ Bubble Burrower is **crepuscular**, the colony is liveliest at dawn and dusk,
 dozes through the deep night, and its **pupils widen in low light**. After dark
 each animal gives off a **slight bioluminescent glow in its own dominant
 colour**. Over the top drifts **weather**: spells of clear, cloudy, and rainy
-sky ease in and out, with animated **rain streaks** and a grey overcast wash;
-rain keeps their skin moist (they drink less) and calls off play. The **SKY**
+sky ease in and out, with a grey overcast wash and **top-down rain** rendered as
+ground impacts — a bright tick where each drop lands and a faint expanding ring
+(in world space, so it tracks the camera); rain keeps their skin moist (they
+drink less) and calls off play. The **SKY**
 panel scrubs the time of day, sets the day length, has **MAKE RAIN**, and
 carries independent **on/off toggles for each element** (DAY/NIGHT, CLOUDS,
 RAIN) so you can switch any of them off entirely.

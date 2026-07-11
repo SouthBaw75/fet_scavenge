@@ -537,8 +537,8 @@ fragment float4 ground_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(
 // A fullscreen wash composited OVER the whole world (ground + critters + water)
 // but under the HUD. Outputs PREMULTIPLIED colour for (One, 1-SrcAlpha)
 // blending, so several tint layers accumulate cleanly. Carries the day/night
-// tint, an overcast grey, a dawn/dusk warm cast, a night vignette, and animated
-// rain streaks.
+// tint, an overcast grey, a dawn/dusk warm cast, a night vignette, and top-down
+// rain impacts (bright drop ticks + faint expanding rings) on the ground.
 fragment float4 sky_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(0)]]) {
     float3 pc = float3(0.0);      // accumulated premultiplied colour
     float  a  = 0.0;              // accumulated coverage
@@ -561,20 +561,29 @@ fragment float4 sky_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(0)]
     float horizon = smoothstep(0.1, 0.9, in.uv.y);
     OVER(float3(0.95, 0.55, 0.22), u.warmth * (0.10 + 0.16 * horizon) * (1.0 - 0.6*u.cloud));
 
-    // Rain: slanted streaks falling in screen space, plus a faint darkening.
+    // Rain: top-down impacts on the ground — a small bright drop where each
+    // raindrop lands, then a faint expanding ring. Computed in WORLD space so the
+    // impacts sit on the ground and track panning/zooming. Rings kept subtle.
     if (u.rain > 0.01) {
-        float2 rp;
-        rp.x = in.uv.x * (u.resolution.x / max(u.resolution.y,1.0));
-        rp.y = in.uv.y;
-        rp.x += rp.y * 0.18;                          // slant
-        float cols = 220.0;
-        float cell = floor(rp.x * cols);
-        float rnd  = fract(sin(cell * 91.17) * 43758.5453);
-        float speed = 1.1 + rnd * 0.8;
-        float drop = fract(rp.y * 26.0 + u.time * speed + rnd * 13.0);
-        float streak = smoothstep(0.86, 1.0, drop) * step(rnd, u.rain * 0.75 + 0.06);
-        OVER(float3(0.02, 0.05, 0.10), u.rain * 0.14);          // grey-out
-        OVER(float3(0.62, 0.72, 0.85), streak * (0.20 + 0.25 * u.rain));
+        OVER(float3(0.03, 0.06, 0.11), u.rain * 0.16);          // wet grey-out
+        float2 ndc = float2(in.uv.x*2.0-1.0, 1.0-in.uv.y*2.0);
+        float2 w = (ndc - u.offset) / u.scale;                  // world coords on the ground
+        float scale = 0.55;                                     // ~1.8 world units per cell
+        float2 gv = w * scale;
+        float2 id = floor(gv);
+        float ringAcc = 0.0, dropAcc = 0.0;
+        for (int dy=-1; dy<=1; dy++) for (int dx=-1; dx<=1; dx++) {
+            float2 cell = id + float2(dx,dy);
+            float2 c = cell + 0.25 + 0.5*float2(hash21(cell), hash21(cell+7.3));
+            float ph = hash21(cell+1.9);
+            float age = fract(u.time/1.25 + ph);
+            float d = length(gv - c);
+            dropAcc += smoothstep(0.09,0.0,d) * smoothstep(0.12,0.0,age);        // the drop landing
+            float rad = age*0.8;
+            ringAcc += smoothstep(0.05,0.0,abs(d-rad)) * (1.0-age) * step(0.05,age);
+        }
+        OVER(float3(0.72,0.82,0.96), clamp(ringAcc,0.0,1.0) * u.rain * 0.07);    // faint, transparent rings
+        OVER(float3(0.88,0.94,1.0),  clamp(dropAcc,0.0,1.0) * u.rain * 0.16);    // brighter impact ticks
     }
 
     #undef OVER
@@ -1127,9 +1136,11 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v22 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v23 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New: BLUE-GREEN base coat, night BIOLUMINESCENCE (now drawn over the\n"
+           "New: top-down RAIN as ground impacts — bright drop ticks + faint\n"
+           "expanding rings (world-space, tracks the camera). Plus the earlier\n"
+           "BLUE-GREEN base coat, night BIOLUMINESCENCE (now drawn over the\n"
            "night wash so it actually glows), per-element SKY toggles, and a\n"
            "SCROLLABLE control panel (scroll with the cursor over it to reach\n"
            "every control).\n");
@@ -2740,7 +2751,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v22 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v23 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2903,7 +2914,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v22 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v23 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
