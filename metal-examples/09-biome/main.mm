@@ -1865,7 +1865,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // heritable temperament, then pick the most pressing. Because the weights
         // come from its genes, two critters in the same situation can choose
         // differently — so the colony stops behaving as one. ---
-        float bold = ph.boldness, social = ph.sociability, curi = ph.curiosity, act = ph.activity;
+        float bold = ph.boldness, curi = ph.curiosity, act = ph.activity;
         float sForage = c.hunger;
         // Rest / doze — lazy (low-activity) ones rest more; everyone dozes at night.
         float sRest = ((1.0f - c.energy) * 0.9f + (1.0f - _daylight) * 0.40f) * (1.3f - 0.6f*act);
