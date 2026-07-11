@@ -173,8 +173,13 @@ army), and a **weapon-vs-armor matrix**: arrows bounce off shields, axes
 crush them, pikes and bolts punch through heavy armor.
 
 ### 09 — BIOME (life simulator)
-Care for a colony of critters whose every trait is read from a real, inherited
-**nucleotide genome** — built to the spec in `09-biome/DESIGN.md`. Diploid A/C/G/T
+Care for a colony of **Bubble Burrowers** (*Bullavermis communis*) — small
+amphibious wetland herbivores rendered as **translucent membrane bodies** with a
+breathing **bubble dome**, two big forward eyes, four padded limbs that walk in a
+four-beat gait, and a tapering flexible rear; they **camouflage** toward the
+ground when they hold still, and fade into a decaying corpse when they die.
+Every trait is read from a real, inherited **nucleotide genome** — built to the
+spec in `09-biome/DESIGN.md`. Diploid A/C/G/T
 genes on chromosomes, traits translated from the sequence, dominance read from
 the sequence, **meiosis with crossing-over + point mutation**, and X/Y sex — so
 the colony genuinely evolves across generations. Sixteen genes drive visible,

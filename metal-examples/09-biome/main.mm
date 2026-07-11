@@ -660,6 +660,40 @@ fragment float4 entity_fragment(EOut in [[stage_in]]) {
         if (m < 0.02) discard_fragment();
         float3 c = (rad < 0.24) ? float3(0.95,0.82,0.20) : in.color.rgb; // yellow center
         return float4(gammaOut(c)*m, m);
+    } else if (shape == 15) {               // Bubble Burrower membrane body (x=seed,y=time)
+        float seed=in.params.x, t=in.params.y;
+        float rr=length(p), ang=atan2(p.y,p.x), aa=fwidth(rr);
+        float edge=0.90*(1.0+0.08*cos(ang)) + 0.02*sin(ang*4.0+t*0.6);  // broad front, taper rear
+        float m=smoothstep(edge+aa, edge-aa, rr); if(m<0.01) discard_fragment();
+        float3 bcol=in.color.rgb;
+        float A=0.55*in.color.a;                                        // translucent + honors fade
+        float3 col=bcol*(0.9+0.1*cos(ang*6.0))*(0.85+0.2*fbm(p*3.0+seed)); // faint organs beneath
+        col*=0.88+0.30*smoothstep(0.25,edge,rr);
+        float2 gp=floor(p*14.0+seed*3.0);                              // internal sparkle
+        float glit=smoothstep(0.90,0.99, fract(sin(dot(gp,float2(12.9898,78.233)))*43758.5453));
+        col+=glit*float3(1.0,1.0,0.85)*0.6; A=max(A, glit*0.85*in.color.a);
+        float gloss=smoothstep(0.6,0.0,length(p-float2(-0.15,0.4)));   // moist sheen
+        col+=gloss*0.4; A=mix(A,0.78*in.color.a,gloss*0.5);
+        float rim=smoothstep(edge-0.12,edge-0.005,rr);                 // bright membrane edge
+        col=mix(col, bcol*1.5+0.15, rim*0.5); A=mix(A,0.72*in.color.a,rim);
+        A*=m; return float4(gammaOut(col)*A, A);
+    } else if (shape == 16) {               // bubble dome (transparent air chamber)
+        float rr=length(p), aa=fwidth(rr);
+        float m=smoothstep(0.96+aa,0.96-aa,rr); if(m<0.01) discard_fragment();
+        float A=0.26*in.color.a;
+        float3 col=in.color.rgb*0.8+0.08;
+        float rim=smoothstep(0.66,0.96,rr);
+        col=mix(col, float3(0.9,0.97,1.0), rim*0.55); A=mix(A,0.55*in.color.a,rim);
+        float hi=smoothstep(0.42,0.0,length(p-float2(-0.30,0.34)));    // specular glint
+        col+=hi*0.7; A=max(A, hi*0.7*in.color.a);
+        A*=m; return float4(gammaOut(col)*A, A);
+    } else if (shape == 17) {               // big glossy forward eye (color = iris)
+        float rr=length(p), aa=fwidth(rr);
+        float m=smoothstep(0.95+aa,0.95-aa,rr); if(m<0.01) discard_fragment();
+        float3 col=mix(float3(0.03,0.03,0.07), in.color.rgb*0.65, smoothstep(0.16,0.55,rr)); // pupil->iris
+        col=mix(col, float3(0.02,0.02,0.03), smoothstep(0.84,0.97,rr));                       // dark rim
+        col=max(col, float3(0.9,0.95,1.0)*smoothstep(0.30,0.0,length(p-float2(-0.26,0.28)))); // glint
+        return float4(gammaOut(col)*m, m*in.color.a);
     }
     // Premultiplied by in.color.a so fading sprites (e.g. decaying corpses)
     // dissolve correctly instead of brightening.
@@ -913,10 +947,10 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v13 (vivid coats) — if you don't see this line you're "
+    printf("=== BIOME v14 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "Coat colors are now vivid and saturated — breed a red with a blue and\n"
-           "watch purple offspring (and new hues) emerge over generations.\n");
+           "The colony is now Bubble Burrowers: translucent membrane bodies with a\n"
+           "breathing bubble dome, big eyes, four padded limbs, and camouflage.\n");
 
     _startTime = CACurrentMediaTime();
     _lastFrameTime = _startTime;
@@ -2015,83 +2049,73 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
               color:simd_make_float4(twig, 1.0f) p:simd_make_float4(seed,0,0,0)];
     }
 
-    // critters: spine of soft blobs, head + eyes; age visibly and, once dead,
-    // settle into a corpse that rots and fades away over kDecaySecs.
+    // critters: the BUBBLE BURROWER — a translucent membrane body with a
+    // breathing bubble dome, big forward eyes, four padded limbs (walking gait),
+    // and a tapering flexible rear. They age (worn/faded), camouflage toward the
+    // ground when standing still, and settle into a decaying corpse when they die.
     for (const Critter &c : _critters) {
-        if (!c.alive && c.decay >= 1.0f) continue;      // fully gone
+        if (!c.alive && c.decay >= 1.0f) continue;
         bool corpse = !c.alive;
-        float A = corpse ? std::max(0.0f, 1.0f - c.decay) : 1.0f;  // fade out
-        float sink = corpse ? (1.0f - 0.35f * c.decay) : 1.0f;     // body settles
+        float A = corpse ? std::max(0.0f, 1.0f - c.decay) : 1.0f;
+        float sink = corpse ? (1.0f - 0.35f * c.decay) : 1.0f;
         const Phenotype &ph = c.ph;
 
         simd_float3 base = ph.color;
-        simd_float3 sec = ph.color2;
         if (!corpse) {
-            if (c.sick > 0) {
-                simd_float3 ill = simd_make_float3(0.70f, 0.85f, 0.30f);
-                base = base + (ill - base) * (c.sick * 0.6f);
-                sec  = sec  + (ill - sec)  * (c.sick * 0.6f);
-            }
-            if (c.health < 0.5f) { float f = 0.6f + 0.4f*c.health; base = base*f; sec = sec*f; }
-            // Aging: elders fade toward a worn, desaturated tone.
-            float ageT = std::clamp(c.age / (ph.lifespan * _lifespanMul), 0.0f, 1.0f);
-            float old = std::clamp((ageT - 0.55f) / 0.45f, 0.0f, 1.0f);
-            simd_float3 worn = simd_make_float3(0.46f, 0.43f, 0.37f);
-            base = base + (worn - base) * old * 0.5f;
-            sec  = sec  + (worn - sec)  * old * 0.5f;
+            if (c.sick > 0) base = base + (simd_make_float3(0.70f,0.85f,0.30f)-base)*(c.sick*0.6f);
+            if (c.health < 0.5f) base = base * (0.6f + 0.4f*c.health);
+            float ageT = std::clamp(c.age/(ph.lifespan*_lifespanMul), 0.0f, 1.0f);
+            float old = std::clamp((ageT-0.55f)/0.45f, 0.0f, 1.0f);
+            base = base + (simd_make_float3(0.46f,0.43f,0.37f)-base)*old*0.5f;
+            // Camouflage: blend toward the mossy ground when standing still.
+            float still = 1.0f - std::clamp(simd_length(c.vel)/std::max(ph.speed,0.1f)*2.0f, 0.0f, 1.0f);
+            base = base + (simd_make_float3(0.20f,0.30f,0.15f)-base)*still*0.40f;
         } else {
-            // Corpse: desaturate toward decayed brown, darkening as it rots.
-            simd_float3 rotc = simd_make_float3(0.20f, 0.15f, 0.10f);
-            float k = 0.35f + 0.55f * c.decay;
-            base = base + (rotc - base) * k;
-            sec  = sec  + (rotc - sec)  * k;
+            base = base + (simd_make_float3(0.20f,0.15f,0.10f)-base)*(0.35f+0.55f*c.decay);
         }
 
-        float widthMul = 1.15f - 0.40f * ph.aspect;
+        float S = ph.size;
         simd_float2 fwd = simd_make_float2(cosf(c.heading), sinf(c.heading));
         simd_float2 perp = simd_make_float2(-fwd.y, fwd.x);
+        float mv = simd_length(c.vel)/std::max(ph.speed,0.1f);
+        float seed = (float)(c.id % 97) * 0.7f;
 
-        if (ph.snout > 0.10f) {
-            float sr = ph.size * 0.28f * (0.5f + 0.6f * ph.snout) * sink;
-            [self push:c.pos + fwd * (0.55f*ph.size*(0.4f+0.7f*ph.snout))
-                  half:simd_make_float2(sr,sr) rot:0 shape:0
-                  color:simd_make_float4(base,A) p:simd_make_float4(0,0,0,0)];
+        // Four padded limbs (drawn first; they show faintly through the membrane).
+        for (int li=0; li<4; li++){
+            float fx = (li<2)? 1.0f : -1.0f;      // front / back
+            float sy = (li%2==0)? 1.0f : -1.0f;   // left / right
+            simd_float2 corner = c.pos + fwd*fx*0.40f*S + perp*sy*0.52f*S;
+            float gp = c.phase + ((fx*sy>0)?0.0f:3.14159f);            // diagonal four-beat gait
+            simd_float2 foot = corner + fwd*sinf(gp)*mv*0.30f*S;
+            [self push:(corner+foot)*0.5f half:simd_make_float2(0.13f*S*sink,0.13f*S*sink)
+                  rot:0 shape:0 color:simd_make_float4(base*0.7f, A*0.9f) p:simd_make_float4(0,0,0,0)];
+            [self push:foot half:simd_make_float2(0.16f*S*sink,0.16f*S*sink)
+                  rot:0 shape:0 color:simd_make_float4(base*0.6f, A) p:simd_make_float4(0,0,0,0)];
         }
-        int nf = (int)(ph.spikes * 3.5f + 0.5f);
-        for (int k = 0; k < nf && (k+1) < kSpineNodes; k++) {
-            int node = k + 1;
-            float un = node / (kSpineNodes - 1.0f);
-            float rr = ph.size * 0.55f * (1.0f - 0.72f*un) * widthMul;
-            float fr = ph.size * 0.20f * (0.5f + 0.7f * ph.spikes) * sink;
-            float side = (k % 2 == 0) ? 1.0f : -1.0f;
-            [self push:c.spine[node] + perp * side * (rr + fr*0.5f)
-                  half:simd_make_float2(fr,fr) rot:0 shape:7
-                  color:simd_make_float4(sec*0.85f,A) p:simd_make_float4(0,0,0,0)];
+        // Tapering flexible rear (rides the trailing spine).
+        for (int k = kSpineNodes-1; k >= kSpineNodes-2 && k >= 1; k--){
+            float rr = S*0.30f*(1.0f - 0.35f*(kSpineNodes-1-k)) * sink;
+            [self push:c.spine[k] half:simd_make_float2(rr,rr) rot:c.heading shape:15
+                  color:simd_make_float4(base,A) p:simd_make_float4(seed+3.0f, t, 0,0)];
         }
-        for (int sidx = kSpineNodes-1; sidx >= 0; sidx--) {
-            float un = sidx / (kSpineNodes - 1.0f);
-            float taper = 1.0f - 0.72f * un;
-            float bulge = 1.0f + ph.girth * 0.70f * sinf(un * 3.14159f);
-            float rr = ph.size * 0.55f * taper * bulge * widthMul * sink;
-            float band = ph.pattern * (0.5f + 0.5f * sinf(un * 3.0f * 6.2831853f));
-            simd_float3 srgb = base + (sec - base) * band;
-            [self push:c.spine[sidx] half:simd_make_float2(rr,rr) rot:0 shape:0
-                  color:simd_make_float4(srgb,A) p:simd_make_float4(0,0,0,0)];
-        }
-        // Eyes and pregnancy pip only while alive (eyes close in death).
+        // Translucent membrane body.
+        float br = S*0.72f;
+        [self push:c.pos half:simd_make_float2(br*1.06f, br*0.92f) rot:c.heading shape:15
+              color:simd_make_float4(base,A) p:simd_make_float4(seed, t, 0,0)];
+
         if (!corpse) {
-            float er = ph.eyeSize * ph.size * 1.3f + 0.05f;
-            simd_float4 eyec = simd_make_float4(ph.eyeColor * (0.8f + 0.4f*ph.eyeShine), 1.0f);
-            [self push:c.pos + fwd*0.18f*ph.size + perp*0.26f*ph.size
-                  half:simd_make_float2(er,er) rot:0 shape:3
-                  color:eyec p:simd_make_float4(0,0,0,0)];
-            [self push:c.pos + fwd*0.18f*ph.size - perp*0.26f*ph.size
-                  half:simd_make_float2(er,er) rot:0 shape:3
-                  color:eyec p:simd_make_float4(0,0,0,0)];
+            float breath = 1.0f + 0.09f*sinf(t*1.4f + seed);          // breathing bubble dome
+            [self push:c.pos - fwd*0.10f*S half:simd_make_float2(br*0.62f*breath, br*0.60f*breath)
+                  rot:c.heading shape:16 color:simd_make_float4(base*1.1f, A) p:simd_make_float4(0,0,0,0)];
+            float er = (0.16f + ph.eyeSize*1.1f) * S;                 // big forward eyes
+            simd_float4 eyec = simd_make_float4(ph.eyeColor, A);
+            [self push:c.pos + fwd*0.46f*S + perp*0.30f*S half:simd_make_float2(er,er)
+                  rot:0 shape:17 color:eyec p:simd_make_float4(0,0,0,0)];
+            [self push:c.pos + fwd*0.46f*S - perp*0.30f*S half:simd_make_float2(er,er)
+                  rot:0 shape:17 color:eyec p:simd_make_float4(0,0,0,0)];
             if (c.pregnant)
-                [self push:c.pos + simd_make_float2(0, ph.size * 0.95f)
-                      half:simd_make_float2(0.18f,0.18f) rot:0 shape:7
-                      color:simd_make_float4(1.0f,0.5f,0.7f,1) p:simd_make_float4(0,0,0,0)];
+                [self push:c.pos + simd_make_float2(0, S*0.95f) half:simd_make_float2(0.18f,0.18f)
+                      rot:0 shape:7 color:simd_make_float4(1.0f,0.5f,0.7f,1) p:simd_make_float4(0,0,0,0)];
         }
     }
 
@@ -2175,7 +2199,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v13 ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v14 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2338,7 +2362,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v13", 1280, 800, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v14 (Bubble Burrower)", 1280, 800, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
