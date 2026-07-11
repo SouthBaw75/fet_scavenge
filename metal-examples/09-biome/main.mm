@@ -564,29 +564,28 @@ fragment float4 sky_fragment(FSOut in [[stage_in]], constant Uni &u [[buffer(0)]
     float horizon = smoothstep(0.1, 0.9, in.uv.y);
     OVER(float3(0.95, 0.55, 0.22), u.warmth * (0.10 + 0.16 * horizon) * (1.0 - 0.6*u.cloud));
 
-    // Rain: top-down impacts on the ground — a small bright drop where each
-    // raindrop lands, then a faint expanding ring. Computed in WORLD space so the
-    // impacts sit on the ground and track panning/zooming. Rings kept subtle.
+    // Rain: top-down impacts on the ground — a bright drop where each raindrop
+    // lands, then a faint expanding ring. Sized in WORLD units (so they read at a
+    // consistent, visible scale and track panning/zooming). Rings kept subtle.
     if (u.rain > 0.01) {
         OVER(float3(0.03, 0.06, 0.11), u.rain * 0.16);          // wet grey-out
         float2 ndc = float2(in.uv.x*2.0-1.0, 1.0-in.uv.y*2.0);
         float2 w = (ndc - u.offset) / u.scale;                  // world coords on the ground
-        float scale = 0.55;                                     // ~1.8 world units per cell
-        float2 gv = w * scale;
-        float2 id = floor(gv);
+        float cell = 3.4;                                       // world units between drops
+        float2 id = floor(w / cell);
         float ringAcc = 0.0, dropAcc = 0.0;
         for (int dy=-1; dy<=1; dy++) for (int dx=-1; dx<=1; dx++) {
-            float2 cell = id + float2(dx,dy);
-            float2 c = cell + 0.25 + 0.5*float2(hash21(cell), hash21(cell+7.3));
-            float ph = hash21(cell+1.9);
-            float age = fract(u.time/1.25 + ph);
-            float d = length(gv - c);
-            dropAcc += smoothstep(0.09,0.0,d) * smoothstep(0.12,0.0,age);        // the drop landing
-            float rad = age*0.8;
-            ringAcc += smoothstep(0.05,0.0,abs(d-rad)) * (1.0-age) * step(0.05,age);
+            float2 g = id + float2(dx,dy);
+            float2 c = (g + 0.2 + 0.6*float2(hash21(g), hash21(g+7.3))) * cell;  // drop centre (world)
+            float ph = hash21(g + 1.9);
+            float age = fract(u.time/1.3 + ph);                 // 0 lands .. 1 gone
+            float d = length(w - c);                            // world-unit distance
+            dropAcc += smoothstep(0.55, 0.0, d) * smoothstep(0.16, 0.0, age);   // impact flash (~0.5 units)
+            float rad = age * 1.9;                              // ring grows to ~1.9 units
+            ringAcc += smoothstep(0.28, 0.0, abs(d - rad)) * (1.0 - age) * step(0.05, age);
         }
-        OVER(float3(0.72,0.82,0.96), clamp(ringAcc,0.0,1.0) * u.rain * 0.07);    // faint, transparent rings
-        OVER(float3(0.88,0.94,1.0),  clamp(dropAcc,0.0,1.0) * u.rain * 0.16);    // brighter impact ticks
+        OVER(float3(0.74,0.83,0.97), clamp(ringAcc,0.0,1.0) * u.rain * 0.13);    // faint, soft rings
+        OVER(float3(0.90,0.95,1.0),  clamp(dropAcc,0.0,1.0) * u.rain * 0.28);    // brighter impact ticks
     }
 
     #undef OVER
@@ -1139,7 +1138,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v24 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v25 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
            "New: predators now BITE, SHAKE, then CONSUME their catch (a ~1.3s\n"
            "thrash before the prey is gone) instead of an instant kill. Plus\n"
@@ -2792,7 +2791,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v24 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v25 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -2955,7 +2954,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v24 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v25 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
