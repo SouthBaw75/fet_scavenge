@@ -337,6 +337,7 @@ struct Critter {
     bool alive;
     float decay;       // 0 while alive; 0->1 as a corpse rots, then removed
     float grab;        // >0 while seized in a predator's jaws (can't flee)
+    float rest;        // 0 awake .. 1 asleep (still, eyes closed, gently breathing)
     // --- Bubble Burrower life history ---
     uint32_t partner;  // bonded mate (0 = unbonded); pairs stay together for life
     float care;        // parental-care cooldown after a birth; urge stays low while >0
@@ -1197,12 +1198,12 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         return nil;
     }];
 
-    printf("=== BIOME v34 (Bubble Burrower) — if you don't see this line you're "
+    printf("=== BIOME v35 (Bubble Burrower) — if you don't see this line you're "
            "running an OLD BINARY (run: rm -rf build && make build/09-biome) ===\n"
-           "New (first pass): AQUARIUM mode — toggle HABITAT (VIEW section). The\n"
-           "colony turns aquatic: languid gliding + buoyant hover over a sand tank\n"
-           "floor with a blue-green water wash. Plus the BALANCE auto-pilot and\n"
-           "hard living cap from before.\n");
+           "New: critters now truly SLEEP — when they settle to rest (dozing at\n"
+           "night or worn out) they come to a full stop, close their eyes, and\n"
+           "breathe gently, snapping awake if a predator nears. Plus AQUARIUM mode\n"
+           "(toggle HABITAT in VIEW) and the BALANCE auto-pilot.\n");
 
     [self setupAudio];
     _startTime = CACurrentMediaTime();
@@ -1252,6 +1253,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     c.camo = 0.0f;
     c.bubbleAcc = u(_rng);
     c.grab = 0.0f;
+    c.rest = 0.0f;
     _critters.push_back(c);
 }
 
@@ -2043,16 +2045,26 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         float sepLen = simd_length(sepForce);
         simd_float2 steer = (simd_length(desire) > 1e-3f) ? simd_normalize(desire) : simd_make_float2(0,0);
         if (sepLen > 1e-4f) steer += (sepForce / sepLen) * 1.3f;
+        // Sleep: when it settles to rest — dozing through the night or worn out —
+        // it drifts off, coming to a complete stop with its eyes shut. Eases in and
+        // out over ~2s. (Woken by anything more urgent than resting.)
+        float mvNow = simd_length(c.vel) / std::max(ph.speed, 0.1f);
+        bool wantSleep = (c.action == ARest) && mvNow < 0.30f && threatLvl < 0.05f
+                       && ((1.0f - _daylight) > 0.35f || c.energy < 0.45f);
+        float wakeRate = wantSleep ? 0.5f : (threatLvl > 0.1f ? 5.0f : 0.5f);  // startle → snap awake
+        c.rest += ((wantSleep ? 1.0f : 0.0f) - c.rest) * std::min(wakeRate * dt, 1.0f);
+        bool asleep = c.rest > 0.5f;
+
         // Aquarium: languid and buoyant — slower top speed and much more coast, so
         // they glide and hover instead of scurrying.
         float envSpeed = _aquarium ? 0.60f : 1.0f;
         float velK     = _aquarium ? 2.6f  : 6.0f;    // lower = more glide/coast
-        simd_float2 wantVel = (simd_length(steer) > 1e-3f)
+        simd_float2 wantVel = (!asleep && simd_length(steer) > 1e-3f)
             ? simd_normalize(steer) * wantSpeed * ageSlow * actMul * gait * envSpeed : simd_make_float2(0,0);
-        c.vel += (wantVel - c.vel) * std::min(velK * dt, 1.0f);
+        c.vel += (wantVel - c.vel) * std::min((asleep ? 5.0f : velK) * dt, 1.0f);
         if (simd_length(c.vel) > 0.05f) c.heading = atan2f(c.vel.y, c.vel.x);
         c.pos += c.vel * dt;
-        if (_aquarium) {
+        if (_aquarium && !asleep) {
             // buoyant hover (a slow personal drift so they never truly freeze) plus
             // a gentle, slowly-swirling tank current the whole colony rides.
             float ib = (float)(c.id % 251);
@@ -2999,10 +3011,14 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // Hunkering / hiding pulls the body in low and tight against the ground.
         float tuck = (!corpse && c.action == AHunker) ? 0.88f : 1.0f;
         // Gait: footwork and a slight step-bounce scale with how fast it's actually
-        // moving, so it quickens on the run and stills at rest.
-        float mv = corpse ? 0.0f : std::clamp(simd_length(c.vel)/std::max(ph.speed,0.1f), 0.0f, 1.4f);
+        // moving, so it quickens on the run and stills at rest. Asleep → no gait,
+        // just a slow breathing swell.
+        bool asleep = !corpse && c.rest > 0.5f;
+        float mv = (corpse || asleep) ? 0.0f
+                 : std::clamp(simd_length(c.vel)/std::max(ph.speed,0.1f), 0.0f, 1.4f);
+        float breathe = asleep ? (1.0f + 0.03f * sinf(t * 0.8f + (float)(c.id%97))) : 1.0f;
         float bounce = 1.0f + 0.07f * mv * fabsf(sinf(c.phase));      // body swells a touch on each step
-        float S = ph.size * 0.85f * tuck * bounce;                    // body radius (membrane)
+        float S = ph.size * 0.85f * tuck * bounce * breathe;         // body radius (membrane)
         simd_float2 fwd = simd_make_float2(cosf(c.heading), sinf(c.heading));
         simd_float2 perp = simd_make_float2(-fwd.y, fwd.x);
         float seed = (float)(c.id % 97) * 0.7f;
@@ -3010,7 +3026,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
         // and aft along the body (planting and pushing), diagonal pairs opposite;
         // a smaller angle swing rides on top. Both near-zero at rest, growing with
         // speed, so a still critter's feet don't march in place.
-        float step   = sinf(c.phase);                               // raw gait signal
+        float step   = asleep ? 0.0f : sinf(c.phase);              // raw gait signal (still when asleep)
         float amp    = (0.08f + 0.50f * mv) * step;                 // fin angle swing
         float stride = (0.10f + 0.55f * mv) * S * step;             // fore/aft limb travel
         simd_float2 strideA = fwd * stride;                        // pair A (rear-L + front-R) forward
@@ -3057,14 +3073,24 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
               color:simd_make_float4(base*1.02f,A) p:simd_make_float4(seed+2.0f, t, 0,0)];
 
         if (!corpse) {
-            // Two low dark-navy glossy eyes up front (color = heritable iris tint).
-            // Pupils widen in low light — larger at dawn/dusk and through the night.
-            float er = (0.24f + ph.eyeSize*0.9f) * S * (1.0f + 0.32f * (1.0f - _daylight));
-            simd_float4 eyec = simd_make_float4(ph.eyeColor, A);
-            [self push:c.pos + fwd*0.60f*S + perp*0.40f*S half:simd_make_float2(er,er)
-                  rot:0 shape:17 color:eyec p:simd_make_float4(0,0,0,0)];
-            [self push:c.pos + fwd*0.60f*S - perp*0.40f*S half:simd_make_float2(er,er)
-                  rot:0 shape:17 color:eyec p:simd_make_float4(0,0,0,0)];
+            simd_float2 eL = c.pos + fwd*0.60f*S + perp*0.40f*S;
+            simd_float2 eR = c.pos + fwd*0.60f*S - perp*0.40f*S;
+            if (asleep) {
+                // Eyes shut: a slim dark closed lid across each eye.
+                float er = (0.24f + ph.eyeSize*0.9f) * S;
+                simd_float4 lid = simd_make_float4(0.05f, 0.06f, 0.12f, A);
+                [self push:eL half:simd_make_float2(er*0.30f, er*0.85f) rot:c.heading shape:4
+                      color:lid p:simd_make_float4(0,0,0,0)];
+                [self push:eR half:simd_make_float2(er*0.30f, er*0.85f) rot:c.heading shape:4
+                      color:lid p:simd_make_float4(0,0,0,0)];
+            } else {
+                // Two low dark-navy glossy eyes up front (color = heritable iris tint).
+                // Pupils widen in low light — larger at dawn/dusk and through the night.
+                float er = (0.24f + ph.eyeSize*0.9f) * S * (1.0f + 0.32f * (1.0f - _daylight));
+                simd_float4 eyec = simd_make_float4(ph.eyeColor, A);
+                [self push:eL half:simd_make_float2(er,er) rot:0 shape:17 color:eyec p:simd_make_float4(0,0,0,0)];
+                [self push:eR half:simd_make_float2(er,er) rot:0 shape:17 color:eyec p:simd_make_float4(0,0,0,0)];
+            }
             if (c.pregnant)
                 [self push:c.pos + simd_make_float2(0, S*0.95f) half:simd_make_float2(0.18f,0.18f)
                       rot:0 shape:7 color:simd_make_float4(1.0f,0.5f,0.7f,1) p:simd_make_float4(0,0,0,0)];
@@ -3182,7 +3208,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
     }
     const char *band = _climate < -0.33f ? "COLD" : (_climate > 0.33f ? "HOT" : "TEMPERATE");
     view.window.title = [NSString stringWithFormat:
-        @"09 — BIOME v34 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
+        @"09 — BIOME v35 (Bubble Burrower) ▸ prey %d (%dM/%dF) ▸ pred %d ▸ nests %d ▸ gen %d ▸ births %d deaths %d ▸ sick %d ▸ %s %+.2f ▸ x%.2g%s ▸ %.0f fps",
         living, males, females, (int)_predators.size(), (int)_nests.size(),
         _generation, _births, _deaths, sick, band, _climate, _timeScale, _paused ? " PAUSED" : "", _smoothedFPS];
 }
@@ -3362,7 +3388,7 @@ vertex EOut hud_vertex(uint vid [[vertex_id]], uint iid [[instance_id]],
 @end
 
 int main() {
-    return RunMetalApp(@"09 — BIOME v34 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
+    return RunMetalApp(@"09 — BIOME v35 (Bubble Burrower)", 1280, 1000, ^(MTKView *view) {
         return (NSObject<MTKViewDelegate> *)[[BiomeRenderer alloc] initWithView:view];
     });
 }
