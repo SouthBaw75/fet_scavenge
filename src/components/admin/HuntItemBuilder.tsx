@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { optimizeImage } from "@/lib/optimize-image";
 import { QrImage } from "./QrImage";
+import { HuntItemImport } from "./HuntItemImport";
 import type { HuntItem, HuntItemType } from "@/lib/types/hunt";
 
 const TYPE_BADGE_STYLES: Record<HuntItemType, string> = {
@@ -442,6 +443,11 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
       <h3 className="mt-6 border-t border-brand-navy/10 pt-6 font-semibold text-brand-navy">
         Items{items.length > 0 ? ` (${items.length})` : ""}
       </h3>
+
+      <div className="mt-4">
+        <HuntItemImport huntId={huntId} onImported={refresh} />
+      </div>
+
       <ul className="mt-4 flex flex-col gap-2">
         {items.map((item, i) => (
           <li
