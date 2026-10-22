@@ -39,10 +39,18 @@ export interface HuntItem {
   /** Optional photo shown above the prompt (e.g. "what is this?" with a picture). */
   image_url: string | null;
   points: number;
+  /** For multi-select multiple choice: how many correct options the family
+   *  must pick. NULL means single-select (pick one). */
+  required_correct: number | null;
 }
 
-/** What the public/team client is allowed to see for a hunt item (from `public_hunt_items`). */
-export type PublicHuntItem = Omit<HuntItem, "correct_answer" | "qr_value">;
+/** What the public/team client is allowed to see for a hunt item (from `public_hunt_items`).
+ *  correct_answer, qr_value, and required_correct are hidden; multi_select is a
+ *  derived flag telling the client to render checkboxes without revealing counts. */
+export type PublicHuntItem = Omit<
+  HuntItem,
+  "correct_answer" | "qr_value" | "required_correct"
+> & { multi_select: boolean };
 
 export interface Team {
   id: string;

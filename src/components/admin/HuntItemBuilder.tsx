@@ -62,6 +62,10 @@ const EMPTY_FORM = {
   prompt: "",
   choicesText: "",
   correct_answer: "",
+  // Multiple choice: which choices are marked correct, and how many the family
+  // must pick. requiredCorrect applies only when >1 choice is marked correct.
+  correctChoices: [] as string[],
+  requiredCorrect: 1,
   qr_value: "",
   reveal_message: "",
   image_url: "",
@@ -86,6 +90,7 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
   const [saving, setSaving] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   async function refresh() {
     const { data } = await supabase
@@ -107,6 +112,10 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
 
   function startEdit(item: HuntItem) {
     setEditingId(item.id);
+    const mcCorrect =
+      item.type === "multiple_choice"
+        ? (item.correct_answer ?? "").split("|").map((s) => s.trim()).filter(Boolean)
+        : [];
     setForm({
       type: item.type,
       prompt: item.prompt,
@@ -117,6 +126,9 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
         item.type === "text"
           ? (item.correct_answer ?? "").split("|").join(", ")
           : item.correct_answer ?? "",
+      correctChoices: mcCorrect,
+      // Stored required_correct, else default to "all marked correct".
+      requiredCorrect: item.required_correct ?? Math.max(mcCorrect.length, 1),
       qr_value: item.qr_value ?? "",
       reveal_message: item.reveal_message ?? "",
       image_url: item.image_url ?? "",
@@ -172,6 +184,12 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
 
   async function save() {
     if (!form.prompt.trim()) return;
+    // A multiple-choice item with no correct answer marked can't be graded.
+    if (form.type === "multiple_choice" && form.correctChoices.length === 0) {
+      setSaveError("Mark at least one correct answer for this question.");
+      return;
+    }
+    setSaveError(null);
     setSaving(true);
 
     const payload = {
@@ -196,7 +214,17 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
                 .map((s) => s.trim())
                 .filter(Boolean)
                 .join("|")
-            : form.correct_answer.trim(),
+            : // multiple_choice: the marked-correct choices, pipe-separated.
+              form.correctChoices.join("|"),
+      // Only multi-select MC (more than one correct) carries a threshold;
+      // single-correct stays NULL so it behaves as a normal one-tap question.
+      required_correct:
+        form.type === "multiple_choice" && form.correctChoices.length > 1
+          ? Math.min(
+              Math.max(form.requiredCorrect, 1),
+              form.correctChoices.length,
+            )
+          : null,
       qr_value: form.type === "qr" ? form.qr_value.trim() : null,
       reveal_message:
         (form.type === "qr" ||
@@ -387,22 +415,104 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
 
           {form.type === "multiple_choice" && (
             <>
-              <input
-                value={form.choicesText}
-                onChange={(e) =>
-                  setForm({ ...form, choicesText: e.target.value })
-                }
-                placeholder="Choices, comma separated"
-                className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
-              />
-              <input
-                value={form.correct_answer}
-                onChange={(e) =>
-                  setForm({ ...form, correct_answer: e.target.value })
-                }
-                placeholder="Correct choice (must match one exactly)"
-                className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
-              />
+              <div>
+                <label className="block text-xs font-semibold text-brand-navy/70">
+                  Choices — comma separated
+                </label>
+                <input
+                  value={form.choicesText}
+                  onChange={(e) => {
+                    const choices = e.target.value
+                      .split(",")
+                      .map((c) => c.trim())
+                      .filter(Boolean);
+                    // Keep only correct marks that still exist among choices.
+                    setForm((f) => ({
+                      ...f,
+                      choicesText: e.target.value,
+                      correctChoices: f.correctChoices.filter((c) =>
+                        choices.includes(c),
+                      ),
+                    }));
+                  }}
+                  placeholder="Oil & Gas, Retail, Gaming, Fast Food"
+                  className="mt-1 w-full rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
+                />
+              </div>
+
+              {(() => {
+                const choices = form.choicesText
+                  .split(",")
+                  .map((c) => c.trim())
+                  .filter(Boolean);
+                if (choices.length === 0) return null;
+                return (
+                  <div className="rounded-lg border border-brand-navy/15 bg-brand-cyan/[0.03] p-3">
+                    <label className="text-xs font-semibold text-brand-navy/70">
+                      Tick every correct answer
+                    </label>
+                    <div className="mt-2 flex flex-col gap-1.5">
+                      {choices.map((choice) => {
+                        const checked = form.correctChoices.includes(choice);
+                        return (
+                          <label
+                            key={choice}
+                            className="flex cursor-pointer items-center gap-2 text-sm text-brand-navy"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() =>
+                                setForm((f) => ({
+                                  ...f,
+                                  correctChoices: checked
+                                    ? f.correctChoices.filter(
+                                        (c) => c !== choice,
+                                      )
+                                    : [...f.correctChoices, choice],
+                                }))
+                              }
+                            />
+                            {choice}
+                          </label>
+                        );
+                      })}
+                    </div>
+
+                    {form.correctChoices.length > 1 && (
+                      <div className="mt-3 border-t border-brand-navy/10 pt-3">
+                        <label className="text-xs font-semibold text-brand-navy/70">
+                          How many must they pick to be correct?
+                        </label>
+                        <select
+                          value={form.requiredCorrect}
+                          onChange={(e) =>
+                            setForm({
+                              ...form,
+                              requiredCorrect: Number(e.target.value),
+                            })
+                          }
+                          className="mt-1 block rounded-lg border border-brand-navy/20 bg-white px-3 py-1.5 text-sm"
+                        >
+                          {Array.from(
+                            { length: form.correctChoices.length },
+                            (_, i) => i + 1,
+                          ).map((n) => (
+                            <option key={n} value={n}>
+                              {n} of {form.correctChoices.length} correct
+                            </option>
+                          ))}
+                        </select>
+                        <p className="mt-1 text-xs text-brand-navy/50">
+                          Players pick as many as they want. They&apos;re right
+                          if they get at least this many correct and tick no
+                          wrong answers.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               <div>
                 <label className="text-xs font-semibold text-brand-navy/70">
                   Comment shown with the answer (optional)
@@ -532,6 +642,12 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
               className="mt-1 block w-24 rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
             />
           </div>
+
+          {saveError && (
+            <p className="rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-600">
+              {saveError}
+            </p>
+          )}
 
           <div className="flex flex-wrap items-center gap-3">
             <button

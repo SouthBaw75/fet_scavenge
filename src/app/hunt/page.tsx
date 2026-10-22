@@ -27,6 +27,8 @@ export default function HuntPage() {
   const [items, setItems] = useState<PublicHuntItem[]>([]);
   const [answeredIds, setAnsweredIds] = useState<Set<string>>(new Set());
   const [textAnswer, setTextAnswer] = useState("");
+  // Checked options for a multi-select multiple-choice item.
+  const [selectedChoices, setSelectedChoices] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   // When a scanned QR stop has a reveal message, hold it here and pause on a
   // "You found it!" card until the team taps Continue.
@@ -151,6 +153,7 @@ export default function HuntPage() {
     } | null;
 
     setTextAnswer("");
+    setSelectedChoices([]);
     setSubmitting(false);
 
     // Open-response items are honor-system: any answer counts and there is no
@@ -382,34 +385,93 @@ export default function HuntPage() {
             {currentItem.prompt}
           </p>
 
-          {currentItem.type === "multiple_choice" && (
-            <div className="stagger-children mt-6 flex flex-col gap-3">
-              {(currentItem.choices ?? []).map((choice, idx) => (
-                <button
-                  key={choice}
-                  disabled={submitting}
-                  onClick={() => {
-                    playTap();
-                    submitAnswer(choice);
-                  }}
-                  className="btn-springy flex min-h-14 items-center gap-3 rounded-2xl border-2 border-brand-navy/15 bg-white px-4 py-3 text-left text-lg font-semibold text-brand-navy shadow-sm transition-colors hover:border-brand-cyan hover:bg-brand-cyan/10 disabled:opacity-40"
-                >
-                  <span
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-navy font-display text-base font-bold text-white"
-                    aria-hidden
+          {currentItem.type === "multiple_choice" &&
+            !currentItem.multi_select && (
+              <div className="stagger-children mt-6 flex flex-col gap-3">
+                {(currentItem.choices ?? []).map((choice, idx) => (
+                  <button
+                    key={choice}
+                    disabled={submitting}
+                    onClick={() => {
+                      playTap();
+                      submitAnswer(choice);
+                    }}
+                    className="btn-springy flex min-h-14 items-center gap-3 rounded-2xl border-2 border-brand-navy/15 bg-white px-4 py-3 text-left text-lg font-semibold text-brand-navy shadow-sm transition-colors hover:border-brand-cyan hover:bg-brand-cyan/10 disabled:opacity-40"
                   >
-                    {CHOICE_LETTERS[idx] ?? "?"}
+                    <span
+                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-navy font-display text-base font-bold text-white"
+                      aria-hidden
+                    >
+                      {CHOICE_LETTERS[idx] ?? "?"}
+                    </span>
+                    <span>{choice}</span>
+                  </button>
+                ))}
+                {submitting && (
+                  <p className="animate-pulse text-center font-display font-bold text-brand-green">
+                    Locking it in... 🔒
+                  </p>
+                )}
+              </div>
+            )}
+
+          {currentItem.type === "multiple_choice" &&
+            currentItem.multi_select && (
+              <div className="mt-6 flex flex-col gap-3">
+                <div className="flex items-center gap-2 rounded-2xl border-2 border-brand-cyan/30 bg-brand-cyan/[0.06] px-4 py-2.5">
+                  <span className="text-lg" aria-hidden>
+                    ✅
                   </span>
-                  <span>{choice}</span>
+                  <p className="font-display text-sm font-bold text-brand-navy">
+                    Select all that apply, then submit.
+                  </p>
+                </div>
+                <div className="stagger-children flex flex-col gap-3">
+                  {(currentItem.choices ?? []).map((choice, idx) => {
+                    const checked = selectedChoices.includes(choice);
+                    return (
+                      <button
+                        key={choice}
+                        disabled={submitting}
+                        aria-pressed={checked}
+                        onClick={() => {
+                          playTap();
+                          setSelectedChoices((prev) =>
+                            prev.includes(choice)
+                              ? prev.filter((c) => c !== choice)
+                              : [...prev, choice],
+                          );
+                        }}
+                        className={`btn-springy flex min-h-14 items-center gap-3 rounded-2xl border-2 px-4 py-3 text-left text-lg font-semibold shadow-sm transition-colors disabled:opacity-40 ${
+                          checked
+                            ? "border-brand-cyan bg-brand-cyan/15 text-brand-navy"
+                            : "border-brand-navy/15 bg-white text-brand-navy hover:border-brand-cyan hover:bg-brand-cyan/10"
+                        }`}
+                      >
+                        <span
+                          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border-2 font-display text-base font-bold ${
+                            checked
+                              ? "border-brand-cyan bg-brand-cyan text-white"
+                              : "border-brand-navy/25 bg-white text-brand-navy/40"
+                          }`}
+                          aria-hidden
+                        >
+                          {checked ? "✓" : (CHOICE_LETTERS[idx] ?? "?")}
+                        </span>
+                        <span>{choice}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  disabled={selectedChoices.length === 0 || submitting}
+                  onClick={() => submitAnswer(selectedChoices.join("|"))}
+                  className="btn-springy mt-1 h-14 rounded-full bg-brand-navy px-8 font-display text-lg font-bold text-white shadow-lg transition-colors hover:bg-brand-navy-light disabled:opacity-40"
+                >
+                  {submitting ? "Locking it in... 🔒" : "Submit 🚀"}
                 </button>
-              ))}
-              {submitting && (
-                <p className="animate-pulse text-center font-display font-bold text-brand-green">
-                  Locking it in... 🔒
-                </p>
-              )}
-            </div>
-          )}
+              </div>
+            )}
 
           {(currentItem.type === "text" || currentItem.type === "open") && (
             <form
