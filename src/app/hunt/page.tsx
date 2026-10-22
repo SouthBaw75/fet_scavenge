@@ -153,6 +153,20 @@ export default function HuntPage() {
     setTextAnswer("");
     setSubmitting(false);
 
+    // Open-response items are honor-system: any answer counts and there is no
+    // right/wrong. Always show the neutral "answer logged" card (its own
+    // message or a default), regardless of the instant-feedback setting.
+    if (currentItem.type === "open") {
+      burstConfetti();
+      setReveal({
+        message:
+          currentItem.reveal_message?.trim() ||
+          "Answer logged! 📝 On to the next one.",
+        itemId: currentItem.id,
+      });
+      return;
+    }
+
     // With instant feedback on, pause on a CORRECT!/INCORRECT card instead of
     // advancing straight away — the QR reveal (if any) still comes after.
     if (hunt?.settings.show_immediate_feedback && result) {
@@ -397,7 +411,7 @@ export default function HuntPage() {
             </div>
           )}
 
-          {currentItem.type === "text" && (
+          {(currentItem.type === "text" || currentItem.type === "open") && (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -417,7 +431,11 @@ export default function HuntPage() {
                 disabled={!textAnswer.trim() || submitting}
                 className="btn-springy h-14 rounded-full bg-brand-navy px-8 font-display text-lg font-bold text-white shadow-lg transition-colors hover:bg-brand-navy-light disabled:opacity-40"
               >
-                {submitting ? "Locking it in... 🔒" : "Submit 🚀"}
+                {submitting
+                  ? "Locking it in... 🔒"
+                  : currentItem.type === "open"
+                    ? "Submit Answer ✏️"
+                    : "Submit 🚀"}
               </button>
             </form>
           )}

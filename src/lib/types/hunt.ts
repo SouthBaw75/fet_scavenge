@@ -1,5 +1,5 @@
 export type HuntStatus = "draft" | "active" | "closed";
-export type HuntItemType = "multiple_choice" | "qr" | "text";
+export type HuntItemType = "multiple_choice" | "qr" | "text" | "open";
 
 export interface Employee {
   id: string;

@@ -24,7 +24,7 @@ interface ValidationError {
   message: string;
 }
 
-const VALID_TYPES: HuntItemType[] = ["multiple_choice", "text", "qr"];
+const VALID_TYPES: HuntItemType[] = ["multiple_choice", "text", "qr", "open"];
 
 function generateQrValue() {
   const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
@@ -160,9 +160,15 @@ export function HuntItemImport({
         row.type === "multiple_choice"
           ? [row.choice_a, row.choice_b, row.choice_c, row.choice_d].filter(Boolean)
           : null,
-      correct_answer: row.type === "qr" ? null : row.correct_answer ?? null,
+      correct_answer:
+        row.type === "qr" || row.type === "open"
+          ? null
+          : row.correct_answer ?? null,
       qr_value: row.type === "qr" ? (row.qr_value || generateQrValue()) : null,
-      reveal_message: row.type === "qr" ? (row.reveal_message ?? null) : null,
+      reveal_message:
+        row.type === "qr" || row.type === "open"
+          ? row.reveal_message ?? null
+          : null,
       image_url: null,
       points: row.points,
     }));
@@ -222,6 +228,12 @@ export function HuntItemImport({
         className="mt-4 text-sm file:mr-3 file:cursor-pointer file:rounded-full file:border-0 file:bg-brand-navy/5 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-brand-navy file:transition-colors hover:file:bg-brand-cyan/15"
       />
 
+      {fileName && (
+        <p className="mt-2 text-xs text-brand-navy/50">
+          Selected: <span className="font-medium text-brand-navy/70">{fileName}</span>
+        </p>
+      )}
+
       {errors.length > 0 && (
         <div className="animate-slide-up mt-4 rounded-lg bg-red-50 p-3">
           <p className="text-xs font-semibold text-red-700">
@@ -250,6 +262,7 @@ export function HuntItemImport({
                 <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${
                   row.type === "multiple_choice" ? "bg-brand-cyan/10 text-brand-cyan" :
                   row.type === "qr" ? "bg-brand-navy/10 text-brand-navy" :
+                  row.type === "open" ? "bg-amber-100 text-amber-700" :
                   "bg-brand-green/10 text-brand-green"
                 }`}>
                   {row.type.replace("_", " ")}

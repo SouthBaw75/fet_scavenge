@@ -11,6 +11,7 @@ const TYPE_BADGE_STYLES: Record<HuntItemType, string> = {
   multiple_choice: "bg-brand-cyan/10 text-brand-cyan",
   qr: "bg-brand-navy/10 text-brand-navy",
   text: "bg-brand-green/10 text-brand-green",
+  open: "bg-amber-100 text-amber-700",
 };
 
 const EMPTY_FORM = {
@@ -136,10 +137,15 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
               .map((c) => c.trim())
               .filter(Boolean)
           : null,
-      correct_answer: form.type === "qr" ? null : form.correct_answer.trim(),
+      correct_answer:
+        form.type === "qr" || form.type === "open"
+          ? null
+          : form.correct_answer.trim(),
       qr_value: form.type === "qr" ? form.qr_value.trim() : null,
       reveal_message:
-        (form.type === "qr" || form.type === "multiple_choice") &&
+        (form.type === "qr" ||
+          form.type === "multiple_choice" ||
+          form.type === "open") &&
         form.reveal_message.trim()
           ? form.reveal_message.trim()
           : null,
@@ -237,6 +243,7 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
             <option value="multiple_choice">Multiple Choice</option>
             <option value="qr">QR Scan</option>
             <option value="text">Typed Answer</option>
+            <option value="open">Open Response (any answer counts)</option>
           </select>
 
           <textarea
@@ -339,6 +346,29 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
               placeholder="Correct answer (case/whitespace insensitive)"
               className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
             />
+          )}
+
+          {form.type === "open" && (
+            <div className="rounded-lg border border-brand-navy/15 bg-brand-green/[0.04] p-3">
+              <p className="text-xs font-medium text-brand-navy/70">
+                Any answer the family types is accepted and counts toward their
+                progress. There&apos;s no right or wrong, and no points
+                advantage. Great for participation tasks like &quot;find
+                something blue&quot; or &quot;what would you make?&quot;
+              </p>
+              <label className="mt-3 block text-xs font-semibold text-brand-navy/70">
+                Message shown after they answer (optional)
+              </label>
+              <textarea
+                value={form.reveal_message}
+                onChange={(e) =>
+                  setForm({ ...form, reveal_message: e.target.value })
+                }
+                placeholder="Default: Answer logged! 📝 On to the next one."
+                rows={2}
+                className="mt-1 w-full rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
+              />
+            </div>
           )}
 
           {form.type === "qr" && (
