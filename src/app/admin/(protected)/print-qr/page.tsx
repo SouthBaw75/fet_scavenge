@@ -6,6 +6,20 @@ import { createClient } from "@/lib/supabase/client";
 import { QrImage } from "@/components/admin/QrImage";
 import type { Hunt, HuntItem } from "@/lib/types/hunt";
 
+type SizeKey = "small" | "medium" | "large" | "jumbo";
+
+// px at 96 DPI (≈ inches on paper), plus how many cards per row the grid uses
+// at that size. Jumbo is one big code per row for scanning from a distance.
+const SIZE_OPTIONS: Record<
+  SizeKey,
+  { label: string; px: number; cols: string }
+> = {
+  small: { label: 'Small (~1.8")', px: 170, cols: "sm:grid-cols-3" },
+  medium: { label: 'Medium (~2.9")', px: 280, cols: "sm:grid-cols-2" },
+  large: { label: 'Large (~4")', px: 384, cols: "sm:grid-cols-2" },
+  jumbo: { label: 'Jumbo (~6.25")', px: 600, cols: "sm:grid-cols-1" },
+};
+
 function PrintQrContent() {
   const supabase = createClient();
   const params = useSearchParams();
@@ -20,6 +34,9 @@ function PrintQrContent() {
   // the object itself never gives away the find. The value stays in the DB for
   // manual-entry fallback; it's just not printed.
   const [cleanTarget, setCleanTarget] = useState(false);
+  // Printed QR size. Values are px at 96 DPI, so ~px/96 inches on paper.
+  // small ~1.8", medium ~2.9" (default), large ~4", jumbo ~6.25" (1 per row).
+  const [size, setSize] = useState<SizeKey>("medium");
 
   useEffect(() => {
     if (!huntId) {
@@ -85,7 +102,21 @@ function PrintQrContent() {
             this page, then cut out and post each code at its station.
           </p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 text-sm font-medium text-brand-navy/70">
+            Code size
+            <select
+              value={size}
+              onChange={(e) => setSize(e.target.value as SizeKey)}
+              className="rounded-lg border border-brand-navy/20 bg-white px-2 py-1 text-sm"
+            >
+              {(Object.keys(SIZE_OPTIONS) as SizeKey[]).map((k) => (
+                <option key={k} value={k}>
+                  {SIZE_OPTIONS[k].label}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="flex items-center gap-2 text-sm font-medium text-brand-navy/70">
             <input
               type="checkbox"
@@ -116,8 +147,8 @@ function PrintQrContent() {
         </div>
       </div>
 
-      {/* Print grid — 2 cards per row, each card avoids breaking across pages */}
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+      {/* Print grid — columns depend on chosen size; cards avoid page breaks */}
+      <div className={`grid grid-cols-1 gap-6 ${SIZE_OPTIONS[size].cols}`}>
         {items.map((item, i) => (
           <div
             key={item.id}
@@ -134,7 +165,7 @@ function PrintQrContent() {
               </p>
             )}
             <div className="my-4">
-              <QrImage value={item.qr_value ?? ""} size={220} />
+              <QrImage value={item.qr_value ?? ""} size={SIZE_OPTIONS[size].px} />
             </div>
             {!cleanTarget && (
               <p className="font-mono text-xs text-brand-navy/40">
