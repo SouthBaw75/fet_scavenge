@@ -112,10 +112,10 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
       prompt: item.prompt,
       choicesText: (item.choices ?? []).join(", "),
       // Typed items may store several accepted answers pipe-separated; show
-      // them one per line for editing.
+      // them comma-separated for editing.
       correct_answer:
         item.type === "text"
-          ? (item.correct_answer ?? "").split("|").join("\n")
+          ? (item.correct_answer ?? "").split("|").join(", ")
           : item.correct_answer ?? "",
       qr_value: item.qr_value ?? "",
       reveal_message: item.reveal_message ?? "",
@@ -189,10 +189,10 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
         form.type === "qr" || form.type === "open"
           ? null
           : form.type === "text"
-            ? // Multiple accepted answers: one per line in the UI, stored
-              // pipe-separated. Blank lines dropped.
+            ? // Multiple accepted answers: comma-separated in the UI, stored
+              // pipe-separated. Blank entries dropped.
               form.correct_answer
-                .split("\n")
+                .split(",")
                 .map((s) => s.trim())
                 .filter(Boolean)
                 .join("|")
@@ -423,21 +423,19 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
           {form.type === "text" && (
             <div>
               <label className="block text-xs font-semibold text-brand-navy/70">
-                Accepted answers — one per line
+                Accepted answers — comma separated
               </label>
-              <textarea
+              <input
                 value={form.correct_answer}
                 onChange={(e) =>
                   setForm({ ...form, correct_answer: e.target.value })
                 }
-                placeholder={"Forum Energy Technologies\nFET"}
-                rows={3}
+                placeholder="Forum Energy Technologies, FET"
                 className="mt-1 w-full rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
               />
               <p className="mt-1 text-xs text-brand-navy/50">
                 Any one of these counts as correct. Caps and extra spaces are
-                ignored. Use separate lines for spellings or abbreviations (e.g.
-                &quot;FET&quot;).
+                ignored. List spellings or abbreviations (e.g. &quot;FET&quot;).
               </p>
             </div>
           )}
