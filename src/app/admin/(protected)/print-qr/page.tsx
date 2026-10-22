@@ -15,6 +15,11 @@ function PrintQrContent() {
   const [items, setItems] = useState<HuntItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [showQuestion, setShowQuestion] = useState(true);
+  // "Clean target" mode hides anything that could reveal which stop a code is
+  // for (the "Stop N" label and the readable code value), so a code taped on
+  // the object itself never gives away the find. The value stays in the DB for
+  // manual-entry fallback; it's just not printed.
+  const [cleanTarget, setCleanTarget] = useState(false);
 
   useEffect(() => {
     if (!huntId) {
@@ -84,7 +89,20 @@ function PrintQrContent() {
           <label className="flex items-center gap-2 text-sm font-medium text-brand-navy/70">
             <input
               type="checkbox"
-              checked={showQuestion}
+              checked={cleanTarget}
+              onChange={(e) => setCleanTarget(e.target.checked)}
+            />
+            Clean target (hide Stop # &amp; code — for codes posted on the object)
+          </label>
+          <label
+            className={`flex items-center gap-2 text-sm font-medium ${
+              cleanTarget ? "text-brand-navy/30" : "text-brand-navy/70"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={showQuestion && !cleanTarget}
+              disabled={cleanTarget}
               onChange={(e) => setShowQuestion(e.target.checked)}
             />
             Show question above each code
@@ -105,10 +123,12 @@ function PrintQrContent() {
             key={item.id}
             className="flex break-inside-avoid flex-col items-center rounded-2xl border-2 border-brand-navy/15 p-6 text-center"
           >
-            <p className="text-xs font-semibold uppercase tracking-wide text-brand-cyan">
-              Stop {i + 1}
-            </p>
-            {showQuestion && (
+            {!cleanTarget && (
+              <p className="text-xs font-semibold uppercase tracking-wide text-brand-cyan">
+                Stop {i + 1}
+              </p>
+            )}
+            {showQuestion && !cleanTarget && (
               <p className="mt-1 font-display text-lg font-bold text-brand-navy">
                 {item.prompt}
               </p>
@@ -116,9 +136,11 @@ function PrintQrContent() {
             <div className="my-4">
               <QrImage value={item.qr_value ?? ""} size={220} />
             </div>
-            <p className="font-mono text-xs text-brand-navy/40">
-              {item.qr_value}
-            </p>
+            {!cleanTarget && (
+              <p className="font-mono text-xs text-brand-navy/40">
+                {item.qr_value}
+              </p>
+            )}
             <div className="mt-3 flex items-center gap-2">
               {/* Small FET wordmark for a branded, official look */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
