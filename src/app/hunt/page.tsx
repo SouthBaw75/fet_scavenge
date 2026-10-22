@@ -374,7 +374,7 @@ export default function HuntPage() {
             <img
               src={currentItem.image_url}
               alt="Take a look and answer the question below"
-              className="mb-4 max-h-64 w-full rounded-2xl object-cover"
+              className="mb-4 max-h-80 w-full rounded-2xl bg-brand-navy/5 object-contain"
             />
           )}
 
