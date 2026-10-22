@@ -442,6 +442,14 @@ export default function HuntPage() {
 
           {currentItem.type === "qr" && (
             <div className="mt-6">
+              <div className="mb-4 flex items-center gap-3 rounded-2xl border-2 border-brand-navy/15 bg-brand-navy/[0.03] px-4 py-3">
+                <span className="text-2xl" aria-hidden>
+                  📷
+                </span>
+                <p className="font-display text-base font-bold text-brand-navy">
+                  QR code hunt! Find the QR code for this item.
+                </p>
+              </div>
               {/* key forces a fresh scanner per item so consecutive QR stops
                   never reuse a stale scanner instance */}
               <QrScannerView
