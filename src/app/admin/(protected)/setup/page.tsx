@@ -13,12 +13,13 @@ export default function AdminSetupPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="font-display text-3xl font-semibold text-brand-navy">
+      <div className="overflow-hidden rounded-2xl bg-gradient-to-r from-brand-navy to-brand-navy-light p-6 shadow-sm">
+        <h1 className="font-display text-3xl font-bold text-white">
           Hunt Setup
         </h1>
-        <p className="mt-1 text-sm text-brand-navy/60">
-          Build the employee list, create hunts, and craft the clues.
+        <p className="mt-1 text-sm text-white/70">
+          Build your employee list, create a hunt, and add the questions and
+          clues families will play.
         </p>
       </div>
 
@@ -53,7 +54,19 @@ export default function AdminSetupPage() {
             selectedHuntId={selectedHuntId}
             onSelectHunt={setSelectedHuntId}
           />
-          {selectedHuntId && <HuntItemBuilder huntId={selectedHuntId} />}
+          {selectedHuntId ? (
+            <HuntItemBuilder huntId={selectedHuntId} />
+          ) : (
+            <div className="rounded-2xl border-2 border-dashed border-brand-cyan/40 bg-brand-cyan/[0.04] px-6 py-10 text-center">
+              <p className="font-display text-lg font-bold text-brand-navy">
+                Pick a hunt above to add questions
+              </p>
+              <p className="mt-1 text-sm text-brand-navy/60">
+                Select a hunt (or create one) and its questions and clues show
+                up here.
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>

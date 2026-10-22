@@ -14,6 +14,49 @@ const TYPE_BADGE_STYLES: Record<HuntItemType, string> = {
   open: "bg-amber-100 text-amber-700",
 };
 
+// One source of truth for how each item type looks and reads across the
+// picker, the item list, and the colored edge. Keeps the four types visually
+// distinct so the admin can scan a hunt at a glance.
+const TYPE_META: Record<
+  HuntItemType,
+  { label: string; icon: string; blurb: string; edge: string; picker: string }
+> = {
+  multiple_choice: {
+    label: "Multiple Choice",
+    icon: "🔘",
+    blurb: "Tap A/B/C/D. One correct answer.",
+    edge: "border-l-brand-cyan",
+    picker:
+      "border-brand-cyan bg-brand-cyan/10 text-brand-navy ring-2 ring-brand-cyan/40",
+  },
+  text: {
+    label: "Typed Answer",
+    icon: "⌨️",
+    blurb: "Family types a specific correct answer.",
+    edge: "border-l-brand-green",
+    picker:
+      "border-brand-green bg-brand-green/10 text-brand-navy ring-2 ring-brand-green/40",
+  },
+  qr: {
+    label: "QR Scan",
+    icon: "📷",
+    blurb: "Scan a printed code posted at a spot.",
+    edge: "border-l-brand-navy",
+    picker:
+      "border-brand-navy bg-brand-navy/10 text-brand-navy ring-2 ring-brand-navy/30",
+  },
+  open: {
+    label: "Open Response",
+    icon: "✏️",
+    blurb: "Any answer counts. No right or wrong.",
+    edge: "border-l-amber-400",
+    picker:
+      "border-amber-400 bg-amber-100 text-amber-800 ring-2 ring-amber-300",
+  },
+};
+
+const TYPE_ORDER: HuntItemType[] = ["multiple_choice", "text", "qr", "open"];
+
 const EMPTY_FORM = {
   type: "multiple_choice" as HuntItemType,
   prompt: "",
@@ -219,32 +262,59 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
         )}
       </div>
 
-      <div className="mt-4 rounded-xl border border-brand-navy/15 bg-brand-navy/[0.02] p-4">
-        <h3 className="font-semibold text-brand-navy">
-          {editingId ? "Edit Item" : "Add Item"}
-        </h3>
-        <div className="mt-3 flex flex-col gap-3">
-          <select
-            value={form.type}
-            onChange={(e) => {
-              const type = e.target.value as HuntItemType;
-              // Give QR items a code up front so it's never blank.
-              setForm({
-                ...form,
-                type,
-                qr_value:
-                  type === "qr" && !form.qr_value
-                    ? generateQrValue()
-                    : form.qr_value,
-              });
-            }}
-            className="rounded-lg border border-brand-navy/20 bg-white px-3 py-2 text-sm"
-          >
-            <option value="multiple_choice">Multiple Choice</option>
-            <option value="qr">QR Scan</option>
-            <option value="text">Typed Answer</option>
-            <option value="open">Open Response (any answer counts)</option>
-          </select>
+      <div className="mt-4 overflow-hidden rounded-2xl border-2 border-brand-cyan/30 bg-white shadow-sm">
+        <div className="flex items-center gap-2 bg-gradient-to-r from-brand-navy to-brand-navy-light px-4 py-3">
+          <span className="text-lg" aria-hidden>
+            {editingId ? "✏️" : "➕"}
+          </span>
+          <h3 className="font-display text-base font-bold text-white">
+            {editingId ? "Edit Item" : "Add a New Item"}
+          </h3>
+        </div>
+        <div className="flex flex-col gap-3 p-4">
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-wide text-brand-navy/50">
+              Item type
+            </label>
+            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {TYPE_ORDER.map((t) => {
+                const meta = TYPE_META[t];
+                const selected = form.type === t;
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => {
+                      // Give QR items a code up front so it's never blank.
+                      setForm({
+                        ...form,
+                        type: t,
+                        qr_value:
+                          t === "qr" && !form.qr_value
+                            ? generateQrValue()
+                            : form.qr_value,
+                      });
+                    }}
+                    className={`btn-springy flex flex-col items-start gap-1 rounded-xl border-2 p-3 text-left transition-all ${
+                      selected
+                        ? meta.picker
+                        : "border-brand-navy/10 bg-white text-brand-navy/70 hover:border-brand-navy/25 hover:bg-brand-navy/[0.02]"
+                    }`}
+                  >
+                    <span className="text-xl" aria-hidden>
+                      {meta.icon}
+                    </span>
+                    <span className="text-sm font-bold leading-tight">
+                      {meta.label}
+                    </span>
+                    <span className="text-[11px] leading-snug opacity-70">
+                      {meta.blurb}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
           <textarea
             value={form.prompt}
@@ -445,13 +515,13 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
             <button
               onClick={save}
               disabled={!form.prompt.trim() || saving || uploadingImage}
-              className="btn-springy rounded-full bg-brand-navy px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-navy-light disabled:cursor-not-allowed disabled:opacity-40"
+              className="btn-springy rounded-full bg-brand-green px-6 py-2.5 text-sm font-bold text-white shadow-md transition-colors hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {saving
                 ? "Saving..."
                 : editingId
-                  ? "Save Changes"
-                  : "Add Item"}
+                  ? "💾 Save Changes"
+                  : "➕ Add Item to Hunt"}
             </button>
             {editingId && (
               <button
@@ -470,36 +540,46 @@ export function HuntItemBuilder({ huntId }: { huntId: string }) {
         </div>
       </div>
 
-      <h3 className="mt-6 border-t border-brand-navy/10 pt-6 font-semibold text-brand-navy">
-        Items{items.length > 0 ? ` (${items.length})` : ""}
-      </h3>
-
-      <div className="mt-4">
+      <div className="mt-6 border-t border-brand-navy/10 pt-6">
         <HuntItemImport huntId={huntId} onImported={refresh} />
       </div>
+
+      <h3 className="mt-6 flex items-center gap-2 font-display text-lg font-bold text-brand-navy">
+        <span className="h-5 w-1.5 rounded-full bg-brand-green" aria-hidden />
+        Items in this hunt{items.length > 0 ? ` (${items.length})` : ""}
+      </h3>
 
       <ul className="mt-4 flex flex-col gap-2">
         {items.map((item, i) => (
           <li
             key={item.id}
-            className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 transition-colors ${
+            className={`flex items-center justify-between gap-3 rounded-xl border border-l-4 bg-white px-4 py-3 shadow-sm transition-colors ${TYPE_META[item.type].edge} ${
               editingId === item.id
                 ? "border-brand-cyan bg-brand-cyan/5"
                 : "border-brand-navy/10 hover:bg-brand-navy/[0.02]"
             }`}
           >
-            <div>
-              <span
-                className={`inline-block rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${TYPE_BADGE_STYLES[item.type]}`}
-              >
-                {item.type.replace("_", " ")}
+            <div className="flex min-w-0 items-start gap-3">
+              <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-navy/5 font-display text-sm font-bold text-brand-navy/50">
+                {i + 1}
               </span>
-              {item.image_url && (
-                <span className="ml-1.5 inline-block rounded-full bg-brand-navy/5 px-2 py-0.5 text-xs font-semibold text-brand-navy/60">
-                  📷 photo
+              <div className="min-w-0">
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ${TYPE_BADGE_STYLES[item.type]}`}
+                >
+                  <span aria-hidden>{TYPE_META[item.type].icon}</span>
+                  {TYPE_META[item.type].label}
                 </span>
-              )}
-              <p className="mt-1 font-medium text-brand-navy">{item.prompt}</p>
+                <span className="ml-1.5 inline-block rounded-full bg-brand-navy/5 px-2 py-0.5 text-xs font-semibold text-brand-navy/60">
+                  {item.points} pt
+                </span>
+                {item.image_url && (
+                  <span className="ml-1.5 inline-block rounded-full bg-brand-navy/5 px-2 py-0.5 text-xs font-semibold text-brand-navy/60">
+                    📷 photo
+                  </span>
+                )}
+                <p className="mt-1 font-medium text-brand-navy">{item.prompt}</p>
+              </div>
             </div>
             <div className="flex items-center gap-2">
               <button
